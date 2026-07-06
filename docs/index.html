@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synapse · Verify Everything. Trust Nothing.</title>
+<meta name="description" content="Synapse is a governed control plane for software composition analysis, recon, evidence, and reporting. Deterministic-first, scope-gated, tamper-evident.">
+<meta property="og:title" content="Synapse · Verify Everything. Trust Nothing.">
+<meta property="og:description" content="A governed control plane for software composition analysis, recon, evidence, and reporting.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="warn-banner">
+  <b>Authorized use only.</b> Synapse is for authorized security testing. Every scan is gated by an engagement scope and authorization window, server-side.
+</div>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top">
+      <img class="logo-dark" src="assets/logo-full-white.png" alt="Synapse">
+      <img class="logo-light" src="assets/logo-full-black.png" alt="Synapse">
+    </a>
+    <div class="nav-links" id="navlinks">
+      <a href="#about">Overview</a>
+      <a href="#features">Features</a>
+      <a href="#screens">Screens</a>
+      <a href="#requirements">Requirements</a>
+      <a href="#setup">Setup</a>
+      <a href="#config">Configuration</a>
+      <a href="#cli">CLI</a>
+      <a href="#team">Team</a>
+    </div>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme" aria-label="Toggle theme">
+        <svg class="theme-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg class="theme-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
+      </button>
+      <a class="btn btn-primary" href="https://github.com/KKloudTarus/synapse-ce" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2A10 10 0 0 0 8.8 21.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .8.1-.6.3-1.1.6-1.4-2.2-.2-4.6-1.1-4.6-4.9 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.8-2.4 4.7-4.6 4.9.3.3.6.9.6 1.8v2.7c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>
+        <span class="btn-github-text">GitHub</span>
+      </a>
+      <button class="icon-btn nav-toggle" id="navtoggle" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="hero" id="top">
+  <div class="container">
+    <div class="hero-badge"><span class="dot"></span> Open source, Apache-2.0</div>
+    <img class="hero-logo logo-dark" src="assets/logo-full-white.png" alt="Synapse">
+    <img class="hero-logo logo-light" src="assets/logo-full-black.png" alt="Synapse">
+    <div class="tagline">Verify Everything. Trust Nothing.</div>
+    <p class="lead">A governed control plane for software composition analysis, recon, evidence, and reporting. Deterministic where it counts, bounded where it helps, provable end to end.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#setup">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+        Get started
+      </a>
+      <a class="btn btn-ghost" href="#screens">See it in action</a>
+    </div>
+    <div class="hero-stats">
+      <div class="stat"><div class="n">15+</div><div class="l">package ecosystems</div></div>
+      <div class="stat"><div class="n">3</div><div class="l">detection sources</div></div>
+      <div class="stat"><div class="n">100%</div><div class="l">deterministic reports</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">secrets in logs</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ABOUT -->
+<section id="about">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">What is Synapse</span>
+      <h2>Run the security lifecycle behind one governed control plane</h2>
+      <p>Synapse turns a fragmented, manual security process into a controlled, auditable workflow: software composition analysis, recon, evidence capture, findings, and reporting. Scanning, matching, license classification, and reporting are pure, reproducible Go with nothing else in the path. Where automated analysis is offered it stays strictly bounded: a proposal is only ever proposed, a typed Go state machine validates and executes, and a human approves anything intrusive.</p>
+    </div>
+    <div class="pills">
+      <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg> Deterministic-first</span>
+      <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg> Scope-gated execution</span>
+      <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg> Tamper-evident custody</span>
+      <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg> Templated reports</span>
+      <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/></svg> Standards-based</span>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features" class="section-alt">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Features</span>
+      <h2>Everything a consultancy needs to scan, prove, and report</h2>
+      <p>Built as clean-architecture Go with a strict dependency rule. Every capability sits behind a port, so tools, storage, and providers are swappable.</p>
+    </div>
+    <div class="grid grid-3">
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg></div><h3>SBOM generation</h3><p>Fifteen-plus ecosystems (npm, PyPI, Maven, Gradle, Go, Cargo, RubyGems, Composer, NuGet, Hex, Dart and more) with owned per-ecosystem lockfile parsers and a pluggable producer.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 8 4v6c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6Z"/><path d="M12 8v4m0 4h.01"/></svg></div><h3>Multi-source detection</h3><p>A live advisory API and an offline database, cross-correlated and de-duplicated, plus an owned advisory store that ingests OSV, GHSA and CSAF feeds for detection independence.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m7 14 4-4 3 3 5-6"/></svg></div><h3>Risk-based priority</h3><p>Findings are ordered by exploitability (known-exploited catalog, then exploit-prediction score, then CVSS), never by raw CVSS alone.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg></div><h3>License compliance</h3><p>Declared-license resolution, SPDX expression parsing (AND, OR, WITH), a curated category and risk model, and coordinate recovery for shaded or metadata-less JARs.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M5 8v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M12 13v3"/></svg></div><h3>Reachability</h3><p>A deterministic call-graph engine decides whether a vulnerable symbol is actually reachable from application code, so a finding on unused code can be de-prioritized.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg></div><h3>Tamper-evident evidence</h3><p>Every artifact is hash-chained. A broken chain blocks the report. Audit and evidence logs are append-only and can be anchored with an RFC-3161 timestamp.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m8 9 3 3-3 3M13 15h3"/></svg></div><h3>Hardened execution</h3><p>Heavy tools are shelled out via argv arrays, never a shell string, inside a Linux sandbox with egress scoping. Scope and the authorization window are enforced before any tool runs.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><h3>RBAC and tenancy</h3><p>Per-action role-based access control and tenant isolation flow through a single authorization chokepoint. Secrets stay server-side in a credential vault.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v12H5.2L4 17.5Z"/><path d="M8 8h8M8 12h5"/></svg></div><h3>Standards native</h3><p>CycloneDX and SPDX with PURL, SARIF, OpenVEX and CSAF, plus KEV and EPSS. Import a client SBOM as the scan inventory, export the results in the format they expect.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/><circle cx="12" cy="12" r="9"/></svg></div><h3>Bounded AI analysis</h3><p>An optional analysis layer proposes reachability, critique, threat and write-up drafts. Every claim goes through propose, verify, confirm, gated by a distinct verifier or a human. No model ever sits in the report path.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- SCREENS -->
+<section id="screens">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Product tour</span>
+      <h2>A dark-mode-first workspace built for evidence</h2>
+      <p>Every screen below is the current build. Tables virtualize past fifty rows, and loading, empty and error states are handled throughout.</p>
+    </div>
+
+    <div class="frame">
+      <div class="bar"><i></i><i></i><i></i><span class="u">localhost:5173 / engagements</span></div>
+      <img src="assets/shots/dashboard.webp" alt="Synapse engagements dashboard" loading="lazy">
+    </div>
+    <p class="cap">Engagements overview: every scan is gated by a scope and an authorization window, enforced server-side.</p>
+
+    <div class="shot-group">
+      <h3><span class="n">01</span> Onboarding and access</h3>
+      <p>Token login with no anonymous access, and a first-run Acceptable Use Policy gate the operator must accept.</p>
+      <div class="shot-2">
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">/login</span></div><img src="assets/shots/login.webp" alt="Login" loading="lazy"></div></div>
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">/aup</span></div><img src="assets/shots/accept-use-policy.webp" alt="Acceptable Use Policy" loading="lazy"></div></div>
+      </div>
+    </div>
+
+    <div class="shot-group">
+      <h3><span class="n">02</span> Create and drive an engagement</h3>
+      <p>Define an authorized scope and window, then work the engagement: inventory, findings, evidence, and reports in one place.</p>
+      <div class="shot-2">
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">new engagement</span></div><img src="assets/shots/create-engagements.webp" alt="Create engagement" loading="lazy"></div></div>
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">engagement detail</span></div><img src="assets/shots/engagements-detail.webp" alt="Engagement detail" loading="lazy"></div></div>
+      </div>
+    </div>
+
+    <div class="shot-group">
+      <h3><span class="n">03</span> Vulnerabilities and findings</h3>
+      <p>Vulnerabilities ranked by real risk, promoted into findings you can triage as a table or a board.</p>
+      <div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">vulnerabilities</span></div><img src="assets/shots/engagements-vuln.webp" alt="Vulnerabilities" loading="lazy"></div>
+      <div class="shot-2" style="margin-top:20px">
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">findings table</span></div><img src="assets/shots/engagements-finding-table.webp" alt="Findings table" loading="lazy"></div></div>
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">findings board</span></div><img src="assets/shots/engagements-finding-board.webp" alt="Findings board" loading="lazy"></div></div>
+      </div>
+    </div>
+
+    <div class="shot-group">
+      <h3><span class="n">04</span> SBOM, licenses and the dependency graph</h3>
+      <p>The full component inventory, license posture with SPDX categories, and the resolved dependency graph.</p>
+      <div class="shot-2">
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">packages</span></div><img src="assets/shots/engagements-packages.webp" alt="Packages" loading="lazy"></div></div>
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">licenses</span></div><img src="assets/shots/engagements-licenses.webp" alt="Licenses" loading="lazy"></div></div>
+      </div>
+      <div class="frame" style="margin-top:20px"><div class="bar"><i></i><i></i><i></i><span class="u">dependency graph</span></div><img src="assets/shots/engagements-graph.webp" alt="Dependency graph" loading="lazy"></div>
+    </div>
+
+    <div class="shot-group">
+      <h3><span class="n">05</span> AI analysis, evidence and audit</h3>
+      <p>The bounded agent proposes, a human approves. Evidence is hash-chained, and every action lands in an append-only audit log.</p>
+      <div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">AI agent</span></div><img src="assets/shots/engagements-ai-agent.webp" alt="AI agent" loading="lazy"></div>
+      <div class="shot-2" style="margin-top:20px">
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">evidence chain</span></div><img src="assets/shots/engagements-evidence.webp" alt="Evidence chain" loading="lazy"></div></div>
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">audit log</span></div><img src="assets/shots/audit-log.webp" alt="Audit log" loading="lazy"></div></div>
+      </div>
+    </div>
+
+    <div class="shot-group">
+      <h3><span class="n">06</span> Team and settings</h3>
+      <p>Role-based team management and per-engagement settings.</p>
+      <div class="shot-2">
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">team</span></div><img src="assets/shots/team.webp" alt="Team" loading="lazy"></div></div>
+        <div><div class="frame"><div class="bar"><i></i><i></i><i></i><span class="u">settings</span></div><img src="assets/shots/engagements-settings.webp" alt="Settings" loading="lazy"></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- REQUIREMENTS -->
+<section id="requirements" class="section-alt">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Requirements</span>
+      <h2>What you need to run it</h2>
+      <p>The API, SCA, findings and reports run on any OS for development. The hardened sandbox, live recon and egress scoping need a Linux host.</p>
+    </div>
+    <div class="req-grid">
+      <div class="req-item"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v12H4z"/><path d="M2 20h20"/></svg></div><div><h4>Go 1.26</h4><p>Pinned in go.mod. Builds cgo-free, so the container image is distroless.</p></div></div>
+      <div class="req-item"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 7l9-4 9 4M3 7v10l9 4 9-4V7"/></svg></div><div><h4>Node and pnpm</h4><p>For the web dashboard. Use pnpm, not npm or yarn.</p></div></div>
+      <div class="req-item"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg></div><div><h4>Syft and Grype</h4><p>Syft is required for any scan. Grype is optional and adds the offline database. <code>make tools</code> installs both, pinned and checksum-verified.</p></div></div>
+      <div class="req-item"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 7h4v4H7zM13 13h4v4h-4z"/></svg></div><div><h4>PostgreSQL and S3 (optional)</h4><p>For durable persistence and evidence artifacts. A blank DSN runs an in-memory dev store.</p></div></div>
+      <div class="req-item"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12H2m20 0-4-8H6L2 12m20 0v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6"/></svg></div><div><h4>Docker (optional)</h4><p>The easiest way to run the full stack, and the simplest path to a complete run on any OS.</p></div></div>
+      <div class="req-item"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v12a3 3 0 0 0 3 3h6M6 3a3 3 0 0 0 0 6h12"/></svg></div><div><h4>Linux host (for the sandbox)</h4><p>bubblewrap, seccomp, cgroups and network namespaces. Without them, sandboxed execution fails closed rather than running unsandboxed.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- SETUP -->
+<section id="setup">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Install and setup</span>
+      <h2>From clone to a running dashboard</h2>
+      <p>Pick the path that fits: run the full stack with Docker, or build and run it natively.</p>
+    </div>
+    <div class="split">
+      <div class="steps">
+        <div class="step"><div class="num"></div><div><h4>Clone the repository</h4><p>Grab the source and change into it.</p></div></div>
+        <div class="step"><div class="num"></div><div><h4>Install dependencies and tools</h4><p><code>make install</code> pulls Go modules and web deps. <code>make tools</code> installs Syft and Grype into <code>./bin</code>.</p></div></div>
+        <div class="step"><div class="num"></div><div><h4>Set the one required variable</h4><p><code>SYNAPSE_API_TOKEN</code> is mandatory. The server refuses to start without it. There is no anonymous access.</p></div></div>
+        <div class="step"><div class="num"></div><div><h4>Run the API and dashboard</h4><p><code>make dev</code> starts the API on :8080 and the dashboard on :5173. Open the dashboard, paste the token, accept the AUP.</p></div></div>
+      </div>
+      <div>
+        <div class="codeblock">
+          <div class="lbl">Docker, full stack</div>
+          <pre><span class="c"># Postgres, object store, API (syft + grype bundled), dashboard</span>
+docker compose -f deploy/docker-compose.full.yml up --build
+
+<span class="c"># then open</span>
+<span class="k">open</span> http://localhost:5173</pre>
+        </div>
+        <div class="codeblock" style="margin-top:20px">
+          <div class="lbl">Native, development</div>
+          <pre><span class="k">make</span> install
+<span class="k">make</span> tools
+<span class="k">export</span> PATH=<span class="s">"$PWD/bin:$PATH"</span>
+
+<span class="k">export</span> SYNAPSE_API_TOKEN=<span class="s">"$(openssl rand -hex 32)"</span>
+<span class="c"># blank DB DSN runs an in-memory dev store</span>
+<span class="k">make</span> dev</pre>
+        </div>
+      </div>
+    </div>
+    <div class="callout">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+      <p>Migrations are embedded in the binary and applied automatically at startup. There is no separate migrate step. A blank <code>SYNAPSE_DB_DSN</code> runs fully in memory, so nothing is persisted.</p>
+    </div>
+  </div>
+</section>
+
+<!-- CONFIG -->
+<section id="config" class="section-alt">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Configuration</span>
+      <h2>Everything is an environment variable</h2>
+      <p>Synapse reads the process environment directly. Copy <code>.env.example</code> and adjust. Empty means unset, so the built-in default applies. Booleans accept 1/0/true/false, durations use Go syntax (30s, 10m, 1h).</p>
+    </div>
+
+    <div class="cfg-cat">Required <span class="req">Server exits without it</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_API_TOKEN</code></td><td><span class="def">(none)</span></td><td>Bootstrap-admin bearer token. The API exits if empty. Generate with <code>openssl rand -hex 32</code>.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">Core and server</div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_HTTP_ADDR</code></td><td><span class="def">:8080</span></td><td>Listen address.</td></tr>
+      <tr><td><code>SYNAPSE_ENV</code></td><td><span class="def">development</span></td><td>Non-prod values: development, dev, local, test, ci. Any other value is treated as production and turns on the strict, fail-closed gates.</td></tr>
+      <tr><td><code>SYNAPSE_LOG_LEVEL</code></td><td><span class="def">info</span></td><td>Log verbosity.</td></tr>
+      <tr><td><code>SYNAPSE_AUP_VERSION</code></td><td><span class="def">1.0</span></td><td>Acceptable Use Policy version the operator must accept on first run.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">Persistence and storage</div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_DB_DSN</code></td><td><span class="def">(in-memory)</span></td><td>PostgreSQL connection URL. Empty runs an in-memory dev store, so nothing is durable.</td></tr>
+      <tr><td><code>SYNAPSE_BLOB_ENDPOINT</code></td><td><span class="def">(in-memory)</span></td><td>S3 or MinIO endpoint as host:port. Empty runs an in-memory blob store. Pairs with <code>SYNAPSE_BLOB_ACCESS_KEY</code>, <code>SYNAPSE_BLOB_SECRET_KEY</code>, <code>SYNAPSE_BLOB_BUCKET</code>.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">Custody and signing <span class="req">Required in production</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_VAULT_MASTER_KEY</code></td><td><span class="def">(ephemeral)</span></td><td>AES-256 credential-vault master key. Empty uses an ephemeral dev key, so stored secrets do not survive a restart. Never logged.</td></tr>
+      <tr><td><code>SYNAPSE_EVIDENCE_SIGNING_SEED</code></td><td><span class="def">(ephemeral)</span></td><td>ed25519 seed attesting evidence and audit chain heads. Never logged.</td></tr>
+      <tr><td><code>SYNAPSE_TSA_URL</code></td><td><span class="def">(none)</span></td><td>RFC-3161 timestamp authority for external anchoring. Empty leaves the chain signed but not anchored, still tamper-evident.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">Software composition analysis</div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_SBOM_PRODUCER</code></td><td><span class="def">syft</span></td><td>syft (pinned binary, full coverage, dep-graph edges) or ownsbom (detection-independent owned parsers, components only).</td></tr>
+      <tr><td><code>SYNAPSE_GRYPE_DB_DIR</code></td><td><span class="def">(online)</span></td><td>Pin Grype's vuln database to a pre-synced directory for offline, reproducible scans.</td></tr>
+      <tr><td><code>SYNAPSE_FINDING_MIN_SEVERITY</code></td><td><span class="def">high</span></td><td>Lowest severity promoted to a finding: critical, high, medium, low, info.</td></tr>
+      <tr><td><code>SYNAPSE_SCAN_TIMEOUT</code></td><td><span class="def">10m</span></td><td>Per-scan timeout. 0 disables.</td></tr>
+      <tr><td><code>SYNAPSE_OWNED_ADVISORY</code></td><td><span class="def">false</span></td><td>Match the SBOM against the owned advisory store, alongside the live and offline sources. Populate it first with <code>synapse-cli sync-advisories</code>.</td></tr>
+      <tr><td><code>SYNAPSE_JARHASH_ONLINE_ENABLED</code></td><td><span class="def">false</span></td><td>Recover the coordinate of a shaded or metadata-less JAR by its SHA-1, so its vulnerabilities are attributed.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">Recon and execution sandbox <span class="req">Sandbox required in production</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_SANDBOX_ENABLED</code></td><td><span class="def">false</span></td><td>Run tool execution inside the bubblewrap sandbox. If set but bubblewrap is missing, startup fails closed and never runs unsandboxed.</td></tr>
+      <tr><td><code>SYNAPSE_TOOL_HASHES</code></td><td><span class="def">(TOFU)</span></td><td>Authoritative sha256 pins. The sandbox refuses a binary whose hash does not match.</td></tr>
+      <tr><td><code>SYNAPSE_RECON_VIA_WORKER</code></td><td><span class="def">false</span></td><td>Route recon through the durable queue to synapse-worker. Requires PostgreSQL.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">AI agent orchestration <span class="req">Off by default</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_AGENT_ENABLED</code></td><td><span class="def">false</span></td><td>Turn on the agent orchestrator.</td></tr>
+      <tr><td><code>SYNAPSE_LLM_BASE_URL</code></td><td><span class="def">(none)</span></td><td>OpenAI-compatible Chat Completions endpoint. Pairs with <code>SYNAPSE_LLM_API_KEY</code> (never logged) and <code>SYNAPSE_LLM_MODEL</code> (required when the agent is enabled).</td></tr>
+      <tr><td><code>SYNAPSE_AGENT_APPROVAL_MODE</code></td><td><span class="def">manual</span></td><td>Human-in-the-loop approval: manual (a human approves every action), filter, or auto.</td></tr>
+      <tr><td><code>SYNAPSE_AGENT_MAX_STEPS</code></td><td><span class="def">16</span></td><td>Per-run bound on agent steps. See also token budget and max duration.</td></tr>
+    </table></div>
+
+    <div class="cfg-cat">AI analysis brain <span class="req">Opt-in, best-effort</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>SYNAPSE_JUDGMENTS_ENABLED</code></td><td><span class="def">false</span></td><td>Judgment lifecycle routes (verify, accept, list). Prerequisite for the analyzers below.</td></tr>
+      <tr><td><code>SYNAPSE_SAST_ENABLED</code></td><td><span class="def">false</span></td><td>Pattern SAST in the scan pipeline: weak crypto, hardcoded secrets, insecure config.</td></tr>
+      <tr><td><code>SYNAPSE_REACHABILITY_ENABLED</code></td><td><span class="def">false</span></td><td>Call-graph reachability proof. A deterministic proof overrides an LLM opinion.</td></tr>
+      <tr><td><code>SYNAPSE_CROSSCHECK_ENABLED</code></td><td><span class="def">false</span></td><td>Detection-source disagreement judgments, human-reviewed.</td></tr>
+      <tr><td><code>SYNAPSE_WRITEUP_DRAFTS_ENABLED</code></td><td><span class="def">false</span></td><td>Agent proposes finding write-up prose. A distinct human signs off.</td></tr>
+    </table></div>
+
+    <div class="callout">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+      <p>This is the working set. The full reference, including connection-pool sizing, recon bounds, MCP server variables and feed overrides, lives in <code>.env.example</code> with an inline note on every option.</p>
+    </div>
+  </div>
+</section>
+
+<!-- CLI -->
+<section id="cli">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Command line</span>
+      <h2>Gate your CI on real risk</h2>
+      <p>synapse-cli runs the same pipeline as the server. It creates an ephemeral, scope-checked engagement, so scope enforcement is exercised, not bypassed. Nothing is persisted.</p>
+    </div>
+    <div class="split">
+      <div>
+        <div class="codeblock">
+          <div class="lbl">Scan a project, fail the build</div>
+          <pre><span class="c"># exit non-zero on any high-or-critical vuln</span>
+./bin/synapse-cli scan . --fail-on high
+
+<span class="c"># licenses only</span>
+./bin/synapse-cli scan . --mode licenses
+
+<span class="c"># scan a container image, offline</span>
+./bin/synapse-cli scan alpine:3.19 --image --offline</pre>
+        </div>
+      </div>
+      <div>
+        <div class="codeblock">
+          <div class="lbl">GitHub Actions</div>
+          <pre><span class="k">- name:</span> SCA scan
+  <span class="k">run:</span> |
+    make tools
+    make build
+    ./bin/synapse-cli scan . --fail-on high</pre>
+        </div>
+        <div class="callout" style="margin-top:20px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+          <p>Exit code is 0 when no finding meets the threshold, non-zero otherwise. Wire it straight into a pipeline step.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture" class="section-alt">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">Architecture</span>
+      <h2>Clean architecture, dependencies point inward</h2>
+      <p>All external I/O (database, tools, storage, sandbox) goes through ports, which are interfaces in the usecase layer. The composition root wires them in main, with no business logic.</p>
+    </div>
+    <div class="arch-flow">
+      <span class="node">domain</span><span class="arrow">&larr;</span>
+      <span class="node">usecase</span><span class="arrow">&larr;</span>
+      <span class="node">adapter / infrastructure</span>
+    </div>
+    <div class="grid grid-2">
+      <div class="table-wrap"><table>
+        <tr><th>Binary</th><th>Role</th></tr>
+        <tr><td><code>synapse-api</code></td><td>HTTP API server, the primary service.</td></tr>
+        <tr><td><code>synapse-cli</code></td><td>Run an SCA scan from the command line, CI-friendly.</td></tr>
+        <tr><td><code>synapse-worker</code></td><td>Durable job runner for recon and background jobs, lease-based.</td></tr>
+        <tr><td><code>synapse-callgraph</code></td><td>Sandboxed call-graph builder for reachability analysis.</td></tr>
+        <tr><td><code>synapse-mcp</code></td><td>Read-only, propose-only integration server. Never executes.</td></tr>
+      </table></div>
+      <div class="table-wrap"><table>
+        <tr><th>Layer</th><th>May import</th></tr>
+        <tr><td><code>internal/domain</code></td><td>Only domain and the standard library.</td></tr>
+        <tr><td><code>internal/usecase</code></td><td>domain and the ports it defines.</td></tr>
+        <tr><td><code>internal/adapter</code></td><td>usecase and domain.</td></tr>
+        <tr><td><code>internal/infrastructure</code></td><td>Implements the ports (DB, tools, storage).</td></tr>
+        <tr><td><code>internal/platform</code></td><td>Cross-cutting helpers (config, ids, logging).</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<!-- TEAM -->
+<section id="team">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">The team</span>
+      <h2>Built by the founding contributors</h2>
+      <p>Synapse started as a small team effort. The engineers who shaped the platform and the designer behind its brand identity.</p>
+    </div>
+    <div class="contrib-grid">
+      <div class="contrib">
+        <div class="av" data-initials="ND"><img src="https://github.com/nghiadaulau.png?size=160" alt="nghiadaulau" loading="lazy" onerror="this.style.display='none'"></div>
+        <div class="name">nghiadaulau</div>
+        <div class="role">Engineer</div>
+        <a class="gh" href="https://github.com/nghiadaulau" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2A10 10 0 0 0 8.8 21.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .8.1-.6.3-1.1.6-1.4-2.2-.2-4.6-1.1-4.6-4.9 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.8-2.4 4.7-4.6 4.9.3.3.6.9.6 1.8v2.7c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>nghiadaulau</a>
+        <div><span class="tag tag-eng">Engineering</span></div>
+      </div>
+      <div class="contrib">
+        <div class="av" data-initials="NT"><img src="https://github.com/nnatuan03.png?size=160" alt="nnatuan03" loading="lazy" onerror="this.style.display='none'"></div>
+        <div class="name">nnatuan03</div>
+        <div class="role">Engineer</div>
+        <a class="gh" href="https://github.com/nnatuan03" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2A10 10 0 0 0 8.8 21.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .8.1-.6.3-1.1.6-1.4-2.2-.2-4.6-1.1-4.6-4.9 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.8-2.4 4.7-4.6 4.9.3.3.6.9.6 1.8v2.7c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>nnatuan03</a>
+        <div><span class="tag tag-eng">Engineering</span></div>
+      </div>
+      <div class="contrib">
+        <div class="av" data-initials="LS"><img src="https://github.com/lethanhsang188.png?size=160" alt="lethanhsang188" loading="lazy" onerror="this.style.display='none'"></div>
+        <div class="name">lethanhsang188</div>
+        <div class="role">Engineer</div>
+        <a class="gh" href="https://github.com/lethanhsang188" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2A10 10 0 0 0 8.8 21.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .8.1-.6.3-1.1.6-1.4-2.2-.2-4.6-1.1-4.6-4.9 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.8-2.4 4.7-4.6 4.9.3.3.6.9.6 1.8v2.7c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>lethanhsang188</a>
+        <div><span class="tag tag-eng">Engineering</span></div>
+      </div>
+      <div class="contrib">
+        <div class="av" data-initials="TN"><img src="https://github.com/tuu-ngo.png?size=160" alt="tuu-ngo" loading="lazy" onerror="this.style.display='none'"></div>
+        <div class="name">tuu-ngo</div>
+        <div class="role">Brand identity designer</div>
+        <a class="gh" href="https://github.com/tuu-ngo" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2A10 10 0 0 0 8.8 21.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .8.1-.6.3-1.1.6-1.4-2.2-.2-4.6-1.1-4.6-4.9 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.8-2.4 4.7-4.6 4.9.3.3.6.9.6 1.8v2.7c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>tuu-ngo</a>
+        <div><span class="tag tag-design">Design</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-top">
+      <div>
+        <img class="logo-dark" src="assets/logo-full-white.png" alt="Synapse">
+        <img class="logo-light" src="assets/logo-full-black.png" alt="Synapse">
+        <p>Verify Everything. Trust Nothing. A governed control plane for software composition analysis, recon, evidence, and reporting.</p>
+      </div>
+      <div class="footer-links">
+        <div class="footer-col">
+          <h5>Docs</h5>
+          <a href="#about">Overview</a>
+          <a href="#features">Features</a>
+          <a href="#setup">Setup</a>
+          <a href="#config">Configuration</a>
+          <a href="#cli">CLI</a>
+        </div>
+        <div class="footer-col">
+          <h5>Project</h5>
+          <a href="https://github.com/KKloudTarus/synapse-ce" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/KKloudTarus/synapse-ce/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+          <a href="https://github.com/KKloudTarus/synapse-ce/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy</a>
+          <a href="https://github.com/KKloudTarus/synapse-ce/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>Licensed under Apache-2.0.</span>
+      <span>For authorized security testing only.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var saved = null;
+    try { saved = localStorage.getItem("synapse-theme"); } catch (e) {}
+    if (saved) root.setAttribute("data-theme", saved);
+    document.getElementById("theme").addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("synapse-theme", next); } catch (e) {}
+    });
+    var toggle = document.getElementById("navtoggle");
+    var links = document.getElementById("navlinks");
+    toggle.addEventListener("click", function () { links.classList.toggle("open"); });
+    links.addEventListener("click", function (e) { if (e.target.tagName === "A") links.classList.remove("open"); });
+  })();
+</script>
+</body>
+</html>
