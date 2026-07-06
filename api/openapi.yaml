@@ -1,0 +1,382 @@
+openapi: 3.1.0
+info:
+  title: Synapse API
+  version: 0.1.0
+  description: >
+    Security & pentest operations — software composition analysis core.
+    Authorized security testing only: every scan is gated by an engagement's
+    scope and authorization window, enforced server-side.
+
+    Auth: all endpoints except `/healthz` require a bearer token
+    (`Authorization: Bearer <SYNAPSE_API_TOKEN>`). After authentication, every
+    endpoint except the AUP endpoints also requires that the current Acceptable
+    Use Policy has been accepted, else `403`.
+
+    Note: request bodies are snake_case; response objects are serialized from the
+    Go domain structs and therefore use PascalCase property names.
+
+servers:
+  - url: http://localhost:8080
+    description: Local API
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+  - name: aup
+  - name: engagements
+  - name: findings
+  - name: sca
+  - name: export
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: synapse-api }
+
+  /api/v1/aup:
+    get:
+      tags: [aup]
+      summary: Current Acceptable Use Policy + acceptance state
+      responses:
+        "200":
+          description: The active AUP
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AupStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/aup/accept:
+    post:
+      tags: [aup]
+      summary: Accept the current AUP (recorded with actor + version + timestamp)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: string, example: "1.0" }
+      responses:
+        "200": { description: Accepted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/engagements:
+    get:
+      tags: [engagements]
+      summary: List engagements
+      responses:
+        "200":
+          description: Engagements
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Engagement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [engagements]
+      summary: Create an engagement
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateEngagementRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Engagement" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/engagements/{id}/findings:
+    parameters:
+      - $ref: "#/components/parameters/EngagementId"
+    get:
+      tags: [findings]
+      summary: List an engagement's findings (highest risk first)
+      description: Ordered by CISA KEV, then EPSS x CVSS, then severity — never raw CVSS.
+      responses:
+        "200":
+          description: Findings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Finding" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/engagements/{id}/findings/{fid}:
+    parameters:
+      - $ref: "#/components/parameters/EngagementId"
+      - name: fid
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [findings]
+      summary: Change a finding's triage status (audited)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [open, triage, confirmed, false_positive, remediated]
+                note: { type: string }
+      responses:
+        "200":
+          description: The updated finding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Finding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/engagements/{id}/export/sarif:
+    parameters:
+      - $ref: "#/components/parameters/EngagementId"
+    get:
+      tags: [export]
+      summary: Export findings as SARIF 2.1.0
+      responses:
+        "200":
+          description: SARIF document
+          content:
+            application/sarif+json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/engagements/{id}/export/openvex:
+    parameters:
+      - $ref: "#/components/parameters/EngagementId"
+    get:
+      tags: [export]
+      summary: Export findings as OpenVEX 0.2
+      responses:
+        "200":
+          description: OpenVEX document
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/engagements/{id}/report.pdf:
+    parameters:
+      - $ref: "#/components/parameters/EngagementId"
+    get:
+      tags: [export]
+      summary: Deterministic PDF report, SHA-256 sealed
+      description: Templated from stored data (no LLM). The body's SHA-256 is returned in `X-Report-SHA256`.
+      responses:
+        "200":
+          description: PDF report
+          headers:
+            X-Report-SHA256:
+              description: Hex SHA-256 of the PDF bytes (integrity seal)
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/sca/scans:
+    post:
+      tags: [sca]
+      summary: Run an SCA scan against an in-scope target
+      description: >
+        Scope + authorization window are enforced before any tool runs; an
+        out-of-scope or expired target is rejected with 403.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScanRequest" }
+      responses:
+        "200":
+          description: Scan result (SBOM, vulnerabilities, licenses, findings, provenance)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    EngagementId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: AUP not accepted, or target outside scope / authorization window
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    AupStatus:
+      type: object
+      properties:
+        version: { type: string }
+        text: { type: string }
+        accepted: { type: boolean }
+
+    ScopeTargetRequest:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [repo, domain, host, url, image, cidr]
+        value: { type: string }
+
+    CreateEngagementRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, example: acme-q3-2026 }
+        client: { type: string, example: Acme Corp }
+        in_scope:
+          type: array
+          items: { $ref: "#/components/schemas/ScopeTargetRequest" }
+        out_of_scope:
+          type: array
+          items: { $ref: "#/components/schemas/ScopeTargetRequest" }
+
+    Engagement:
+      type: object
+      description: Serialized from the domain struct (PascalCase keys).
+      properties:
+        ID: { type: string }
+        Name: { type: string }
+        Client: { type: string }
+        Status: { type: string, enum: [draft, active, completed, archived] }
+        Scope:
+          type: object
+          properties:
+            InScope:
+              type: array
+              items:
+                type: object
+                properties:
+                  Kind: { type: string }
+                  Value: { type: string }
+            OutOfScope:
+              type: array
+              items:
+                type: object
+                properties:
+                  Kind: { type: string }
+                  Value: { type: string }
+        AuthorizedFrom: { type: [string, "null"], format: date-time }
+        AuthorizedTo: { type: [string, "null"], format: date-time }
+
+    Finding:
+      type: object
+      description: Serialized from the domain struct (PascalCase keys).
+      properties:
+        ID: { type: string }
+        EngagementID: { type: string }
+        Title: { type: string }
+        Description: { type: string }
+        Severity: { type: string, enum: [critical, high, medium, low, info, unknown] }
+        CVSSVector: { type: string }
+        CWE: { type: string }
+        Status: { type: string, enum: [open, triage, confirmed, false_positive, remediated] }
+        KEV: { type: boolean }
+        RiskScore: { type: number }
+        DedupKey: { type: string }
+        EvidenceScore: { type: integer }
+
+    ScanRequest:
+      type: object
+      required: [engagement_id, target]
+      properties:
+        engagement_id: { type: string }
+        target: { type: string, description: path / git URL / archive / image ref }
+        kind:
+          type: string
+          enum: [local, git, archive, image]
+          default: local
+
+    ScanResult:
+      type: object
+      properties:
+        target: { type: string }
+        languages:
+          type: array
+          items: { type: object }
+        sbom:
+          type: object
+          description: SBOM with Components and Dependencies (PascalCase keys).
+        vulnerabilities:
+          type: array
+          items: { type: object }
+        licenses:
+          type: array
+          items: { type: object }
+        findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        tool_versions:
+          type: object
+          additionalProperties: { type: string }
+        vuln_db_snapshot: { type: string }

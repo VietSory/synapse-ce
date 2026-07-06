@@ -1,0 +1,22 @@
+# golangci-lint configuration for Synapse.
+# Keep the enabled set lean and high-signal; tune per your installed version.
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - misspell
+    - revive
+    - gosec       # security linter — important for a security tool
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck

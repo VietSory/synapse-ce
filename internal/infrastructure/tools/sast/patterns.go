@@ -1,0 +1,266 @@
+package sast
+
+import (
+	"regexp"
+	"strings"
+
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+)
+
+// rule is one deterministic pattern check: a regex over a source line plus the finding metadata it
+// yields. skipFn is an optional false-positive filter (e.g. drop env-ref "secrets").
+type rule struct {
+	id       string
+	cwe      string
+	severity shared.Severity
+	title    string
+	desc     string
+	re       *regexp.Regexp
+	skipFn   func(line string) bool
+}
+
+func (r *rule) skip(line string) bool { return r.skipFn != nil && r.skipFn(line) }
+
+// placeholderSecret drops obvious non-secrets (env refs, templating, placeholders) so the
+// hardcoded-credential rule stays high-signal — deterministic findings are publishable directly
+// (no AI gate), so precision matters more than recall here.
+func placeholderSecret(line string) bool {
+	l := strings.ToLower(line)
+	for _, marker := range []string{
+		"os.environ", "os.getenv", "getenv", "process.env", "secretmanager", "vault",
+		"${", "{{", "%(", "<%", "example", "changeme", "change_me", "changeit", "placeholder",
+		"redacted", "your_", "xxxx", "dummy", "notreal", "fake", "sample", "localhost",
+		"127.0.0.1", "password123", "secret123", "abc123", "test123",
+	} {
+		if strings.Contains(l, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// commentOnlyLine suppresses rules where a plain comment mention is a noisy false positive.
+func commentOnlyLine(line string) bool {
+	l := strings.TrimSpace(line)
+	return strings.HasPrefix(l, "//") || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "*") ||
+		strings.HasPrefix(l, "/*") || strings.HasPrefix(l, "--")
+}
+
+func commentOrTestPlaceholder(line string) bool {
+	l := strings.ToLower(line)
+	if commentOnlyLine(line) {
+		return true
+	}
+	for _, marker := range []string{"test", "spec", "fixture", "mock", "dummy", "example", "sample"} {
+		if strings.Contains(l, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func safePathAccess(line string) bool {
+	l := strings.ToLower(line)
+	return commentOnlyLine(line) || strings.Contains(l, "path.join(") || strings.Contains(l, "filepath.join(") || strings.Contains(l, "safejoin")
+}
+
+// builtinRules is the tier-1 (cheap, deterministic) rule set: high-signal weaknesses across common
+// languages. Intentionally precision-biased — taint/dataflow + broader coverage is the AI/E39 tier.
+func builtinRules() []rule {
+	return []rule{
+		{
+			id: "weak-hash-md5", cwe: "CWE-327", severity: shared.SeverityMedium, title: "Weak hash: MD5",
+			desc: "MD5 is cryptographically broken; use SHA-256+ for integrity/signatures and a salted KDF (bcrypt/scrypt/argon2) for passwords.",
+			re:   regexp.MustCompile(`(?i)(crypto/md5|hashlib\.md5\(|md5\.new\(|MessageDigest\.getInstance\(\s*"MD5"|CryptoJS\.MD5)`),
+		},
+		{
+			id: "weak-hash-sha1", cwe: "CWE-327", severity: shared.SeverityMedium, title: "Weak hash: SHA-1",
+			desc: "SHA-1 is collision-vulnerable; use SHA-256 or stronger.",
+			re:   regexp.MustCompile(`(?i)(crypto/sha1|hashlib\.sha1\(|sha1\.new\(|MessageDigest\.getInstance\(\s*"SHA-?1")`),
+		},
+		{
+			id: "weak-cipher", cwe: "CWE-327", severity: shared.SeverityHigh, title: "Weak cipher: DES/3DES/RC4",
+			desc: "DES/3DES/RC4 are insecure; use AES-GCM or ChaCha20-Poly1305.",
+			re:   regexp.MustCompile(`(?i)(crypto/des|crypto/rc4|getInstance\(\s*"DES|getInstance\(\s*"RC4|\bDESede\b)`),
+		},
+		{
+			id: "insecure-tls-verify-disabled", cwe: "CWE-295", severity: shared.SeverityHigh, title: "TLS certificate verification disabled",
+			desc: "Disabling certificate verification enables machine-in-the-middle attacks; verify certificates in production.",
+			re:   regexp.MustCompile(`(?i)(InsecureSkipVerify\s*:\s*true|verify\s*=\s*False|rejectUnauthorized\s*:\s*false|CURLOPT_SSL_VERIFYPEER\s*,\s*(0|false))`),
+		},
+		{
+			id: "debug-mode-enabled", cwe: "CWE-489", severity: shared.SeverityMedium, title: "Active debug mode enabled",
+			desc: "Debug mode is enabled in source (verbose errors, interactive debuggers, stack traces leak internals). Disable it in production builds.",
+			// High-signal forms only: a literal debug=true assignment (Django/Flask/generic), Flask app.run(debug=True),
+			// and Gin's debug mode. \b avoids is_debug/app_debug; env-derived RHS (debug=os.getenv(...)) never matches "true".
+			re: regexp.MustCompile(`(?i)(\bdebug\s*=\s*true\b|app\.run\([^)]*debug\s*=\s*true|gin\.SetMode\(\s*gin\.DebugMode\s*\))`),
+		},
+		{
+			id: "permissive-cors-wildcard", cwe: "CWE-942", severity: shared.SeverityMedium, title: "Permissive CORS: wildcard origin",
+			desc: "CORS allows any origin (\"*\"); restrict it to trusted domains. Combined with credentialed requests this enables cross-site data theft.",
+			// Matches the ACAO header/Set form (Access-Control-Allow-Origin: * or Set(\"...\", \"*\")) and a Go
+			// AllowedOrigins config carrying a literal \"*\" on the same line. A specific origin never matches.
+			re: regexp.MustCompile(`(?i)(Access-Control-Allow-Origin["']?\s*[:,]?\s*["']?\*|AllowedOrigins\b[^\n]*["']\*["'])`),
+		},
+		{
+			id: "hardcoded-aws-access-key", cwe: "CWE-798", severity: shared.SeverityCritical, title: "Hardcoded AWS access key id",
+			desc: "An AWS access key id is embedded in source. Rotate it immediately and load credentials from the environment or a secrets manager.",
+			re:   regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+		},
+		{
+			id: "private-key-material", cwe: "CWE-798", severity: shared.SeverityCritical, title: "Private key material in source",
+			desc: "A PEM private-key block is embedded in source. Remove it from the repository and rotate the key.",
+			re:   regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----`),
+		},
+		{
+			id: "hardcoded-credential", cwe: "CWE-798", severity: shared.SeverityHigh, title: "Possible hardcoded credential",
+			desc:   "A credential appears to be assigned a literal value. Load secrets from the environment or a vault instead of embedding them.",
+			re:     regexp.MustCompile(`(?i)\b(password|passwd|pwd|api[_-]?key|secret|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*["'][^"'\s]{8,}["']`),
+			skipFn: placeholderSecret,
+		},
+		{
+			id: "password-md5-hash", cwe: "CWE-916", severity: shared.SeverityMedium, title: "Password hashed with unsalted MD5",
+			desc:   "MD5 is not a password hashing function and is fast to brute force. Store passwords with a salted adaptive KDF such as Argon2id, bcrypt, or scrypt.",
+			re:     regexp.MustCompile(`(?i)(\b(password|passwd|pwd|newPassword|currentPassword)\b[^\n]{0,80}\bmd5\s*\(|\bmd5\s*\(\s*(password|passwd|pwd|newPassword|currentPassword|req\.body\.password))`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "prisma-raw-sql-unsafe", cwe: "CWE-89", severity: shared.SeverityCritical, title: "Raw SQL query uses unsafe Prisma API",
+			desc:   "Prisma $queryRawUnsafe executes string-built SQL. If request-controlled values reach the query string this is SQL injection; use parameterized $queryRaw or Prisma query builders.",
+			re:     regexp.MustCompile(`(?i)\$queryRawUnsafe\s*(<[^>]+>)?\s*[\(\x60]`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "template-sql-interpolation", cwe: "CWE-89", severity: shared.SeverityCritical, title: "SQL string interpolates dynamic data",
+			desc:   "A SQL-like string contains template interpolation. Verify the interpolated value is not attacker-controlled; prefer parameterized queries.",
+			re:     regexp.MustCompile(`(?i)\b(SELECT\s+.+\s+FROM|UPDATE\s+\w+\s+SET|DELETE\s+FROM|INSERT\s+INTO)\b[^\n]*\$\{[^}]+}`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "generic-sql-dynamic-execute", cwe: "CWE-89", severity: shared.SeverityHigh, title: "SQL execution uses dynamic string construction",
+			desc:   "A SQL execution sink appears to receive a string built from request/user-controlled data. Use parameterized queries or ORM query builders.",
+			re:     regexp.MustCompile(`(?i)(cursor\.execute|execute(Query|Update)?|mysqli_query|pg_query|sequelize\.query|ActiveRecord::Base\.connection\.execute)\s*\([^;\n]*(\+|%|\.|\$\{|#\{|params\[|request\.|req\.|\$_(GET|POST|REQUEST))`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "go-sql-dynamic-query", cwe: "CWE-89", severity: shared.SeverityHigh, title: "Go SQL query uses dynamic string construction",
+			desc:   "A Go database/sql query appears to use string concatenation, fmt.Sprintf, or request-derived data. Use placeholders and parameter binding.",
+			re:     regexp.MustCompile(`(?i)\.(Query|QueryContext|QueryRow|QueryRowContext|Exec|ExecContext)\s*\([^;\n]*(\+|fmt\.Sprintf|FormValue|PostFormValue|URL\.Query|c\.(Query|Param))`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "sqlalchemy-raw-sql-dynamic", cwe: "CWE-89", severity: shared.SeverityHigh, title: "Python SQLAlchemy/raw SQL uses dynamic string construction",
+			desc:   "SQLAlchemy/session execution appears to receive dynamically formatted SQL. Use bound parameters instead of f-strings, concatenation, or request-derived interpolation.",
+			re:     regexp.MustCompile(`(?i)(session\.execute|connection\.execute|db\.session\.execute|text)\s*\([^;\n]*(f["']|%|\+|request\.|params\[)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "child-process-exec-template", cwe: "CWE-78", severity: shared.SeverityCritical, title: "Shell command uses template interpolation",
+			desc:   "child_process.exec runs through a shell. Interpolating paths, filenames, request fields, or other variables can enable command injection; use execFile/spawn with argv and strict validation.",
+			re:     regexp.MustCompile("(?i)\\bexec\\s*\\(\\s*`[^`]*\\$\\{[^}]+}[^`]*`"),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "generic-command-injection-sink", cwe: "CWE-78", severity: shared.SeverityHigh, title: "Command execution sink receives dynamic input",
+			desc:   "A command execution API appears to receive request/user-controlled or dynamically concatenated input. Avoid shell execution; use argv arrays and strict allowlists.",
+			re:     regexp.MustCompile(`(?i)(os\.system|subprocess\.(run|Popen|call|check_output)|Runtime\.getRuntime\(\)\.exec|ProcessBuilder|system|shell_exec|passthru)\s*\([^;\n]*(\+|%|\$\{|f["']|request\.|req\.|params\[|\$_(GET|POST|REQUEST)|shell\s*=\s*True)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "go-command-dynamic", cwe: "CWE-78", severity: shared.SeverityHigh, title: "Go command execution receives dynamic input",
+			desc:   "exec.Command/CommandContext appears to receive request-derived or dynamically built arguments. Use fixed argv templates and strict allowlists.",
+			re:     regexp.MustCompile(`(?i)exec\.Command(Context)?\s*\([^;\n]*(FormValue|PostFormValue|URL\.Query|c\.(Query|Param)|\+|fmt\.Sprintf|[A-Za-z_$][\w$]*)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "unsafe-deserialization-node-serialize", cwe: "CWE-502", severity: shared.SeverityHigh, title: "Unsafe node-serialize deserialization",
+			desc:   "node-serialize unserialize() can execute attacker-controlled JavaScript payloads. Never deserialize untrusted request data with this package.",
+			re:     regexp.MustCompile(`(?i)\bunserialize\s*\(`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "unsafe-deserialization-generic", cwe: "CWE-502", severity: shared.SeverityHigh, title: "Unsafe deserialization of potentially untrusted data",
+			desc:   "Unsafe deserialization APIs can execute code or instantiate attacker-controlled objects. Use safe parsers and schema validation for untrusted input.",
+			re:     regexp.MustCompile(`(?i)(pickle\.loads?\s*\(|yaml\.load\s*\([^,\n]*(Loader\s*=\s*yaml\.Loader|Loader\s*=\s*Loader)?|ObjectInputStream\s*\(|BinaryFormatter\s*\(|Marshal\.load\s*\(|unserialize\s*\(\s*\$_(GET|POST|REQUEST))`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "ssrf-fetch-user-url", cwe: "CWE-918", severity: shared.SeverityHigh, title: "Server-side fetch of user-controlled URL",
+			desc:   "A server-side fetch appears to use a generic url variable or request field. Validate scheme/host, block private networks/metadata IPs, and proxy through an allowlist.",
+			re:     regexp.MustCompile(`(?i)\b(fetch|axios\.(get|post|put|request))\s*\(\s*([A-Za-z_$][\w$]*|url\b|req\.(body|query|params)|.*\burl\b)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "generic-ssrf-request-url", cwe: "CWE-918", severity: shared.SeverityHigh, title: "Server-side request uses request-controlled URL",
+			desc:   "An outbound HTTP/file fetch appears to use request-controlled URL data. Apply URL allowlists, private-network blocking, and redirect controls.",
+			re:     regexp.MustCompile(`(?i)(requests\.(get|post|put|request)|http\.Get|http\.Post|RestTemplate\.(getFor|exchange|postFor)|file_get_contents|curl_exec|URI\.open)\s*\([^;\n]*(request\.|req\.|params\[|r\.URL\.Query|c\.Query|\$_(GET|POST|REQUEST)|url)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "go-ssrf-dynamic-url", cwe: "CWE-918", severity: shared.SeverityHigh, title: "Go server-side request uses dynamic URL",
+			desc:   "A Go outbound HTTP request appears to use a dynamic URL. Validate scheme/host, block private networks/metadata IPs, and apply allowlists.",
+			re:     regexp.MustCompile(`(?i)http\.(Get|Post|Head)\s*\(\s*[A-Za-z_$][\w$]*`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "react-dangerous-html", cwe: "CWE-79", severity: shared.SeverityHigh, title: "React renders unsanitized HTML",
+			desc:   "dangerouslySetInnerHTML bypasses React escaping. Ensure the value is sanitized server-side and client-side before rendering untrusted content.",
+			re:     regexp.MustCompile(`\bdangerouslySetInnerHTML\b`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "reflected-response-write", cwe: "CWE-79", severity: shared.SeverityHigh, title: "Response writes potentially unescaped request data",
+			desc:   "A response sink appears to write request-controlled data. Ensure framework auto-escaping applies or explicitly HTML-escape before writing.",
+			re:     regexp.MustCompile(`(?i)(res\.(send|end|write)|response\.write|HttpResponse|w\.Write)\s*\([^;\n]*(req\.|request\.|params\[|\$_(GET|POST|REQUEST)|FormValue|URL\.Query|c\.(Query|Param)|[A-Za-z_$][\w$]*)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "server-template-injection", cwe: "CWE-1336", severity: shared.SeverityHigh, title: "Template rendering uses dynamic template text",
+			desc:   "Rendering attacker-controlled template text can lead to server-side template injection. Render fixed templates and pass user data as escaped variables.",
+			re:     regexp.MustCompile(`(?i)(render_template_string|jinja2\.Template|engines\[['"][^'"]+['"]\]\.from_string|ERB\.new)\s*\([^;\n]*(request\.|req\.|params\[|\$_(GET|POST|REQUEST)|\+|%|\$\{)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "password-reset-token-disclosure", cwe: "CWE-640", severity: shared.SeverityCritical, title: "Password reset token may be disclosed",
+			desc:   "A reset/debug token appears to be returned or logged. Password reset tokens must never be exposed through API responses, logs, or debug output.",
+			re:     regexp.MustCompile(`(?i)(debug[_-]?token|debugToken|\b(logger|console)\.(info|log|warn|error|debug)\s*\([^)]*(resetUrl|token))`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "sensitive-data-logging", cwe: "CWE-532", severity: shared.SeverityMedium, title: "Sensitive data written to logs",
+			desc:   "Logging passwords, tokens, secrets, or reset URLs can leak credentials through log pipelines. Redact or omit sensitive fields.",
+			re:     regexp.MustCompile(`(?i)\b(logger|console)\.(info|log|warn|error|debug)\s*\([^)]*(password|token|secret|resetUrl)`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "insecure-cookie-flags", cwe: "CWE-614", severity: shared.SeverityMedium, title: "Session cookie uses insecure flags",
+			desc:   "Session cookies should generally be HttpOnly, Secure on HTTPS, and SameSite=Lax/Strict unless a reviewed cross-site flow requires otherwise.",
+			re:     regexp.MustCompile(`(?i)(httpOnly\s*:\s*false|secure\s*:\s*false|sameSite\s*:\s*['"]none['"])`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "jwt-hardcoded-secret-or-none", cwe: "CWE-347", severity: shared.SeverityHigh, title: "JWT uses hardcoded secret or insecure algorithm",
+			desc:   "JWT signing/verifying with a hardcoded weak secret or accepting the none algorithm can allow token forgery. Use managed secrets and enforce strong algorithms.",
+			re:     regexp.MustCompile(`(?i)(jwt\.(sign|verify)\s*\([^,\n]+,\s*["'](secret|changeme|password|jwt[_-]?secret|test)["']|algorithm\s*[:=]\s*["']none["']|algorithms\s*[:=]\s*\[[^\]]*["']none["'])`),
+			skipFn: commentOrTestPlaceholder,
+		},
+		{
+			id: "path-traversal-file-access", cwe: "CWE-22", severity: shared.SeverityHigh, title: "File path access uses request-controlled input",
+			desc:   "A filesystem read/write/send operation appears to use request-controlled path data. Normalize, constrain to an allowlisted base directory, and reject traversal.",
+			re:     regexp.MustCompile(`(?i)(readFile|writeFile|createReadStream|sendFile|send_file|File\.open|open\s*\(|os\.Open|ioutil\.ReadFile|Files\.(read|write)|new File)\s*\([^;\n]*(req\.|request\.|params\[|r\.URL\.Query|c\.Query|\$_(GET|POST|REQUEST)|filename|filepath|\bfile\b|\bpath\b)`),
+			skipFn: safePathAccess,
+		},
+		{
+			id: "possible-idor-prisma-id-only", cwe: "CWE-639", severity: shared.SeverityHigh, title: "Possible object-level authorization gap",
+			desc:   "A Prisma find/update/delete operation appears to select an object by id only. For user-owned resources, include an owner/tenant/role predicate or perform an explicit authorization check.",
+			re:     regexp.MustCompile(`(?i)prisma\.\w+\.(findUnique|update|delete)\s*\(\s*\{\s*where\s*:\s*\{\s*id\s*[:}]`),
+			skipFn: commentOnlyLine,
+		},
+		{
+			id: "mass-assignment-request-body", cwe: "CWE-915", severity: shared.SeverityMedium, title: "Mass assignment from request body",
+			desc:   "Passing an entire request body into create/update/model constructors can allow privilege or ownership field overwrite. Whitelist assignable fields explicitly.",
+			re:     regexp.MustCompile(`(?i)(\.(create|update)\s*\([^;\n]*(data\s*:\s*req\.body|req\.body)|new\s+\w+\s*\(\s*req\.body|\b[A-Z]\w*\.create\s*\(\s*params|update_attributes\s*\(\s*params)`),
+			skipFn: commentOnlyLine,
+		},
+	}
+}

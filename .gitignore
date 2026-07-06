@@ -1,0 +1,32 @@
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+/synapse-api
+/synapse-cli
+/synapse-worker
+/synapse-mcp
+
+# Env / secrets — never commit
+.env
+.env.local
+*.local
+
+# Node / web
+node_modules/
+web/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local data / evidence
+/data/
+*.db
+
+# local scratch prompt file
+prompt.txt

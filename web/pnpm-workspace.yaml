@@ -1,0 +1,13 @@
+# pnpm 11 build-script approval + workspace declaration.
+# Without a `packages:` block, pnpm treats this directory as a single-package
+# project and falls back to an interactive TTY approval prompt. Declaring
+# `.` as a workspace (the only "package" — the web app itself) makes pnpm
+# honor the `allowBuilds` allowlist non-interactively, so esbuild's
+# postinstall runs and `pnpm install` exits 0.
+#
+# esbuild's postinstall pulls its native binary; without approval, pnpm
+# errors with ERR_PNPM_IGNORED_BUILDS.
+packages:
+  - .
+allowBuilds:
+  esbuild: true

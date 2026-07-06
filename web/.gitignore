@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+!.env.example
+# Local pnpm content-addressed store (created by `pnpm` runs that pin the
+# store to the project, e.g. `pnpm config set store-dir`).
+.pnpm-store

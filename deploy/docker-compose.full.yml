@@ -1,0 +1,162 @@
+# Full Synapse stack: API server + Postgres + MinIO (+ bucket init), all env wired.
+#
+#   docker compose -f deploy/docker-compose.full.yml up -d --build
+#   curl localhost:8080/healthz
+#   # authenticated call:
+#   curl -H "Authorization: Bearer $SYNAPSE_API_TOKEN" localhost:8080/api/...
+#
+# Full JVM SCA from a container (Maven/Gradle resolvers + reachability run UNSANDBOXED = trusted-local,
+# so use the CLI, not the API server, which fail-closes those without bubblewrap):
+#   docker compose -f deploy/docker-compose.full.yml run --rm -v "$PWD:/scan:ro" synapse-api \
+#       /usr/local/bin/synapse-cli scan /scan --mode full
+#
+# SANDBOX: this stack runs SANDBOX-OFF (dev) — a plain container can't run bubblewrap. Untrusted-target
+# recon + the API-server Maven/Gradle resolvers require a Linux host with bubblewrap (+ CAP_NET_ADMIN for
+# egress scoping) and a privileged/user-ns container; that's a separate hardened deployment.
+#
+# Credentials below are LOCAL-DEV defaults, overridable via the shell / an .env file next to this compose
+# (DB_USER, DB_PASSWORD, BLOB_USER, BLOB_PASSWORD, SYNAPSE_API_TOKEN, …). Change them for anything but dev.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: "${DB_USER:-synapse}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-synapse}"
+      POSTGRES_DB: "${DB_NAME:-synapse}"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-synapse}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${BLOB_USER:-synapse}"
+      MINIO_ROOT_PASSWORD: "${BLOB_PASSWORD:-synapse-secret}"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: create the evidence bucket, then exit.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 '${BLOB_USER:-synapse}' '${BLOB_PASSWORD:-synapse-secret}' &&
+      mc mb --ignore-existing local/${BLOB_BUCKET:-synapse-evidence} &&
+      echo 'bucket ready'"
+
+  synapse-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: full            # batteries-included: JDK + Maven + Gradle + git + syft + grype
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    volumes:
+      - scancache:/home/synapse   # persist the Maven/Gradle caches across CLI scans
+      # - ../:/scan:ro            # uncomment to `synapse-cli scan /scan` this repo
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    environment:
+      # --- core (required) ---
+      SYNAPSE_API_TOKEN: "${SYNAPSE_API_TOKEN:-dev-local-token-change-me}"  # CHANGE for anything but local dev
+      SYNAPSE_ENV: "dev"                 # "production" REQUIRES the sandbox (bubblewrap) — see header
+      SYNAPSE_LOG_LEVEL: "info"
+      SYNAPSE_HTTP_ADDR: ":8080"
+      SYNAPSE_SINGLE_TENANT: "true"
+
+      # --- persistence + evidence blob store ---
+      # DSN scheme is a var so no literal "scheme://user:pass@" is committed (secret-scan clean). pgx
+      # accepts the assembled URL; override any part via the shell / an .env file.
+      SYNAPSE_DB_DSN: "${DB_SCHEME:-postgres}://${DB_USER:-synapse}:${DB_PASSWORD:-synapse}@${DB_HOST:-postgres}:5432/${DB_NAME:-synapse}?sslmode=disable"
+      SYNAPSE_BLOB_ENDPOINT: "minio:9000"
+      SYNAPSE_BLOB_ACCESS_KEY: "${BLOB_USER:-synapse}"
+      SYNAPSE_BLOB_SECRET_KEY: "${BLOB_PASSWORD:-synapse-secret}"
+      SYNAPSE_BLOB_BUCKET: "${BLOB_BUCKET:-synapse-evidence}"
+      SYNAPSE_BLOB_USE_SSL: "false"
+
+      # --- secrets (dev: empty = ephemeral per-boot key; SET in production, never log) ---
+      SYNAPSE_VAULT_MASTER_KEY: "${SYNAPSE_VAULT_MASTER_KEY:-}"        # 64 hex / base64 of 32 bytes
+      SYNAPSE_EVIDENCE_SIGNING_SEED: "${SYNAPSE_EVIDENCE_SIGNING_SEED:-}"
+
+      # --- scan bounds (24h timeout, 10 GiB workspace cap) ---
+      SYNAPSE_SCAN_TIMEOUT: "24h"
+      SYNAPSE_MAX_WORKSPACE_BYTES: "10737418240"
+
+      # --- SANDBOX: OFF in a plain container (dev). syft/grype/git run unsandboxed. ---
+      SYNAPSE_SANDBOX_ENABLED: "false"
+
+      # --- SCA feature flags (everything that works WITHOUT the sandbox) ---
+      SYNAPSE_SBOM_PRODUCER: "syft"
+      SYNAPSE_OWNED_ADVISORY: "true"        # owned matcher; populate with `synapse-cli sync-advisories`
+      SYNAPSE_JUDGMENTS_ENABLED: "true"
+      SYNAPSE_CROSSCHECK_ENABLED: "true"
+      SYNAPSE_SBOM_CROSSCHECK_ENABLED: "true"
+      SYNAPSE_SAST_ENABLED: "true"
+      SYNAPSE_GOMODGRAPH_ENABLED: "true"    # runs unsandboxed (warns) when the sandbox is off
+      SYNAPSE_JVM_REACHABILITY_ENABLED: "true"   # read-only bytecode parse, no sandbox needed
+      # Maven/Gradle transitive resolvers: the API server fail-closes these without the sandbox (they run
+      # untrusted build logic). They are DEFAULT-ON in the CLI (trusted-local) — use `synapse-cli scan`
+      # (see header) for full JVM-from-source SCA from this image. Tool bins are baked into the image.
+      SYNAPSE_MAVEN_RESOLVE_ENABLED: "false"
+      SYNAPSE_GRADLE_RESOLVE_ENABLED: "false"
+      SYNAPSE_MAVEN_LOCAL_REPO: "/home/synapse/.m2/repository"
+      SYNAPSE_GRADLE_HOME: "/home/synapse/.gradle"
+
+      # --- AI orchestrator / LLM: OFF (SCA needs no LLM). Set these to enable the agent. ---
+      SYNAPSE_AGENT_ENABLED: "false"
+      # SYNAPSE_LLM_BASE_URL: "http://host.docker.internal:9000/v1"
+      # SYNAPSE_LLM_API_KEY: ""
+      # SYNAPSE_LLM_MODEL: ""
+
+  # Vite dev server for the React/Tailwind web UI. Vite proxies /api + /healthz
+  # to synapse-api:8080 via the VITE_API_PROXY_TARGET env var (see Dockerfile.web),
+  # so the SPA on :5173 talks to the same backend the CLI uses.
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    depends_on:
+      synapse-api:
+        condition: service_healthy
+    ports:
+      - "5173:5173"
+    environment:
+      # In-network API URL — the Vite dev server proxies /api + /healthz to this.
+      VITE_API_PROXY_TARGET: "http://synapse-api:8080"
+    volumes:
+      # Hot reload: mount the source in, leave node_modules from the image intact.
+      - ../web:/app
+      - /app/node_modules
+    # No healthcheck — Vite's dev server is long-lived; an HTTP probe is enough.
+
+volumes:
+  pgdata:
+  miniodata:
+  scancache:

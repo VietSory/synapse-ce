@@ -1,0 +1,29 @@
+# Synapse web — Vite dev server. Used by docker-compose.full.yml as the `web` service.
+#
+# Vite proxies /api and /healthz to the `synapse-api` compose service on :8080,
+# so the SPA on :5173 talks to the same backend the CLI would.
+#
+# Build: docker compose -f deploy/docker-compose.full.yml up -d --build web
+
+FROM node:22-alpine
+WORKDIR /app
+
+# pnpm via corepack (ships with Node 22).
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+
+# Copy lockfile + manifest first for layer caching.
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+
+# pnpm 11 reads build-script approval from pnpm-workspace.yaml (`allowBuilds`),
+# not from package.json or .npmrc. The project file approves esbuild's
+# postinstall; without it, pnpm exits with ERR_PNPM_IGNORED_BUILDS.
+RUN pnpm install --frozen-lockfile
+
+# The rest of the source — bind-mount in dev for hot reload (see compose).
+COPY web/ .
+
+# Vite dev server. --host 0.0.0.0 so it's reachable from the host.
+# VITE_API_PROXY_TARGET is the in-network API URL (compose DNS resolves the service name).
+ENV VITE_API_PROXY_TARGET=http://synapse-api:8080
+EXPOSE 5173
+CMD ["pnpm", "dev", "--host", "0.0.0.0", "--port", "5173"]

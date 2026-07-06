@@ -1,0 +1,64 @@
+.PHONY: help install tools dev build run test vet lint format typecheck tidy \
+        docker-build docker-up docker-down clean web-dev web-build smoke
+
+GO ?= go
+IMAGE ?= synapse-api:dev
+
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+
+install: ## Install Go + web dependencies
+	$(GO) mod download
+	cd web && pnpm install
+
+tools: ## Install external scan binaries (syft+grype into ./bin; add RECON=1 for recon tools)
+	scripts/install-tools.sh $(if $(RECON),--recon,)
+
+dev: ## Run API + web dev servers together
+	@$(MAKE) -j2 run web-dev
+
+build: ## Build all Go binaries into ./bin
+	$(GO) build -o bin/ ./cmd/...
+
+run: ## Run the API server (:8080)
+	$(GO) run ./cmd/synapse-api
+
+test: ## Run Go tests
+	$(GO) test ./...
+
+vet: ## Run go vet
+	$(GO) vet ./...
+
+lint: ## Run golangci-lint (install separately)
+	golangci-lint run
+
+format: ## Format Go code
+	gofmt -w .
+
+typecheck: ## Static checks: go vet + web tsc --noEmit
+	$(GO) vet ./...
+	cd web && pnpm run typecheck
+
+tidy: ## Tidy go.mod / go.sum
+	$(GO) mod tidy
+
+docker-build: ## Build the API container image
+	docker build -t $(IMAGE) -f deploy/Dockerfile .
+
+docker-up: ## Start dev dependencies (Postgres + MinIO)
+	docker compose -f deploy/docker-compose.yml up -d
+
+docker-down: ## Stop dev dependencies
+	docker compose -f deploy/docker-compose.yml down
+
+clean: ## Remove build artifacts
+	rm -rf bin web/dist
+
+web-dev: ## Run the Vite dev server (proxies /api to :8080)
+	cd web && pnpm dev
+
+web-build: ## Build the web app
+	cd web && pnpm build
+
+smoke: build ## Build then probe /healthz
+	./bin/synapse-api & sleep 1; curl -s localhost:8080/healthz; kill %1

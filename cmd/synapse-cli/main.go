@@ -1,0 +1,442 @@
+// Command synapse-cli runs Synapse's own SCA pipeline from the command line.
+// Its primary use is dogfooding: scan Synapse's own dependencies in CI
+// and fail the build on findings at or above a severity threshold.
+//
+// It runs the SAME engagement-gated Scan path the API uses: an ephemeral
+// in-memory engagement covering the target path is created so scope enforcement
+// is exercised, not bypassed. Nothing is persisted.
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/acquire"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/postgres"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/enry"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/gradleresolve"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/grype"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jarhash"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jarlicense"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jvmreach"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/license"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/licensefile"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/licensemeta"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/manifest"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/mavencoord"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/mavenresolve"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/nvd"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/osv"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/ownadvisory"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/risk"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/syft"
+	"github.com/KKloudTarus/synapse-ce/internal/platform/buildinfo"
+	"github.com/KKloudTarus/synapse-ce/internal/platform/config"
+	"github.com/KKloudTarus/synapse-ce/internal/platform/idgen"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/advisoryingest"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
+	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+	}
+	switch os.Args[1] {
+	case "scan":
+		runScan()
+	case "sync-advisories":
+		if len(os.Args) < 3 {
+			usage() // missing <dir> exits 2, consistent with scan's missing-path
+		}
+		if err := syncAdvisories(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "synapse-cli:", err)
+			os.Exit(1)
+		}
+	default:
+		usage()
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  synapse-cli scan <path|image-ref> [--image] [--offline] [--mode full|vulnerabilities|licenses] [--fail-on critical|high|medium|low|info] [--ignore-unfixed]")
+	fmt.Fprintln(os.Stderr, "      --image    treat the argument as a container image reference (pulled via crane) instead of a local path")
+	fmt.Fprintln(os.Stderr, "      --offline  skip the live OSV.dev source; detect with Grype's offline DB only (air-gapped / fast)")
+	fmt.Fprintln(os.Stderr, "  synapse-cli sync-advisories <dir>        # ingest a local OSV dump into the owned advisory store (requires SYNAPSE_DB_DSN)")
+	fmt.Fprintln(os.Stderr, "  synapse-cli sync-advisories --remote     # fetch + ingest app ecosystems from the OSV bulk bucket (requires SYNAPSE_DB_DSN)")
+	fmt.Fprintln(os.Stderr, "  synapse-cli sync-advisories --remote-distros # fetch + ingest OS-package advisories (Debian/Alpine) from OSV (large; requires SYNAPSE_DB_DSN)")
+	fmt.Fprintln(os.Stderr, "  synapse-cli sync-advisories --csaf <dir> # ingest a local CSAF 2.0 advisory dump (requires SYNAPSE_DB_DSN)")
+	os.Exit(2)
+}
+
+func runScan() {
+	if len(os.Args) < 3 {
+		usage()
+	}
+	failOn := shared.Severity("high")
+	mode := scauc.ScanModeFull
+	ignoreUnfixed := false
+	image := false
+	offline := false
+	for i := 3; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--fail-on" && i+1 < len(os.Args):
+			failOn = shared.Severity(os.Args[i+1])
+			i++
+		case os.Args[i] == "--mode" && i+1 < len(os.Args):
+			mode = os.Args[i+1]
+			i++
+		case os.Args[i] == "--ignore-unfixed":
+			ignoreUnfixed = true
+		case os.Args[i] == "--image":
+			image = true
+		case os.Args[i] == "--offline":
+			offline = true
+		default:
+			fmt.Fprintf(os.Stderr, "synapse-cli: unknown or incomplete option %q\n", os.Args[i])
+			os.Exit(2)
+		}
+	}
+	switch failOn {
+	case "critical", "high", "medium", "low", "info":
+	default:
+		fmt.Fprintf(os.Stderr, "synapse-cli: invalid --fail-on %q (want critical|high|medium|low|info)\n", failOn)
+		os.Exit(2)
+	}
+	if _, err := scauc.NormalizeScanOptions(scauc.ScanOptions{Mode: mode}); err != nil {
+		fmt.Fprintf(os.Stderr, "synapse-cli: invalid --mode %q (want full|vulnerabilities|licenses)\n", mode)
+		os.Exit(2)
+	}
+	if err := run(os.Args[2], failOn, mode, ignoreUnfixed, image, offline); err != nil {
+		fmt.Fprintln(os.Stderr, "synapse-cli:", err)
+		os.Exit(1)
+	}
+}
+
+// syncAdvisories ingests a local OSV advisory dump into the owned advisory store. It requires a
+// Postgres DSN: the owned store is durable reference data, so ingesting into an ephemeral in-memory store
+// would do nothing. Migrations are applied first (the advisories tables may not exist yet), then a DirFeed
+// over the dump directory streams every parseable advisory into the store via the narrow AdvisoryWriter.
+func syncAdvisories(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: synapse-cli sync-advisories <dir>|--remote|--remote-distros|--csaf <dir> (requires SYNAPSE_DB_DSN)")
+	}
+	cfg := config.Load()
+	if cfg.DBDSN == "" {
+		return fmt.Errorf("SYNAPSE_DB_DSN is required: ingesting into an ephemeral in-memory store does nothing")
+	}
+	// Select the feed: --remote fetches the OSV bulk bucket; otherwise read a local OSV dump directory. Both
+	// stream into the same Postgres-backed store via the same ingester.
+	var feed ports.AdvisoryFeed
+	var src string
+	switch {
+	case args[0] == "--remote":
+		feed = ownadvisory.NewRemoteFeed(cfg.OSVBulkURL, nil, nil) // default bucket + the covered app ecosystems
+		src = "OSV bulk bucket"
+	case args[0] == "--remote-distros":
+		// OS-package advisories (Debian/Alpine) — large zips, fetched only on explicit request (Epic B).
+		feed = ownadvisory.NewRemoteFeed(cfg.OSVBulkURL, ownadvisory.DistroBulkEcosystems, nil)
+		src = "OSV bulk bucket (distros)"
+	case args[0] == "--csaf":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: synapse-cli sync-advisories --csaf <dir>")
+		}
+		feed = ownadvisory.NewCSAFDirFeed(args[1])
+		src = "CSAF dir " + args[1]
+	default:
+		feed = ownadvisory.NewDirFeed(args[0])
+		src = args[0]
+	}
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, cfg.DBDSN); err != nil {
+		return fmt.Errorf("apply migrations: %w", err)
+	}
+	pool, err := postgres.Connect(ctx, cfg.DBDSN)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+	ingest, err := advisoryingest.NewService(feed, postgres.NewAdvisoryRepository(pool))
+	if err != nil {
+		return err
+	}
+	stats, err := ingest.Ingest(ctx)
+	if err != nil {
+		return fmt.Errorf("ingest from %s: %w", src, err)
+	}
+	fmt.Printf("synapse-cli: ingested %d advisories, skipped %d (unparseable/unmatchable) (from %s)\n", stats.Ingested, stats.Skipped, src)
+	return nil
+}
+
+// stderrAudit keeps scan actions attributable without a database
+// — the entry is written to the CI log rather than persisted.
+type stderrAudit struct{}
+
+func (stderrAudit) Record(_ context.Context, e ports.AuditEntry) error {
+	fmt.Fprintf(os.Stderr, "audit: actor=%s action=%s target=%s\n", e.Actor, e.Action, e.Target)
+	return nil
+}
+
+var _ ports.AuditLogger = stderrAudit{}
+
+func run(path string, failOn shared.Severity, mode string, ignoreUnfixed, image, offline bool) error {
+	// An image target is an OCI reference (acquired via crane → OCI layout); a local
+	// target is a filesystem path that must be absolute for the scope check.
+	target := strings.TrimSpace(path)
+	if !image {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
+		target = abs
+	}
+	ctx := context.Background()
+	cfg := config.Load()
+	clock := idgen.SystemClock{}
+	ids := idgen.RandomID{}
+
+	engRepo := memory.NewEngagementRepository()
+	prov := ports.Provenance{
+		ToolVersions: map[string]string{
+			"go-enry": buildinfo.Module("github.com/go-enry/go-enry/v2"),
+			"synapse": buildinfo.App(),
+		},
+		VulnDBSource: "osv.dev",
+	}
+	// Grype (offline DB) always; live OSV unless --offline / SYNAPSE_OFFLINE (air-gapped / fast path).
+	detectionSources := []ports.DetectionSource{grype.New(cfg.GrypeBin, cfg.GrypeDBDir)}
+	if offline || cfg.Offline {
+		// Make the reduced-coverage mode visible: the operator chose lower recall for speed.
+		fmt.Fprintln(os.Stderr, "synapse-cli: offline mode — live OSV disabled; detecting with Grype's offline DB only")
+	} else {
+		detectionSources = append([]ports.DetectionSource{osv.New(cfg.OSVBaseURL, nil)}, detectionSources...)
+	}
+	sca := scauc.NewService(
+		engRepo, memory.NewFindingRepository(), memory.NewScanRepository(), nil, nil, nil, nil, nil, prov, clock, stderrAudit{},
+		shared.Severity(cfg.FindingMinSeverity), cfg.ScanTimeout, acquire.New().WithMaxWorkspaceBytes(cfg.MaxWorkspaceBytes),
+		enry.New(), syft.New(cfg.SyftBin),
+		detectionSources,
+		risk.New(cfg.KEVURL, cfg.EPSSURL, nil), license.New(), licensemeta.NewChain(licensemeta.NewOSMetadata(), licensemeta.New(cfg.DepsDevURL, nil)),
+	)
+	sca.SetSBOMEnricher(manifest.New())
+	sca.SetMavenCoordResolver(mavencoord.New()) // recover real Maven coords from JAR pom.properties (offline) before license lookup
+	// SHA-1 coordinate recovery for shaded/metadata-less JARs: offline trivy-java-db index
+	// (SYNAPSE_JARHASH_DB_PATH) first, online Maven Central (SYNAPSE_JARHASH_ONLINE_ENABLED) as fallback.
+	var jhResolvers []ports.JarHashResolver
+	if cfg.JarHashDBPath != "" {
+		if off, err := jarhash.NewOffline(cfg.JarHashDBPath); err != nil {
+			fmt.Fprintf(os.Stderr, "synapse-cli: JAR SHA-1 offline DB %q not usable: %v\n", cfg.JarHashDBPath, err)
+		} else {
+			jhResolvers = append(jhResolvers, off)
+			fmt.Fprintf(os.Stderr, "synapse-cli: JAR SHA-1 OFFLINE index ON (%s)\n", cfg.JarHashDBPath)
+		}
+	}
+	if cfg.JarHashOnlineEnabled {
+		jhResolvers = append(jhResolvers, jarhash.New(cfg.JarHashBaseURL, nil))
+		fmt.Fprintln(os.Stderr, "synapse-cli: JAR SHA-1 ONLINE Maven Central ON (fallback after offline)")
+	}
+	if len(jhResolvers) > 0 {
+		sca.SetJarHashResolver(jarhash.NewChain(jhResolvers...))
+	}
+	// Maven full-tree resolution (`mvn dependency:list`) — resolves managed versions + transitive deps a
+	// from-source pom scan can't, so a Maven project is handled straight from pom.xml (no manual build).
+	// The CLI dogfoods a TRUSTED local project, so this is ON BY DEFAULT; set
+	// SYNAPSE_MAVEN_RESOLVE_ENABLED=false to opt out. Best-effort: a missing mvn / non-Maven target / error
+	// is a no-op (falls back to the pom-only result + the INCOMPLETE warning). Runs mvn directly.
+	mavenOn := cfg.MavenResolveEnabled
+	if _, set := os.LookupEnv("SYNAPSE_MAVEN_RESOLVE_ENABLED"); !set {
+		mavenOn = true // CLI default-on (trusted local); the API stays opt-in + sandbox-gated
+	}
+	if mavenOn {
+		sca.SetMavenResolver(mavenresolve.New(cfg.MvnBin).WithRepoHosts(cfg.MavenRepoHosts).WithLocalRepo(cfg.MavenLocalRepo))
+		// Transparency: the CLI runs mvn UNSANDBOXED (it evaluates the project's POM/plugin config) — make
+		// that visible so it's never a silent host-exec (the API stays sandbox-gated).
+		fmt.Fprintln(os.Stderr, "synapse-cli: Maven resolver ON — runs `mvn` UNSANDBOXED over the project if it has a pom.xml (trusted-local assumption; set SYNAPSE_MAVEN_RESOLVE_ENABLED=false to disable)")
+	}
+	// Gradle full-tree resolution — same default-on-for-CLI model as Maven (trusted local project),
+	// handled straight from build.gradle. Opt out with SYNAPSE_GRADLE_RESOLVE_ENABLED=false. Best-effort.
+	gradleOn := cfg.GradleResolveEnabled
+	if _, set := os.LookupEnv("SYNAPSE_GRADLE_RESOLVE_ENABLED"); !set {
+		gradleOn = true
+	}
+	if gradleOn {
+		sca.SetGradleResolver(gradleresolve.New(cfg.GradleBin).WithRepoHosts(cfg.MavenRepoHosts).WithGradleHome(cfg.GradleHome))
+		// Gradle evaluates build.gradle (arbitrary Groovy/Kotlin) — even higher-risk than mvn; surface it.
+		fmt.Fprintln(os.Stderr, "synapse-cli: Gradle resolver ON — runs `gradle` UNSANDBOXED over the project if it has a build.gradle, which executes the build script (trusted-local assumption; set SYNAPSE_GRADLE_RESOLVE_ENABLED=false to disable)")
+	}
+	// Coarse JVM class-reachability — default-on for the CLI (read-only bytecode parsing, no exec);
+	// tags each JVM component reachable/unreferenced from the app's compiled closure. Opt out with
+	// SYNAPSE_JVM_REACHABILITY_ENABLED=false. Best-effort; a not-built project tags nothing.
+	jvmReachOn := cfg.JVMReachabilityEnabled
+	if _, set := os.LookupEnv("SYNAPSE_JVM_REACHABILITY_ENABLED"); !set {
+		jvmReachOn = true
+	}
+	if jvmReachOn {
+		sca.SetJVMReachability(jvmreach.New())
+	}
+	// JAR-embedded licenses + workspace LICENSE files for every ecosystem.
+	sca.SetLicenseFileResolver(licensefile.NewChain(jarlicense.New(), licensefile.New()))
+	// Backfill unknown vuln severities from NVD CVSS (best-effort; set SYNAPSE_NVD_API_KEY for throughput).
+	sca.SetSeverityEnricher(nvd.New(cfg.NVDAPIURL, cfg.NVDAPIKey, nil).WithBudget(cfg.NVDBudget))
+	// --ignore-unfixed (or SYNAPSE_IGNORE_UNFIXED) drops vulns with no upstream fix — the
+	// classic distro-noise reducer for OS-package scans (matches Trivy's --ignore-unfixed).
+	sca.SetIgnoreUnfixed(ignoreUnfixed || cfg.IgnoreUnfixed)
+
+	// Ephemeral engagement covering the target so the real (gated) Scan path runs.
+	eng, err := engagement.New(ids.NewID(), "", "synapse-cli dogfood", "", clock.Now())
+	if err != nil {
+		return fmt.Errorf("build ephemeral engagement: %w", err)
+	}
+	scopeKind, acqKind := engagement.TargetRepo, ports.TargetLocal
+	if image {
+		scopeKind, acqKind = engagement.TargetImage, ports.TargetImage
+	}
+	eng.Scope.InScope = []engagement.Target{{Kind: scopeKind, Value: target}}
+	if err := engRepo.Create(ctx, eng); err != nil {
+		return fmt.Errorf("register ephemeral engagement: %w", err)
+	}
+
+	res, err := sca.ScanWithOptions(ctx, "synapse-cli", eng.ID, ports.AcquireRequest{Kind: acqKind, Value: target}, scauc.ScanOptions{Mode: mode})
+	if err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+
+	printReport(target, res)
+
+	gate := shared.SeverityRank(failOn)
+	over := 0
+	for _, f := range res.Findings {
+		if shared.SeverityRank(f.Severity) >= gate {
+			over++
+		}
+	}
+	if over > 0 {
+		return fmt.Errorf("%d finding(s) at or above %s", over, failOn)
+	}
+	return nil
+}
+
+func printReport(target string, res *scauc.ScanResult) {
+	fmt.Printf("\nSynapse SCA dogfood — %s\n", target)
+	fmt.Printf("  tools: %v · vuln-db: %s\n", res.ToolVersions, res.VulnDBSnapshot)
+	if w := res.Completeness.Warning; w != "" {
+		fmt.Printf("  ! INCOMPLETE SCAN: %s\n", w)
+	} else {
+		fmt.Printf("  completeness: confident (%d/%d components resolved; lockfiles %v)\n",
+			res.Completeness.ComponentsResolved, res.Completeness.ComponentsTotal, res.Completeness.Lockfiles)
+	}
+	if res.SBOM != nil {
+		fmt.Printf("  components: %d\n", len(res.SBOM.Components))
+	}
+	if img := res.Image; img != nil { // Epic D: container layer attribution + base-image estimate
+		fmt.Printf("  image: %s", img.Reference)
+		if img.Digest != "" {
+			fmt.Printf(" @ %s", img.Digest)
+		}
+		fmt.Printf(" (%s/%s)\n", img.OS, img.Architecture)
+		fmt.Printf("    layers: %d total — %d base (estimated OS/distro), %d application\n",
+			len(img.Layers), img.BaseLayerCount, len(img.Layers)-img.BaseLayerCount)
+	}
+	if d := res.Distro; d != nil { // Epic E: captured OS distribution + End-of-Life flag
+		name := d.ID + " " + d.Version
+		if d.Codename != "" {
+			name += " (" + d.Codename + ")"
+		}
+		switch {
+		case d.EndOfLife:
+			fmt.Printf("  distro: %s — ! END-OF-LIFE since %s (no security updates; %s)\n", name, d.EOLDate, d.Source)
+		case d.Known:
+			fmt.Printf("  distro: %s — supported until %s\n", name, d.EOLDate)
+		default:
+			fmt.Printf("  distro: %s — EOL status unknown (not in the curated table)\n", name)
+		}
+	}
+	if len(res.Coverage) > 0 { // per-ecosystem breakdown so a thin ecosystem isn't hidden behind the global number
+		fmt.Printf("  coverage by ecosystem:\n")
+		for _, c := range res.Coverage {
+			fmt.Printf("    %-12s %d/%d resolved\n", c.Ecosystem, c.Resolved, c.Components)
+		}
+	}
+	fmt.Printf("  vulnerabilities: %d", len(res.Vulnerabilities))
+	if counts := countVulnSeverity(res); counts != "" {
+		fmt.Printf(" (%s)", counts)
+	}
+	fmt.Println()
+	if denied, warned := countLicenses(res.Licenses); denied+warned > 0 {
+		fmt.Printf("  licenses: %d denied, %d warned\n", denied, warned)
+	}
+	if reach, unref := countReachability(res.SBOM.Components); reach+unref > 0 {
+		fmt.Printf("  reachability (JVM, coarse): %d referenced, %d unreferenced by app code\n", reach, unref)
+	}
+	fmt.Printf("  findings (promoted): %d\n", len(res.Findings))
+	if res.VulnsBelowThreshold > 0 {
+		fmt.Printf("  ! %d detected vulnerabilities are BELOW the '%s' severity floor and were NOT promoted "+
+			"(set SYNAPSE_FINDING_MIN_SEVERITY=info to promote every detected vuln)\n", res.VulnsBelowThreshold, res.MinSeverity)
+	}
+	if res.UnfixedSuppressed > 0 {
+		fmt.Printf("  ! %d detected vulnerabilities have NO upstream fix and were suppressed by --ignore-unfixed\n", res.UnfixedSuppressed)
+	}
+	for _, w := range res.SourceWarnings {
+		fmt.Printf("  ! %s\n", w)
+	}
+	for _, f := range res.Findings {
+		kev := ""
+		if f.KEV {
+			kev = " [KEV]"
+		}
+		fmt.Printf("    %-9s risk %5.2f  %s%s\n", f.Severity, f.RiskScore, f.Title, kev)
+	}
+	fmt.Println()
+}
+
+func countVulnSeverity(res *scauc.ScanResult) string {
+	order := []shared.Severity{"critical", "high", "medium", "low", "info"}
+	n := map[shared.Severity]int{}
+	for _, v := range res.Vulnerabilities {
+		n[v.Severity]++
+	}
+	out := ""
+	for _, s := range order {
+		if n[s] > 0 {
+			if out != "" {
+				out += ", "
+			}
+			out += fmt.Sprintf("%s %d", s, n[s])
+		}
+	}
+	return out
+}
+
+func countLicenses(lics []ports.LicenseFinding) (denied, warned int) {
+	for _, l := range lics {
+		switch l.Verdict {
+		case ports.LicenseDeny:
+			denied++
+		case ports.LicenseWarn:
+			warned++
+		}
+	}
+	return denied, warned
+}
+
+// countReachability tallies the coarse JVM class-reachability verdicts. Both are 0 when no JVM
+// reachability was computed (non-JVM / not-built / disabled), so the caller prints nothing.
+func countReachability(comps []sbom.Component) (referenced, unreferenced int) {
+	for _, c := range comps {
+		switch c.Reachability {
+		case sbom.ReachabilityReachable:
+			referenced++
+		case sbom.ReachabilityUnreferenced:
+			unreferenced++
+		}
+	}
+	return referenced, unreferenced
+}
