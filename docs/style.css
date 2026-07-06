@@ -268,18 +268,49 @@ td .def { color: var(--fg-faint); font-family: var(--mono); font-size: .8rem; }
 .warn-banner { background: color-mix(in srgb, var(--high) 12%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--high) 30%, transparent); color: var(--fg); font-size: .84rem; text-align: center; padding: 9px 16px; }
 .warn-banner b { color: var(--high); }
 
+/* ---------- overflow hardening (all viewports) ---------- */
+/* Grid/flex items default to min-width:auto and refuse to shrink below their content
+   (a long code line, a wide table). That forces the whole page wider than a phone and
+   clips it. min-width:0 lets the item shrink so its content wraps or scrolls in-place. */
+html { overflow-x: hidden; }
+.split, .steps, .step, .grid, .req-grid, .contrib-grid, .shot-2, .footer-top, .hero-cta, .pills, .arch-flow { min-width: 0; }
+.split > *, .step > div, .grid > *, .card, .codeblock, .frame, .table-wrap, .contrib, .req-item, .pill { min-width: 0; }
+pre { max-width: 100%; }
+.hero .lead, .section-head p, .card p, .step p, .req-item p, .callout p, .shot-group > p, .contrib .role { overflow-wrap: break-word; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 900px) {
-  .grid-3, .grid-2, .req-grid, .contrib-grid, .shot-2, .split { grid-template-columns: 1fr; }
-  .nav-links { display: none; position: absolute; top: 64px; left: 0; right: 0; flex-direction: column; background: var(--bg-2); border-bottom: 1px solid var(--border); padding: 12px; gap: 2px; }
+  .grid-3, .grid-2, .req-grid, .shot-2, .split { grid-template-columns: 1fr; }
+  .contrib-grid { grid-template-columns: repeat(2, 1fr); }
+  .nav-links { display: none; position: absolute; top: 64px; left: 0; right: 0; flex-direction: column; background: var(--bg-2); border-bottom: 1px solid var(--border); padding: 12px; gap: 2px; max-height: calc(100vh - 64px); overflow-y: auto; }
   .nav-links.open { display: flex; }
   .nav-links a { padding: 11px 14px; }
   .nav-toggle { display: inline-flex; }
   .hero { padding: 60px 0 48px; }
-  .hero-stats { gap: 24px; }
   section { padding: 54px 0; }
+  .split { gap: 28px; }
+  .footer-links { gap: 36px; }
+}
+@media (max-width: 640px) {
+  .container { padding: 0 18px; }
+  .nav-inner { padding: 0 18px; gap: 12px; }
+  .hero-stats { gap: 18px 26px; }
+  .hero .tagline { letter-spacing: .16em; }
+  .frame .bar .u { display: none; }
+  .cfg-cat { flex-wrap: wrap; }
+  .section-head h2, .hero h1 { overflow-wrap: break-word; }
 }
 @media (max-width: 560px) {
-  .hero-logo { height: 82px; }
+  .hero-logo { height: 78px; }
   .btn-github-text { display: none; }
+  .hero-cta { flex-direction: column; align-items: stretch; }
+  .hero-cta .btn { justify-content: center; }
+  .contrib-grid { grid-template-columns: 1fr; }
+  /* clean 2x2 stats instead of an uneven 3 + 1 */
+  .hero-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 14px; }
+  .hero-stats .stat { text-align: center; }
+}
+@media (max-width: 400px) {
+  .hero .tagline { letter-spacing: .1em; font-size: .66rem; }
+  .hero-stats { gap: 16px 20px; }
 }
