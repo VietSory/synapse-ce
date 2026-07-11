@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
@@ -27,12 +29,13 @@ const DefaultComplexityThreshold = 15
 // Service produces code-quality findings. analyzer is required; dup, metrics and inventory are optional
 // enrichers.
 type Service struct {
-	analyzer      ports.CodeAnalyzer
-	dup           ports.DuplicationScanner
-	metrics       ports.CodeMetricsProvider
-	inventory     ports.CodeInventoryScanner
-	bugs          ports.BugDetector
-	complexityMin int
+	analyzer          ports.CodeAnalyzer
+	dup               ports.DuplicationScanner
+	metrics           ports.CodeMetricsProvider
+	inventory         ports.CodeInventoryScanner
+	bugs              ports.BugDetector
+	complexityMin     int
+	includeTestSmells bool
 }
 
 // Option configures a Service.
@@ -54,6 +57,19 @@ func WithBugs(b ports.BugDetector) Option { return func(s *Service) { s.bugs = b
 var bugCWE = map[string]string{
 	"reliability-unreachable-code":   "CWE-561", // dead code
 	"reliability-constant-condition": "CWE-570", // expression is always false/true
+}
+
+// WithTestScopedSmells controls whether info-severity code smells located in test code (src/test,
+// *_test.*, *.spec.*, __tests__, testdata, ...) are emitted. They are SUPPRESSED by default: a rule like
+// commented-out-code fires heavily in tests and otherwise drowns the higher-value findings (complexity,
+// duplication, reliability). Pass true to restore full verbosity. Only Info-severity smells are affected;
+// medium/high findings (and every non-test finding) are always kept.
+//
+// Because the filter lives in the single analyze() chokepoint, it also applies to BuildReport and thus to
+// rating.Compute: test-scoped Info smells (5 debt-minutes each) are excluded from the technical-debt total
+// and the maintainability grade by default, which is intentional (test TODOs are not production debt).
+func WithTestScopedSmells(include bool) Option {
+	return func(s *Service) { s.includeTestSmells = include }
 }
 
 // WithComplexity adds high-complexity maintainability findings (functions over threshold), using the AST
@@ -94,6 +110,9 @@ func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, 
 		return nil, measure.DuplicationReport{}, fmt.Errorf("code analysis: %w", err)
 	}
 	for _, r := range raws {
+		if !s.includeTestSmells && r.Severity == shared.SeverityInfo && isTestPath(r.File) {
+			continue // low-value info smell in test code – suppressed by default (see WithTestScopedSmells)
+		}
 		out = append(out, newFinding(r.Kind, r.RuleID, r.CWE, r.Severity, r.Title, r.Description, r.File, r.Line))
 	}
 
@@ -172,6 +191,46 @@ func newFinding(kind, ruleID, cwe string, sev shared.Severity, title, desc, file
 func deterministicID(dedupKey string) shared.ID {
 	sum := sha256.Sum256([]byte("codequality|" + dedupKey))
 	return shared.ID(hex.EncodeToString(sum[:16]))
+}
+
+// isTestPath reports whether a source path is test/spec/fixture code, where info-severity smells
+// (commented-out code, TODOs) are low-value noise. Matches common directory and filename conventions
+// across ecosystems (Go _test.go, JS/TS .test./.spec., Python test_*, Java src/test + *Test.java, ...).
+func isTestPath(p string) bool {
+	slash := filepath.ToSlash(p)
+	q := strings.ToLower(slash)
+	// Directory conventions. Deliberately NOT /testing/ or /spec(s)/ – those are common production
+	// package/dir names (test helpers that ship in the binary, OpenAPI/language specs).
+	for _, seg := range []string{"/test/", "/tests/", "/__tests__/", "/__mocks__/", "/testdata/", "/fixtures/"} {
+		if strings.Contains(q, seg) {
+			return true
+		}
+	}
+	if strings.HasPrefix(q, "test/") || strings.HasPrefix(q, "tests/") || strings.HasPrefix(q, "testdata/") {
+		return true
+	}
+	base := q
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	if strings.HasPrefix(base, "test_") { // python test_foo.py
+		return true
+	}
+	// Dot/underscore-bounded filename conventions (JS/TS .test./.spec., Python _test./_spec.).
+	for _, m := range []string{"_test.", ".test.", "_spec.", ".spec."} {
+		if strings.Contains(base, m) {
+			return true
+		}
+	}
+	// CamelCase suffix conventions (JUnit/Kotlin/C#/Scala). Matched case-sensitively on the ORIGINAL
+	// basename so a capital T distinguishes FooTest.java from production files like Latest.java/Contest.java.
+	obase := filepath.Base(slash)
+	for _, suf := range []string{"Test.java", "Tests.java", "Test.kt", "Tests.kt", "Test.cs", "Tests.cs", "Spec.scala"} {
+		if strings.HasSuffix(obase, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 // Report is the full code-quality dashboard payload for a source tree: the per-language inventory, the
