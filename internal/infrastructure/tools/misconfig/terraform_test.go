@@ -35,6 +35,18 @@ resource "aws_ecr_repository" "r" {
 resource "aws_dynamodb_table" "t" {
   name = "items"
 }
+
+resource "aws_ebs_volume" "v" {
+  availability_zone = "us-east-1a"
+  size              = 20
+}
+
+resource "aws_s3_bucket_versioning" "v" {
+  bucket = aws_s3_bucket.b.id
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
 `
 	got := ruleIDs(scan(t, map[string]string{"main.tf": tf}))
 	for _, want := range []string{
@@ -42,6 +54,7 @@ resource "aws_dynamodb_table" "t" {
 		"terraform-encryption-disabled", "terraform-plaintext-secret",
 		"terraform-ecr-mutable-tags", "terraform-ecr-no-cmk",
 		"terraform-dynamodb-unencrypted", "terraform-dynamodb-no-pitr",
+		"terraform-ebs-unencrypted", "terraform-s3-no-versioning",
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("expected Terraform rule %q, got %v", want, keys(got))
@@ -58,6 +71,15 @@ func TestTerraformSecureNoFindings(t *testing.T) {
   logging {
     target_bucket = "logs"
   }
+  versioning {
+    enabled = true
+  }
+}
+
+resource "aws_ebs_volume" "v" {
+  availability_zone = "us-east-1a"
+  size              = 20
+  encrypted         = true
 }
 
 resource "aws_security_group" "sg" {
@@ -82,6 +104,31 @@ resource "aws_ecr_repository" "r" {
 `
 	if got := scan(t, map[string]string{"main.tf": tf}); len(got) != 0 {
 		t.Errorf("hardened Terraform should yield no findings, got %+v", got)
+	}
+}
+
+func TestTerraformS3VersioningSplitStyle(t *testing.T) {
+	// Provider v4+ style: the bucket omits an inline versioning block and versioning is set on a
+	// separate aws_s3_bucket_versioning resource. An Enabled split resource must suppress the
+	// bucket-origin "no versioning" false positive.
+	tf := `resource "aws_s3_bucket" "b" {
+  bucket = "my-bucket"
+  acl    = "private"
+  logging {
+    target_bucket = "logs"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "v" {
+  bucket = aws_s3_bucket.b.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+`
+	got := ruleIDs(scan(t, map[string]string{"main.tf": tf}))
+	if _, ok := got["terraform-s3-no-versioning"]; ok {
+		t.Errorf("split-style Enabled versioning must not flag terraform-s3-no-versioning, got %v", keys(got))
 	}
 }
 

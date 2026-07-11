@@ -37,6 +37,7 @@ func scanTerraform(rel string, data []byte) []ports.MisconfigRawFinding {
 	}
 	var stack []*frame
 	depth := 0
+	sawEnabledVersioning := false
 
 	for i, raw := range lines {
 		line := stripHCLComment(raw)
@@ -60,7 +61,29 @@ func scanTerraform(rel string, data []byte) []ports.MisconfigRawFinding {
 			f := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			out = append(out, tfBlockRules(rel, f.typ, f.start, f.body.String())...) // block-level missing-setting rules
+			if f.typ == "aws_s3_bucket_versioning" && strings.Contains(f.body.String(), `"Enabled"`) {
+				sawEnabledVersioning = true
+			}
 		}
+	}
+	// Provider v4+ manages versioning in a separate aws_s3_bucket_versioning resource, so an aws_s3_bucket
+	// block legitimately omits an inline versioning block. When the file has an Enabled versioning resource,
+	// drop the bucket-origin "no versioning" finding to avoid a false positive on the modern split style.
+	if sawEnabledVersioning {
+		out = filterOutBucketVersioning(out)
+	}
+	return out
+}
+
+// filterOutBucketVersioning removes terraform-s3-no-versioning findings that originate from an
+// aws_s3_bucket block (as opposed to an aws_s3_bucket_versioning resource).
+func filterOutBucketVersioning(in []ports.MisconfigRawFinding) []ports.MisconfigRawFinding {
+	out := in[:0]
+	for _, f := range in {
+		if f.RuleID == "terraform-s3-no-versioning" && f.Resource == "Terraform aws_s3_bucket" {
+			continue
+		}
+		out = append(out, f)
 	}
 	return out
 }
@@ -105,10 +128,29 @@ func tfBlockRules(rel, resType string, line int, body string) []ports.MisconfigR
 			add("terraform-sns-unencrypted", "SNS topic not encrypted", shared.SeverityMedium,
 				"The SNS topic sets no kms_master_key_id, so messages are not encrypted at rest. Set kms_master_key_id to a KMS key.")
 		}
+	case "aws_ebs_volume":
+		// A missing `encrypted` leaves the volume unencrypted at rest (the AWS default). An explicit
+		// `encrypted = false` is already caught by the line-level terraform-encryption-disabled rule, so
+		// only the absent-attribute case is handled here to avoid a duplicate finding.
+		if !has("encrypted") {
+			add("terraform-ebs-unencrypted", "EBS volume not encrypted at rest", shared.SeverityMedium,
+				"The aws_ebs_volume sets no encrypted = true, so the volume is unencrypted at rest. Set encrypted = true (and kms_key_id for a customer-managed key).")
+		}
 	case "aws_s3_bucket":
 		if !has("logging") {
 			add("terraform-s3-no-logging", "S3 bucket access logging disabled", shared.SeverityLow,
 				"The bucket configures no access logging, so object access is not audited. Enable server access logging (a logging block or an aws_s3_bucket_logging resource).")
+		}
+		if !has("versioning") {
+			add("terraform-s3-no-versioning", "S3 bucket versioning not enabled", shared.SeverityLow,
+				"The bucket enables no versioning, so an overwritten or deleted object cannot be recovered, weakening resilience against accidental loss and ransomware. Add a versioning block (or an aws_s3_bucket_versioning resource) with status = \"Enabled\".")
+		}
+	case "aws_s3_bucket_versioning":
+		// The modern split resource. Anything other than an Enabled status (Suspended, Disabled, or an
+		// unset status) leaves versioning off.
+		if !strings.Contains(body, `"Enabled"`) {
+			add("terraform-s3-no-versioning", "S3 bucket versioning not enabled", shared.SeverityLow,
+				"The aws_s3_bucket_versioning resource does not set status = \"Enabled\" (it is Suspended, Disabled, or unset), so object versions are not retained. Set versioning_configuration { status = \"Enabled\" }.")
 		}
 	case "aws_instance", "aws_launch_template":
 		if !has("metadata_options") || (has("metadata_options") && !strings.Contains(body, "required")) {
