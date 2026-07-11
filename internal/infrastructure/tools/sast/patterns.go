@@ -77,6 +77,12 @@ func safePathAccess(line string) bool {
 	return commentOnlyLine(line) || strings.Contains(l, "path.join(") || strings.Contains(l, "filepath.join(") || strings.Contains(l, "safejoin")
 }
 
+func safeLDAPFilter(line string) bool {
+	l := strings.ToLower(line)
+	return commentOnlyLine(line) || strings.Contains(l, "escape_filter_chars(") ||
+		strings.Contains(l, "escapefilter(") || strings.Contains(l, "ldapencoder.filterencode(")
+}
+
 // builtinRules is the tier-1 (cheap, deterministic) rule set: high-signal weaknesses across common
 // languages. Intentionally precision-biased — taint/dataflow + broader coverage is the AI/E39 tier.
 // redosContextRe marks a line that constructs or uses a regular expression, so the ReDoS rule only fires
@@ -309,6 +315,15 @@ func builtinRules() []rule {
 			desc:   "A MongoDB query passes request data (or a $where JavaScript predicate) straight into the filter, allowing NoSQL operator injection. Cast/validate fields and never pass req.body as a filter.",
 			re:     regexp.MustCompile(`(?i)(\.(find|findOne|findOneAndUpdate|updateOne|updateMany|deleteOne|deleteMany|count|aggregate)\s*\(\s*(req\.(body|query|params)|\{[^}\n]*(\$where|req\.(body|query|params)))|\$where\s*:\s*["'` + "`" + `])`),
 			skipFn: commentOnlyLine,
+		},
+		{
+			id: "ldap-injection", cwe: "CWE-90", severity: shared.SeverityHigh, title: "LDAP search filter built from untrusted input",
+			desc: "An LDAP search filter is built from request/user-controlled data without LDAP filter escaping. Escape values per RFC 4515 or use a parameterized LDAP search API.",
+			re: regexp.MustCompile(`(?i)\b((ldap\w*|conn|ctx|dir(ectory)?(context)?|ldaptemplate)\.)?(search|search_s|search_ext)\s*\([^\n]{0,160}(` +
+				`["'][^"'\n]{0,120}\([a-z][\w.-]*\s*(=|~=|>=|<=)[^"'\n]{0,120}["']\s*\+\s*(req\.(body|query|params)|request\.(args|form|values|json)|params\[|\$_(GET|POST|REQUEST)|user(name)?\b|uid\b|input\b|param\b)|` +
+				`f["'][^"'\n]{0,120}\([a-z][\w.-]*\s*(=|~=|>=|<=)[^"'\n]{0,120}\{\s*(req\.|request\.|params\[|user(name)?\b|uid\b|input\b|param\b)|` +
+				"`[^`\\n]{0,120}\\([a-z][\\w.-]*\\s*(=|~=|>=|<=)[^`\\n]{0,120}\\$\\{\\s*(req\\.|request\\.|params\\[|user(name)?\\b|uid\\b|input\\b|param\\b))"),
+			skipFn: safeLDAPFilter,
 		},
 		{
 			id: "open-redirect-user-url", cwe: "CWE-601", severity: shared.SeverityMedium, title: "Redirect target is request-controlled",

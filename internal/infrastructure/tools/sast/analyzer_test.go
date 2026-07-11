@@ -282,6 +282,22 @@ func TestRuleCorpus(t *testing.T) {
 			fp:   []string{`db.users.find({ _id: ObjectId(id) })`, `User.findOne({ email: safeEmail })`},
 		},
 		{
+			rule: "ldap-injection",
+			tp: []string{
+				`search(base, "(uid=" + user + ")")`,
+				`conn.search(base, f"(uid={request.args['user']})")`,
+				"ldap.search(base, `(&(objectClass=person)(uid=${req.query.user}))`)",
+			},
+			fp: []string{
+				`ldap.search(base, "(uid=service-account)")`,
+				`conn.search(base, f"(uid={escape_filter_chars(user)})")`,
+				`ctx.search(base, "(uid={0})", new Object[]{user}, controls)`,
+				`search(index, "uid=" + req.query.user)`,
+				`logger.info(f"(uid={request.args['user']})")`,
+				`// ldap.search(base, "(uid=" + req.query.user + ")")`,
+			},
+		},
+		{
 			rule: "open-redirect-user-url",
 			tp:   []string{`res.redirect(req.query.next)`, `response.sendRedirect(request.getParameter("url"))`, `http.Redirect(w, r, r.URL.Query().Get("next"), 302)`},
 			fp:   []string{`res.redirect("/login")`, `res.redirect(302, "/dashboard")`, "res.redirect(`${req.protocol}://${req.hostname}/dashboard`)"},
