@@ -88,9 +88,9 @@ Rules are catalogued as first-class entities (see [#182](https://github.com/KKlo
 
 ```
 Rule {
-  Key            // stable, e.g. "go:unhandled-error"  (namespace by language)
+  Key            // stable, opaque. Namespace by analyzer domain. Existing IDs never renamed.
   Name           // short human title
-  Language       // "Go", "Python", …
+  Language       // explicit user-facing language ("Go", "Python", etc.). Never parsed from Key.
   Type           // bug | vulnerability | code_smell | security_hotspot
   Qualities[]    // security | reliability | maintainability
   DefaultSeverity// critical | high | medium | low | info
@@ -98,7 +98,9 @@ Rule {
   CWE[] / OWASP[]// when security-relevant
   Description    // what it flags (our own words)
   Rationale      // why it matters (cite the concept origin + a source link)
-  Remediation    // how to fix, with our own compliant + non-compliant example
+  Remediation    // how to fix
+  CompliantExample    // compliant code example
+  NoncompliantExample // non-compliant code example
   RemediationEffort // minutes, for the tech-debt measure
   Detection      // ast | pattern | metric
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/ignore"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/threatmodel"
@@ -1134,4 +1135,11 @@ type LicenseFileResolver interface {
 // LicenseScanner classifies component licenses and evaluates them against policy.
 type LicenseScanner interface {
 	Scan(ctx context.Context, doc *sbom.SBOM) ([]LicenseFinding, error)
+}
+
+// RuleCatalog is the first-party immutable reference data repository for rules.
+// It is read-only.
+type RuleCatalog interface {
+	List(ctx context.Context) ([]rule.Rule, error)
+	Get(ctx context.Context, key rule.Key) (rule.Rule, error)
 }
