@@ -17,16 +17,21 @@ describe('ProjectAnalysisFocusController', () => {
     vi.useRealTimers()
   })
 
-  it('focuses and smoothly scrolls the requested heading after it renders', async () => {
+  it.each([
+    ['security', 'overall', projectAnalysisLandmarks.findings, 'Analysis findings'],
+    ['coverage', 'overall', projectAnalysisLandmarks.coverage, 'Coverage'],
+    ['duplications', 'overall', projectAnalysisLandmarks.duplications, 'Duplicated blocks'],
+    ['new-code', 'new-code', projectAnalysisLandmarks.newCode, 'New Code period'],
+  ] as const)('focuses %s details and smoothly scrolls after they render', async (focusValue, lens, landmark, headingName) => {
     render(
       <>
-        <ProjectAnalysisFocusController projectKey="synapse" analysisRevision={0} focus="security" lens="overall" />
-        <h2 id={projectAnalysisLandmarks.findings} tabIndex={-1}>Analysis findings</h2>
+        <ProjectAnalysisFocusController projectKey="synapse" analysisRevision={0} focus={focusValue} lens={lens} />
+        <h2 id={landmark} tabIndex={-1}>{headingName}</h2>
       </>,
     )
 
     expect(scrollIntoView).not.toHaveBeenCalled()
-    const heading = screen.getByRole('heading', { name: 'Analysis findings' })
+    const heading = screen.getByRole('heading', { name: headingName })
     const focus = vi.spyOn(heading, 'focus')
     await flushFocusTimer()
     expect(scrollIntoView).toHaveBeenCalledOnce()
