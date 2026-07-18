@@ -53,7 +53,15 @@ const languageCols: Column<LanguageInventory>[] = [
   { header: 'Functions', className: 'w-24 shrink-0 text-right', cell: (language) => <span className="font-mono tabular-nums text-mutedfg">{language.functionsKnown ? language.functions.toLocaleString() : 'n/a'}</span> },
 ]
 
-export function CodeQualityReportView({ report, empty }: { report?: CodeQualityReport; empty: ReactNode }) {
+export function CodeQualityReportView({
+  report,
+  empty,
+  landmarkIds,
+}: {
+  report?: CodeQualityReport
+  empty: ReactNode
+  landmarkIds?: { qualityRatings?: string; duplications?: string }
+}) {
   const findings = report?.findings ?? []
   const kindCounts = useMemo(() => {
     const counts: Record<string, number> = {}
@@ -75,7 +83,7 @@ export function CodeQualityReportView({ report, empty }: { report?: CodeQualityR
 
   return (
     <div className="space-y-6">
-      <Card title="Quality ratings">
+      <Card title="Quality ratings" titleId={landmarkIds?.qualityRatings} titleTabIndex={landmarkIds?.qualityRatings ? -1 : undefined} titleClassName={landmarkIds?.qualityRatings ? 'scroll-mt-6 rounded-sm focus:outline-none focus:ring-2 focus:ring-brand/60' : undefined}>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <GradeCard label="Security" grade={report.rating.security} detail="Worst security issue severity" icon={ShieldCheck} />
           <GradeCard label="Reliability" grade={report.rating.reliability} detail="Worst reliability issue severity" icon={Gauge} />
@@ -117,6 +125,9 @@ export function CodeQualityReportView({ report, empty }: { report?: CodeQualityR
 
       <Card
         title="Duplicated blocks"
+        titleId={landmarkIds?.duplications}
+        titleTabIndex={landmarkIds?.duplications ? -1 : undefined}
+        titleClassName={landmarkIds?.duplications ? 'scroll-mt-6 rounded-sm focus:outline-none focus:ring-2 focus:ring-brand/60' : undefined}
         actions={<div className="flex items-center gap-2"><Pill>{dupDensity.toFixed(1)}% density</Pill>{report.duplication.blocks.length > duplicateBlocks.length && <span className="text-xs text-subtlefg">Showing {duplicateBlocks.length.toLocaleString()} of {report.duplication.blocks.length.toLocaleString()}</span>}</div>}
         bodyClass={duplicateBlocks.length === 0 ? undefined : 'p-0'}
       >

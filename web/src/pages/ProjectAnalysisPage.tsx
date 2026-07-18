@@ -5,6 +5,7 @@ import { FindingExplorer } from '../components/codequality/FindingExplorer'
 import { GateEvidence, GradeBadge } from '../components/codequality/qualityPresentation'
 import { Button, Card, EmptyState, ErrorState, Pill } from '../components/ui'
 import { api } from '../lib/api'
+import { projectAnalysisLandmarks } from '../lib/projectAnalysisNavigation'
 import type { LatestProjectAnalysis } from '../lib/types'
 import { ProjectRouteEmpty, useProjectRouteContext } from './CodeQualityProject'
 
@@ -64,7 +65,7 @@ function LatestAnalysisView({ latest, running }: { latest: LatestProjectAnalysis
         <GateEvidence gate={snapshot.gate} info={snapshot.gateInfo} />
       </Card>
       <div className="grid gap-6 xl:grid-cols-[1fr_1.25fr]">
-        <Card title="New Code period" actions={<Pill>{snapshot.delta ? 'Compared with previous' : 'First baseline'}</Pill>}>
+        <Card title="New Code period" titleId={projectAnalysisLandmarks.newCode} titleTabIndex={-1} titleClassName="scroll-mt-6 rounded-sm focus:outline-none focus:ring-2 focus:ring-brand/60" actions={<Pill>{snapshot.delta ? 'Compared with previous' : 'First baseline'}</Pill>}>
           <p className="text-sm text-mutedfg">
             {snapshot.delta ? `Changes since analysis ${snapshot.newCode.previousId.slice(0, 12)}. Material escalation and reactivation count as New Code.` : 'First analysis: every current publishable issue is treated as New Code; no comparison delta is available.'}
           </p>
@@ -107,8 +108,15 @@ function LatestAnalysisView({ latest, running }: { latest: LatestProjectAnalysis
           </p>
         )}
       </Card>
-      <FindingExplorer findings={scan.findings} />
-      <CodeQualityReportView report={scan.codeQuality} empty={<Card title="Code quality"><EmptyState icon={ShieldAlert} title="Code quality unavailable" hint="This completed scan did not produce a code-quality report." /></Card>} />
+      <FindingExplorer findings={scan.findings} headingId={projectAnalysisLandmarks.findings} />
+      <CodeQualityReportView
+        report={scan.codeQuality}
+        empty={<Card title="Code quality"><EmptyState icon={ShieldAlert} title="Code quality unavailable" hint="This completed scan did not produce a code-quality report." /></Card>}
+        landmarkIds={{
+          qualityRatings: projectAnalysisLandmarks.qualityRatings,
+          duplications: projectAnalysisLandmarks.duplications,
+        }}
+      />
     </div>
   )
 }

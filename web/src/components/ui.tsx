@@ -52,19 +52,25 @@ export function Card({
   actions,
   bodyClass,
   className,
+  titleClassName,
+  titleId,
+  titleTabIndex,
   children,
 }: {
   title?: ReactNode
   actions?: ReactNode
   bodyClass?: string
   className?: string
+  titleClassName?: string
+  titleId?: string
+  titleTabIndex?: number
   children: ReactNode
 }) {
   return (
     <section className={cn('card-sheen elev rounded-xl border border-border bg-card', className)}>
       {(title || actions) && (
         <header className="flex items-center justify-between gap-3 border-b border-border px-6 py-4">
-          <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+          <h2 id={titleId} tabIndex={titleTabIndex} className={cn('text-sm font-semibold text-foreground', titleClassName)}>{title}</h2>
           {actions}
         </header>
       )}
