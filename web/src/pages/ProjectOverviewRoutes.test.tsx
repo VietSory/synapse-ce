@@ -237,6 +237,39 @@ describe('Project Overview drill-down routes', () => {
     expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('All kinds')
   })
 
+  it('hands Coverage and Duplications to their existing sections without refetching', async () => {
+    const router = renderProjectRoute('/code-quality/projects/synapse/analysis?focus=coverage&lens=overall')
+    const coverageHeading = await screen.findByRole('heading', { name: 'Coverage' })
+    await waitFor(() => expect(coverageHeading).toHaveFocus())
+    expect(screen.getByText('Covered lines')).toBeInTheDocument()
+    expect(screen.getByText('Uncovered lines')).toBeInTheDocument()
+
+    await act(async () => {
+      await router.navigate('/code-quality/projects/synapse/analysis?focus=duplications&lens=overall')
+    })
+    const duplicationHeading = screen.getByRole('heading', { name: 'Duplicated blocks' })
+    await waitFor(() => expect(duplicationHeading).toHaveFocus())
+    expect(screen.getByText('src/a.ts')).toBeInTheDocument()
+    expect(screen.getByText('lines 10–20')).toBeInTheDocument()
+    expect(api.latestProjectAnalysis).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps Analysis load and no-analysis states primary over focus notices', async () => {
+    vi.mocked(api.latestProjectAnalysis).mockRejectedValueOnce(new Error('analysis detail offline'))
+    renderProjectRoute('/code-quality/projects/synapse/analysis?focus=coverage&lens=overall')
+    expect(await screen.findByText('analysis detail offline')).toBeInTheDocument()
+    expect(screen.queryByText('The requested detail is unavailable for this analysis.')).not.toBeInTheDocument()
+
+    vi.resetAllMocks()
+    vi.mocked(api.getProject).mockResolvedValue(project)
+    vi.mocked(api.projectAnalysisStatus).mockResolvedValue(null)
+    vi.mocked(api.latestProjectAnalysis).mockResolvedValue(null)
+    vi.mocked(api.listQualityGates).mockResolvedValue([])
+    renderProjectRoute('/code-quality/projects/synapse/analysis?focus=coverage&lens=overall')
+    expect(await screen.findByText('No completed analysis yet')).toBeInTheDocument()
+    expect(screen.queryByText('The requested detail is unavailable for this analysis.')).not.toBeInTheDocument()
+  })
+
   it('prevents a stale Project response from focusing or filtering the active Project', async () => {
     const alphaLatest = deferred<ReturnType<typeof buildLatestProjectAnalysis>>()
     const betaLatest = buildLatestProjectAnalysis({
