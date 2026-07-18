@@ -1,62 +1,130 @@
-import { AlertTriangle, CalendarClock, ShieldAlert } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CalendarClock, ShieldAlert } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { CodeQualityReportView } from '../components/codequality/CodeQualityReportView'
 import { FindingExplorer } from '../components/codequality/FindingExplorer'
+import { ProjectAnalysisFocusController } from '../components/codequality/ProjectAnalysisFocusController'
 import { ProjectCoverageDetail } from '../components/codequality/ProjectCoverageDetail'
 import { GateEvidence, GradeBadge } from '../components/codequality/qualityPresentation'
 import { Button, Card, EmptyState, ErrorState, Pill } from '../components/ui'
 import { api } from '../lib/api'
-import { projectAnalysisLandmarks } from '../lib/projectAnalysisNavigation'
+import {
+  normalizeProjectAnalysisSearch,
+  projectAnalysisLandmarks,
+  projectOverviewPath,
+  type ProjectAnalysisFocus,
+  type ProjectCodeLens,
+} from '../lib/projectAnalysisNavigation'
+import type { RatedFindingDimension } from '../lib/ratedFindingDimensions'
 import type { LatestProjectAnalysis } from '../lib/types'
 import { ProjectRouteEmpty, useProjectRouteContext } from './CodeQualityProject'
 
 type LoadState =
-  | { status: 'loading' }
-  | { status: 'loaded'; latest: LatestProjectAnalysis | null }
-  | { status: 'error'; message: string }
+  | { status: 'loading'; projectKey: string; analysisRevision: number }
+  | { status: 'loaded'; projectKey: string; analysisRevision: number; latest: LatestProjectAnalysis | null }
+  | { status: 'error'; projectKey: string; analysisRevision: number; message: string }
 
 export function ProjectAnalysisPage() {
   const { projectKey, isRunning, analysisRevision } = useProjectRouteContext()
-  const [state, setState] = useState<LoadState>({ status: 'loading' })
+  const [searchParams, setSearchParams] = useSearchParams()
+  const navigation = normalizeProjectAnalysisSearch(searchParams)
+  const [state, setState] = useState<LoadState>({ status: 'loading', projectKey, analysisRevision })
   const latestRequest = useRef<symbol | null>(null)
 
-  function load() {
+  function load(requestedProjectKey = projectKey, requestedRevision = analysisRevision) {
     const token = Symbol()
     latestRequest.current = token
-    setState({ status: 'loading' })
-    api.latestProjectAnalysis(projectKey)
+    setState({ status: 'loading', projectKey: requestedProjectKey, analysisRevision: requestedRevision })
+    api.latestProjectAnalysis(requestedProjectKey)
       .then((latest) => {
-        if (latestRequest.current === token) setState({ status: 'loaded', latest })
+        if (latestRequest.current === token) {
+          setState({ status: 'loaded', projectKey: requestedProjectKey, analysisRevision: requestedRevision, latest })
+        }
       })
       .catch((e) => {
-        if (latestRequest.current === token) setState({ status: 'error', message: e instanceof Error ? e.message : 'Failed to load analysis result' })
+        if (latestRequest.current === token) {
+          setState({
+            status: 'error',
+            projectKey: requestedProjectKey,
+            analysisRevision: requestedRevision,
+            message: e instanceof Error ? e.message : 'Failed to load analysis result',
+          })
+        }
       })
+    return token
   }
 
   useEffect(() => {
-    load()
+    const token = load(projectKey, analysisRevision)
+    return () => {
+      if (latestRequest.current === token) latestRequest.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectKey, analysisRevision])
 
-  if (state.status === 'loading') return <Card title="Analysis details"><EmptyState icon={ShieldAlert} title="Loading analysis details" hint="Fetching the full latest analysis report." /></Card>
-  if (state.status === 'error') {
+  useEffect(() => {
+    if (navigation.changed) setSearchParams(navigation.params, { replace: true })
+  }, [navigation.changed, navigation.params, setSearchParams])
+
+  const currentState = state.projectKey === projectKey && state.analysisRevision === analysisRevision
+    ? state
+    : { status: 'loading' as const, projectKey, analysisRevision }
+  const backToOverview = projectOverviewPath(projectKey, navigation.lens)
+  const backLink = (
+    <Link to={backToOverview} className="inline-flex w-fit items-center gap-1.5 rounded-md text-sm text-branddim hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60">
+      <ArrowLeft className="size-4" aria-hidden="true" /> Back to Overview
+    </Link>
+  )
+
+  if (currentState.status === 'loading') return <div className="space-y-3">{backLink}<Card title="Analysis details"><EmptyState icon={ShieldAlert} title="Loading analysis details" hint="Fetching the full latest analysis report." /></Card></div>
+  if (currentState.status === 'error') {
     return (
       <div className="space-y-3">
-        <ErrorState message={state.message} />
-        <Button variant="secondary" onClick={load}>Retry analysis details</Button>
+        {backLink}
+        <ErrorState message={currentState.message} />
+        <Button variant="secondary" onClick={() => load()}>Retry analysis details</Button>
       </div>
     )
   }
-  if (!state.latest) return <Card title="Analysis details"><ProjectRouteEmpty running={isRunning} /></Card>
-  return <LatestAnalysisView latest={state.latest} running={isRunning} />
+  if (!currentState.latest) return <div className="space-y-3">{backLink}<Card title="Analysis details"><ProjectRouteEmpty running={isRunning} /></Card></div>
+  return (
+    <div className="space-y-3">
+      {backLink}
+      <LatestAnalysisView
+        latest={currentState.latest}
+        running={isRunning}
+        projectKey={projectKey}
+        analysisRevision={analysisRevision}
+        focus={navigation.focus}
+        lens={navigation.lens}
+      />
+    </div>
+  )
 }
 
-function LatestAnalysisView({ latest, running }: { latest: LatestProjectAnalysis; running: boolean }) {
+function LatestAnalysisView({
+  latest,
+  running,
+  projectKey,
+  analysisRevision,
+  focus,
+  lens,
+}: {
+  latest: LatestProjectAnalysis
+  running: boolean
+  projectKey: string
+  analysisRevision: number
+  focus: ProjectAnalysisFocus | null
+  lens: ProjectCodeLens
+}) {
   const { analysis: snapshot, result: scan } = latest
   const coverage = snapshot.coverage && snapshot.coverage.totalLines > 0 ? 100 * snapshot.coverage.coveredLines / snapshot.coverage.totalLines : null
   const duplication = snapshot.duplication.totalLines > 0 ? 100 * snapshot.duplication.duplicatedLines / snapshot.duplication.totalLines : 0
+  const dimension = ratedDimensionForNavigation(focus, lens)
+  const navigationKey = `${projectKey}:${analysisRevision}:${lens}:${focus ?? 'none'}`
   return (
     <div className="space-y-6">
+      <ProjectAnalysisFocusController projectKey={projectKey} analysisRevision={analysisRevision} focus={focus} lens={lens} />
       {running && (
         <Card>
           <p className="text-sm text-mutedfg">A new analysis is in progress. Full details below are from the latest completed analysis.</p>
@@ -112,7 +180,7 @@ function LatestAnalysisView({ latest, running }: { latest: LatestProjectAnalysis
           </p>
         )}
       </Card>
-      <FindingExplorer findings={scan.findings} headingId={projectAnalysisLandmarks.findings} />
+      <FindingExplorer findings={scan.findings} headingId={projectAnalysisLandmarks.findings} initialDimension={dimension} dimensionNavigationKey={navigationKey} />
       <CodeQualityReportView
         report={scan.codeQuality}
         empty={<Card title="Code quality"><EmptyState icon={ShieldAlert} title="Code quality unavailable" hint="This completed scan did not produce a code-quality report." /></Card>}
@@ -123,6 +191,14 @@ function LatestAnalysisView({ latest, running }: { latest: LatestProjectAnalysis
       />
     </div>
   )
+}
+
+function ratedDimensionForNavigation(
+  focus: ProjectAnalysisFocus | null,
+  lens: ProjectCodeLens,
+): RatedFindingDimension | null {
+  if (lens !== 'overall') return null
+  return focus === 'security' || focus === 'reliability' || focus === 'maintainability' ? focus : null
 }
 
 function HealthMetric({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
