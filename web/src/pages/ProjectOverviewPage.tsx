@@ -108,7 +108,7 @@ export function ProjectOverviewPage() {
         <CodeLensToggle value={lens} onChange={setLens} />
       </div>
       <OverviewIssueSummary summary={overview.issueSummary} />
-      <OverviewMetricGrid lens={lens} metrics={selectedMetrics} />
+      <OverviewMetricGrid projectKey={projectKey} lens={lens} metrics={selectedMetrics} />
     </div>
   )
 }

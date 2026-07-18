@@ -24,14 +24,12 @@ export type OverviewMetricCardModel =
       kind: 'rating'
       label: string
       metric: RatingMetric
-      detailTarget: null
     }
   | {
       key: OverviewMetricKey
       kind: 'percentage'
       label: string
       metric: PercentageMetric
-      detailTarget: null
     }
 
 const percentFormatter = new Intl.NumberFormat(undefined, {
@@ -146,18 +144,17 @@ export function formatGateEvidenceValue(metric: ProjectOverviewGateMetric, value
 
 export function metricCardsForLens(lens: ProjectOverviewLens): OverviewMetricCardModel[] {
   return [
-    { key: 'security', kind: 'rating', label: 'Security', metric: lens.security, detailTarget: null },
-    { key: 'reliability', kind: 'rating', label: 'Reliability', metric: lens.reliability, detailTarget: null },
-    { key: 'maintainability', kind: 'rating', label: 'Maintainability', metric: lens.maintainability, detailTarget: null },
+    { key: 'security', kind: 'rating', label: 'Security', metric: lens.security },
+    { key: 'reliability', kind: 'rating', label: 'Reliability', metric: lens.reliability },
+    { key: 'maintainability', kind: 'rating', label: 'Maintainability', metric: lens.maintainability },
     {
       key: 'securityHotspotsReviewed',
       kind: 'percentage',
       label: 'Security Hotspots Reviewed',
       metric: lens.securityHotspotsReviewed,
-      detailTarget: null,
     },
-    { key: 'coverage', kind: 'percentage', label: 'Coverage', metric: lens.coverage, detailTarget: null },
-    { key: 'duplications', kind: 'percentage', label: 'Duplications', metric: lens.duplications, detailTarget: null },
+    { key: 'coverage', kind: 'percentage', label: 'Coverage', metric: lens.coverage },
+    { key: 'duplications', kind: 'percentage', label: 'Duplications', metric: lens.duplications },
   ]
 }
 
@@ -170,10 +167,6 @@ export function countMetricDisplay(metric: CountMetric): { value: string; label:
     label: availabilityLabel(metric.availability),
     reason: metric.unavailableReason ? unavailableReasonText(metric.unavailableReason) : null,
   }
-}
-
-export function overviewDetailTarget(): null {
-  return null
 }
 
 function gradeFromNumericGateValue(value: number): string {

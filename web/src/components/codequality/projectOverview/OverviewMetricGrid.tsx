@@ -1,8 +1,9 @@
 import type { ProjectOverviewLens } from '../../../lib/projectOverview'
+import { overviewDetailTarget } from '../../../lib/projectOverviewDetailTargets'
 import { metricCardsForLens, type CodeLens } from '../../../lib/projectOverviewPresentation'
 import { OverviewMetricCard } from './OverviewMetricCard'
 
-export function OverviewMetricGrid({ lens, metrics }: { lens: CodeLens; metrics: ProjectOverviewLens }) {
+export function OverviewMetricGrid({ projectKey, lens, metrics }: { projectKey: string; lens: CodeLens; metrics: ProjectOverviewLens }) {
   const lensLabel = lens === 'overall' ? 'Overall Code' : 'New Code'
   return (
     <section aria-labelledby="overview-metrics-heading">
@@ -11,7 +12,12 @@ export function OverviewMetricGrid({ lens, metrics }: { lens: CodeLens; metrics:
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {metricCardsForLens(metrics).map((card) => (
-          <OverviewMetricCard key={card.key} card={card} lensLabel={lensLabel} />
+          <OverviewMetricCard
+            key={card.key}
+            card={card}
+            detailTarget={overviewDetailTarget(projectKey, lens, card)}
+            lensLabel={lensLabel}
+          />
         ))}
       </div>
     </section>

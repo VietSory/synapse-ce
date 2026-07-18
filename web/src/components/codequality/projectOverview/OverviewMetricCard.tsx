@@ -1,4 +1,6 @@
-import { Bug, Copy, Eye, Gauge, Shield, Wrench, type LucideIcon } from 'lucide-react'
+import { ArrowRight, Bug, Copy, Eye, Gauge, Shield, Wrench, type LucideIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import type { OverviewDetailTarget } from '../../../lib/projectOverviewDetailTargets'
 import type { OverviewMetricCardModel } from '../../../lib/projectOverviewPresentation'
 import {
   availabilityLabel,
@@ -16,7 +18,15 @@ const icons: Record<OverviewMetricCardModel['key'], LucideIcon> = {
   duplications: Copy,
 }
 
-export function OverviewMetricCard({ card, lensLabel }: { card: OverviewMetricCardModel; lensLabel: string }) {
+export function OverviewMetricCard({
+  card,
+  detailTarget,
+  lensLabel,
+}: {
+  card: OverviewMetricCardModel
+  detailTarget: OverviewDetailTarget | null
+  lensLabel: string
+}) {
   const Icon = icons[card.key]
   const metric = card.metric
   const available = metric.availability === 'available'
@@ -42,7 +52,17 @@ export function OverviewMetricCard({ card, lensLabel }: { card: OverviewMetricCa
           {value ?? '—'}
         </div>
         {reason && <p className="text-sm text-mutedfg">{reason}</p>}
-        {!card.detailTarget && <p className="mt-auto text-xs text-subtlefg">Details not available yet</p>}
+        {detailTarget ? (
+          <Link
+            to={detailTarget.to}
+            aria-label={detailTarget.label}
+            className="mt-auto inline-flex w-fit items-center gap-1.5 rounded-md text-sm font-medium text-branddim hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60 focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          >
+            View details <ArrowRight className="size-4" aria-hidden="true" />
+          </Link>
+        ) : (
+          <p className="mt-auto text-xs text-subtlefg">Details not available yet</p>
+        )}
       </div>
     </Card>
   )

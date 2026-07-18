@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { buildAnalyzedOverview, buildFailedGate, buildPassedGate, unavailablePercentage } from '../../../test/projectOverviewFixtures'
 import { CodeLensToggle } from './CodeLensToggle'
@@ -52,16 +53,16 @@ describe('Project Overview components', () => {
 
   it('renders metric cards with explicit non-color status cues', () => {
     const overview = buildAnalyzedOverview()
-    render(<OverviewMetricCard card={{ key: 'security', kind: 'rating', label: 'Security', metric: overview.lenses.overall.security, detailTarget: null }} lensLabel="Overall Code" />)
+    render(<OverviewMetricCard card={{ key: 'security', kind: 'rating', label: 'Security', metric: overview.lenses.overall.security }} detailTarget={null} lensLabel="Overall Code" />)
     expect(screen.getByText('B')).toBeInTheDocument()
     expect(screen.getByText('Grade B')).toBeInTheDocument()
     expect(screen.getByText('Details not available yet')).toBeInTheDocument()
 
-    render(<OverviewMetricCard card={{ key: 'coverage', kind: 'percentage', label: 'Coverage', metric: overview.lenses.overall.coverage, detailTarget: null }} lensLabel="Overall Code" />)
+    render(<OverviewMetricCard card={{ key: 'coverage', kind: 'percentage', label: 'Coverage', metric: overview.lenses.overall.coverage }} detailTarget={null} lensLabel="Overall Code" />)
     expect(screen.getByText('72.3%')).toBeInTheDocument()
     expect(screen.getByText('Measured on Overall Code')).toBeInTheDocument()
 
-    render(<OverviewMetricCard card={{ key: 'coverage', kind: 'percentage', label: 'Coverage', metric: { ...unavailablePercentage('coverage_not_supplied'), availability: 'not_supplied' }, detailTarget: null }} lensLabel="Overall Code" />)
+    render(<OverviewMetricCard card={{ key: 'coverage', kind: 'percentage', label: 'Coverage', metric: { ...unavailablePercentage('coverage_not_supplied'), availability: 'not_supplied' } }} detailTarget={null} lensLabel="Overall Code" />)
     expect(screen.getByText('Not supplied')).toBeInTheDocument()
     expect(screen.getByText('No coverage report was supplied.')).toBeInTheDocument()
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
@@ -70,7 +71,11 @@ describe('Project Overview components', () => {
 
   it('renders exactly six metric cards in fixed order for mixed availability', () => {
     const overview = buildAnalyzedOverview()
-    render(<OverviewMetricGrid lens="new-code" metrics={overview.lenses.newCode} />)
+    render(
+      <MemoryRouter>
+        <OverviewMetricGrid projectKey="synapse" lens="new-code" metrics={overview.lenses.newCode} />
+      </MemoryRouter>,
+    )
     const headings = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)
     expect(headings).toEqual([
       'Security',
@@ -80,7 +85,7 @@ describe('Project Overview components', () => {
       'Coverage',
       'Duplications',
     ])
-    expect(screen.getAllByText('Details not available yet')).toHaveLength(6)
+    expect(screen.getAllByText('Details not available yet')).toHaveLength(4)
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
   })
 })
