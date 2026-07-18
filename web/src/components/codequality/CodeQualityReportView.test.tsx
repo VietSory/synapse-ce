@@ -77,6 +77,22 @@ describe('CodeQualityReportView', () => {
     expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
   })
 
+  it('uses honest percentage boundaries and explains missing block locations', () => {
+    render(
+      <CodeQualityReportView
+        report={{
+          ...report,
+          duplication: { blocks: [], duplicatedLines: 2499, totalLines: 2500, files: 2 },
+        }}
+        empty={<div>Unavailable</div>}
+      />,
+    )
+
+    expect(screen.getAllByText(/99\.9%/)).toHaveLength(3)
+    expect(screen.queryByText(/100%/)).not.toBeInTheDocument()
+    expect(screen.getByText('Duplication was measured at 99.9%, but block-level locations are unavailable for this analysis.')).toBeInTheDocument()
+  })
+
   it('renders the caller unavailable state when no report exists', () => {
     render(<CodeQualityReportView report={undefined} empty={<div>Unavailable</div>} />)
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
