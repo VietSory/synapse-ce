@@ -4,6 +4,7 @@ import { createMemoryRouter, Outlet, RouterProvider, useParams } from 'react-rou
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../lib/api'
 import type { Project, ProjectAnalysis, ScanJob } from '../lib/types'
+import { buildFinding, buildLatestProjectAnalysis } from '../test/projectAnalysisFixtures'
 import { buildAnalyzedOverview, buildNotAnalyzedOverview } from '../test/projectOverviewFixtures'
 import { CodeQualityProject } from './CodeQualityProject'
 import { ProjectActivityPage } from './ProjectActivityPage'
@@ -152,6 +153,118 @@ describe('Project Overview routes', () => {
     expect(api.projectAnalyses).toHaveBeenCalledWith('synapse')
     expect(api.latestProjectAnalysis).not.toHaveBeenCalled()
     expect(api.projectOverview).not.toHaveBeenCalled()
+  })
+})
+
+describe('Project Overview drill-down routes', () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    vi.mocked(api.getProject).mockResolvedValue(project)
+    vi.mocked(api.projectAnalysisStatus).mockResolvedValue(null)
+    vi.mocked(api.projectOverview).mockResolvedValue(buildAnalyzedOverview())
+    vi.mocked(api.latestProjectAnalysis).mockResolvedValue(buildLatestProjectAnalysis())
+    vi.mocked(api.projectAnalyses).mockResolvedValue({ items: [], next: null })
+    vi.mocked(api.listQualityGates).mockResolvedValue([])
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: vi.fn().mockReturnValue({ matches: false }) })
+  })
+
+  it('loads the full analysis only after a detail link is activated', async () => {
+    const router = renderProjectRoute('/code-quality/projects/synapse?lens=overall')
+    const link = await screen.findByRole('link', { name: 'View Security details' })
+
+    fireEvent.mouseOver(link)
+    fireEvent.focus(link)
+    expect(api.latestProjectAnalysis).not.toHaveBeenCalled()
+    expect(api.projectAnalyses).not.toHaveBeenCalled()
+
+    fireEvent.click(link)
+    expect(router.state.location.pathname).toBe('/code-quality/projects/synapse/analysis')
+    expect(router.state.location.search).toBe('?focus=security&lens=overall')
+    expect(await screen.findByRole('heading', { name: 'Analysis findings' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Security dimension'))
+    expect(screen.getByRole('button', { name: /SAST security finding/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Reliability finding/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Maintainability finding/i })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Analysis findings' })).toHaveFocus())
+    expect(api.latestProjectAnalysis).toHaveBeenCalledTimes(1)
+    expect(api.latestProjectAnalysis).toHaveBeenCalledWith('synapse')
+    expect(api.projectAnalyses).not.toHaveBeenCalled()
+  })
+
+  it('changes focus and browser history without refetching the loaded analysis', async () => {
+    const router = renderProjectRoute('/code-quality/projects/synapse/analysis?focus=security&lens=overall')
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Security dimension'))
+
+    await act(async () => {
+      await router.navigate('/code-quality/projects/synapse/analysis?focus=reliability&lens=overall')
+    })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Reliability dimension'))
+    expect(screen.getByRole('button', { name: /Reliability finding/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /SAST security finding/i })).not.toBeInTheDocument()
+    expect(api.latestProjectAnalysis).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await router.navigate(-1) })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Security dimension'))
+    await act(async () => { await router.navigate(1) })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Reliability dimension'))
+    expect(api.latestProjectAnalysis).toHaveBeenCalledTimes(1)
+  })
+
+  it('hands New Code ratings to the summary and preserves the lens on Back to Overview', async () => {
+    const router = renderProjectRoute('/code-quality/projects/synapse?lens=new-code')
+    fireEvent.click(await screen.findByRole('link', { name: 'View Security details' }))
+
+    expect(await screen.findByText('Individual New Code issue drill-down will be available in the Issues Explorer.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'New Code period' })).toHaveFocus())
+    expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('All kinds')
+    expect(screen.queryByText('New Code findings')).not.toBeInTheDocument()
+    expect(router.state.location.search).toBe('?focus=security&lens=new-code')
+
+    const back = screen.getByRole('link', { name: 'Back to Overview' })
+    expect(back).toHaveAttribute('href', '/code-quality/projects/synapse?lens=new-code')
+    fireEvent.click(back)
+    expect(router.state.location.pathname).toBe('/code-quality/projects/synapse')
+    expect(router.state.location.search).toBe('?lens=new-code')
+    expect(await screen.findByRole('button', { name: 'New Code' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('normalizes invalid Analysis query values with replace and no extra fetch', async () => {
+    const router = renderProjectRoute('/code-quality/projects/synapse/analysis?focus=issues&lens=bad&trace=keep')
+    expect(await screen.findByRole('heading', { name: 'Analysis findings' })).toBeInTheDocument()
+    await waitFor(() => expect(router.state.location.search).toBe('?lens=overall&trace=keep'))
+    expect(api.latestProjectAnalysis).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('All kinds')
+  })
+
+  it('prevents a stale Project response from focusing or filtering the active Project', async () => {
+    const alphaLatest = deferred<ReturnType<typeof buildLatestProjectAnalysis>>()
+    const betaLatest = buildLatestProjectAnalysis({
+      id: 'beta-analysis',
+      sourceRef: 'beta',
+      findings: [buildFinding('beta-reliability', 'Beta reliability finding', 'reliability', 'medium')],
+    })
+    vi.mocked(api.getProject).mockImplementation((key) => Promise.resolve(buildProject(key, key === 'alpha' ? 'Alpha' : 'Beta')))
+    vi.mocked(api.latestProjectAnalysis).mockImplementation((key) => key === 'alpha' ? alphaLatest.promise : Promise.resolve(betaLatest))
+    const router = renderProjectRoute('/code-quality/projects/alpha/analysis?focus=security&lens=overall')
+    await waitFor(() => expect(api.latestProjectAnalysis).toHaveBeenCalledWith('alpha'))
+
+    await act(async () => {
+      await router.navigate('/code-quality/projects/beta/analysis?focus=reliability&lens=overall')
+    })
+    expect(await screen.findByRole('heading', { name: 'Beta' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Reliability dimension'))
+    expect(screen.getByRole('button', { name: /Beta reliability finding/i })).toBeInTheDocument()
+
+    alphaLatest.resolve(buildLatestProjectAnalysis({
+      id: 'alpha-analysis',
+      sourceRef: 'alpha',
+      findings: [buildFinding('alpha-sast', 'Alpha stale SAST finding', 'sast', 'high')],
+    }))
+    await settle()
+    expect(screen.queryByRole('button', { name: /Alpha stale SAST finding/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Filter findings by kind' })).toHaveTextContent('Reliability dimension')
+    expect(screen.getByRole('heading', { name: 'Analysis findings' })).toHaveFocus()
   })
 })
 
