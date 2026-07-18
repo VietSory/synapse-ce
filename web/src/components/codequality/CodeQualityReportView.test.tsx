@@ -44,7 +44,7 @@ describe('CodeQualityReportView', () => {
     expect(screen.getByText('2.80% technical-debt ratio')).toBeInTheDocument()
     expect(screen.getByText('2h 15m')).toBeInTheDocument()
     expect(screen.getByText('4,700')).toBeInTheDocument()
-    expect(screen.getByText('5.0%')).toBeInTheDocument()
+    expect(screen.getByText('5%')).toBeInTheDocument()
 
     const languageTable = screen.getAllByRole('table')[0]
     const cells = within(languageTable).getAllByRole('cell')
@@ -72,7 +72,7 @@ describe('CodeQualityReportView', () => {
     render(<CodeQualityReportView report={{ ...report, inventory: [], findings: [], duplication: { blocks: [], duplicatedLines: 0, totalLines: 0, files: 0 } }} empty={<div>Unavailable</div>} />)
 
     expect(screen.getByText('No source files detected in this analysis.')).toBeInTheDocument()
-    expect(screen.getByText('No duplicated code blocks were detected.')).toBeInTheDocument()
+    expect(screen.getByText('No duplicated blocks were detected.')).toBeInTheDocument()
     expect(screen.getByText('No code-quality issues were detected in this analysis.')).toBeInTheDocument()
     expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
   })
