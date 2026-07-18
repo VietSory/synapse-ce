@@ -121,6 +121,8 @@ export function CodeQualityProject() {
     }
   }, [])
 
+  if (project && project.key !== key) return <Spinner label="Loading project…" />
+
   async function assignGate(gateId: string) {
     setOperationError(null)
     try {

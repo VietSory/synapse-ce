@@ -292,6 +292,34 @@ describe('Project Overview drill-down routes', () => {
     expect(screen.queryByText('The requested detail is unavailable for this analysis.')).not.toBeInTheDocument()
   })
 
+  it('does not carry a previous Project revision into Analysis navigation', async () => {
+    let alphaStatusCalls = 0
+    vi.mocked(api.getProject).mockImplementation((key) => Promise.resolve(buildProject(key, key === 'alpha' ? 'Alpha' : 'Beta')))
+    vi.mocked(api.projectAnalysisStatus).mockImplementation((key) => {
+      if (key !== 'alpha') return Promise.resolve(null)
+      alphaStatusCalls += 1
+      return Promise.resolve(alphaStatusCalls === 1 ? null : buildJob('alpha-succeeded', 'succeeded'))
+    })
+    vi.mocked(api.startProjectAnalysis).mockResolvedValue(buildJob('alpha-running', 'running'))
+    vi.mocked(api.latestProjectAnalysis).mockImplementation((key) => Promise.resolve(buildLatestProjectAnalysis({ id: `${key}-analysis` })))
+    const router = renderProjectRoute('/code-quality/projects/alpha')
+    expect(await screen.findByText('Quality Gate Failed')).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    try {
+      await startAnalysisPoll()
+      await act(async () => vi.advanceTimersByTimeAsync(1500))
+      await settle()
+      await act(async () => { await router.navigate('/code-quality/projects/beta/analysis') })
+      await settle()
+      expect(screen.getByRole('heading', { name: 'Beta' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Analysis findings' })).toBeInTheDocument()
+      expect(vi.mocked(api.latestProjectAnalysis).mock.calls.filter(([key]) => key === 'beta')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('prevents a stale Project response from focusing or filtering the active Project', async () => {
     const alphaLatest = deferred<ReturnType<typeof buildLatestProjectAnalysis>>()
     const betaLatest = buildLatestProjectAnalysis({
