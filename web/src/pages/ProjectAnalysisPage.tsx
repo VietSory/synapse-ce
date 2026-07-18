@@ -29,6 +29,7 @@ export function ProjectAnalysisPage() {
   const { projectKey, isRunning, analysisRevision } = useProjectRouteContext()
   const [searchParams, setSearchParams] = useSearchParams()
   const navigation = normalizeProjectAnalysisSearch(searchParams)
+  const normalizedSearch = navigation.params.toString()
   const [state, setState] = useState<LoadState>({ status: 'loading', projectKey, analysisRevision })
   const latestRequest = useRef<symbol | null>(null)
 
@@ -64,8 +65,8 @@ export function ProjectAnalysisPage() {
   }, [projectKey, analysisRevision])
 
   useEffect(() => {
-    if (navigation.changed) setSearchParams(navigation.params, { replace: true })
-  }, [navigation.changed, navigation.params, setSearchParams])
+    if (navigation.changed) setSearchParams(new URLSearchParams(normalizedSearch), { replace: true })
+  }, [navigation.changed, normalizedSearch, setSearchParams])
 
   const currentState = state.projectKey === projectKey && state.analysisRevision === analysisRevision
     ? state
