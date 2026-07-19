@@ -13,11 +13,13 @@ import (
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/hotspot"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	hotspotsuc "github.com/KKloudTarus/synapse-ce/internal/usecase/hotspots"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 	qualitygatesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/qualitygates"
 	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
@@ -32,6 +34,8 @@ type Service struct {
 	scanner          *scauc.Service
 	archives         ports.ProjectArchiveStore
 	analyses         ports.ProjectAnalysisStore
+	hotspots         ports.ProjectHotspotStore
+	ruleCatalog      ports.RuleCatalog
 	findings         ports.FindingRepository
 	gates            *qualitygatesuc.Service
 	gateMutator      ports.QualityGateMutator
@@ -45,6 +49,8 @@ func NewService(repo ports.ProjectRepository, engagements ports.EngagementReposi
 func (s *Service) SetScanner(scanner *scauc.Service)                      { s.scanner = scanner }
 func (s *Service) SetArchiveStore(store ports.ProjectArchiveStore)        { s.archives = store }
 func (s *Service) SetAnalysisStore(store ports.ProjectAnalysisStore)      { s.analyses = store }
+func (s *Service) SetHotspotStore(store ports.ProjectHotspotStore)        { s.hotspots = store }
+func (s *Service) SetRuleCatalog(catalog ports.RuleCatalog)               { s.ruleCatalog = catalog }
 func (s *Service) SetFindingRepository(repo ports.FindingRepository)      { s.findings = repo }
 func (s *Service) SetQualityGates(gates *qualitygatesuc.Service)          { s.gates = gates }
 func (s *Service) SetQualityGateMutator(mutator ports.QualityGateMutator) { s.gateMutator = mutator }
@@ -367,6 +373,10 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 		}
 	}
 	all = finding.Publishable(all)
+	issues, candidates, err := hotspotsuc.Classify(ctx, all, s.ruleCatalog)
+	if err != nil {
+		return fmt.Errorf("classify project hotspots: %w", err)
+	}
 	loc := 0
 	if result.CodeQuality != nil {
 		loc = result.CodeQuality.Inventory.Totals().CodeLines
@@ -388,7 +398,7 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	}
 	analysis, err := projectanalysis.Build(projectanalysis.Input{
 		ID: jobID, TenantID: p.TenantID, ProjectID: p.ID, ProjectKey: p.Key, CreatedAt: completedAt,
-		SourceRef: result.SourceRef, SourceCommit: result.SourceCommit, Findings: all, Gate: gate, GateSource: gateSource, GateExempt: result.GateExemptKeys(all), LinesOfCode: loc,
+		SourceRef: result.SourceRef, SourceCommit: result.SourceCommit, Findings: issues, Gate: gate, GateSource: gateSource, GateExempt: result.GateExemptKeys(issues), LinesOfCode: loc,
 		Coverage: result.LineCoverage, Duplication: duplicationOf(result), Previous: baseline,
 	})
 	if err != nil {
@@ -398,10 +408,40 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	if err != nil {
 		return fmt.Errorf("marshal project analysis result: %w", err)
 	}
-	if err := s.analyses.SaveWithResult(ctx, analysis, data); err != nil {
+	if projectionStore, ok := s.analyses.(ports.ProjectAnalysisProjectionStore); ok {
+		if err := projectionStore.SaveWithResultAndHotspots(ctx, analysis, data, candidates); err != nil {
+			return fmt.Errorf("save project analysis and hotspots: %w", err)
+		}
+	} else if len(candidates) > 0 {
+		return fmt.Errorf("save project analysis and hotspots: projection store is not configured")
+	} else if err := s.analyses.SaveWithResult(ctx, analysis, data); err != nil {
 		return fmt.Errorf("save project analysis: %w", err)
 	}
 	return nil
+}
+
+// ListHotspots returns only projections belonging to the requested tenant and Project.
+func (s *Service) ListHotspots(ctx context.Context, tenantID shared.ID, key string, filter hotspot.ListFilter) (hotspot.Page, error) {
+	if s.hotspots == nil {
+		return hotspot.Page{}, shared.ErrNotFound
+	}
+	p, err := s.Get(ctx, tenantID, key)
+	if err != nil {
+		return hotspot.Page{}, err
+	}
+	return s.hotspots.ListHotspots(ctx, tenantID, p.ID, filter)
+}
+
+// GetHotspot returns one projection only after the Project has been resolved in the caller's tenant.
+func (s *Service) GetHotspot(ctx context.Context, tenantID shared.ID, key string, hotspotID shared.ID) (hotspot.Hotspot, error) {
+	if s.hotspots == nil {
+		return hotspot.Hotspot{}, shared.ErrNotFound
+	}
+	p, err := s.Get(ctx, tenantID, key)
+	if err != nil {
+		return hotspot.Hotspot{}, err
+	}
+	return s.hotspots.GetHotspot(ctx, tenantID, p.ID, hotspotID)
 }
 
 func (s *Service) resolveManagedGate(ctx context.Context, tenantID shared.ID, key string) (qualitygate.Gate, error) {

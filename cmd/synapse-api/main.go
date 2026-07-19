@@ -344,11 +344,23 @@ func main() {
 	projectService := projectuc.NewService(projectRepo, repo, clock, ids, auditLog, !cfg.IsProduction())
 	projectService.SetArchiveStore(file.NewProjectArchiveStore(cfg.ProjectUploadDir, cfg.MaxWorkspaceBytes))
 	projectService.SetAnalysisStore(projectAnalysisStore)
+	if hotspotStore, ok := projectAnalysisStore.(ports.ProjectHotspotStore); ok {
+		projectService.SetHotspotStore(hotspotStore)
+	} else {
+		log.Error("project hotspot store is not configured")
+		os.Exit(1)
+	}
 	projectService.SetFindingRepository(findingRepo)
 	qualityGateService := qualitygatesuc.NewService(qualityGateStore, auditLog, clock)
 	qualityGateService.SetMutator(qualityGateMutator)
 	projectService.SetQualityGates(qualityGateService)
 	projectService.SetQualityGateMutator(qualityGateMutator)
+	ruleCatalog, catalogErr := rulecatalog.Default()
+	if catalogErr != nil {
+		log.Error("rule catalog init failed", "err", catalogErr)
+		os.Exit(1)
+	}
+	projectService.SetRuleCatalog(ruleCatalog)
 	// Evidence artifact blob store: MinIO/S3 when configured, else in-memory (dev).
 	var blobStore ports.BlobStore
 	if cfg.BlobEndpoint != "" {
@@ -871,10 +883,7 @@ func main() {
 	)
 	router.SetCodeQuality(codeQualityService)
 	scaService.SetCodeQuality(codeQualityService)
-	if ruleCat, rerr := rulecatalog.Default(); rerr != nil {
-		log.Error("rule catalog init failed", "err", rerr)
-		os.Exit(1)
-	} else if rulesSvc, rerr := rules.NewService(ruleCat); rerr != nil {
+	if rulesSvc, rerr := rules.NewService(ruleCatalog); rerr != nil {
 		log.Error("rules service init failed", "err", rerr)
 		os.Exit(1)
 	} else {

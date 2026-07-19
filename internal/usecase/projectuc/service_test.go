@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/hotspot"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -31,6 +33,17 @@ type captureAudit struct{ entries []ports.AuditEntry }
 func (a *captureAudit) Record(_ context.Context, e ports.AuditEntry) error {
 	a.entries = append(a.entries, e)
 	return nil
+}
+
+type projectRuleCatalog struct{ rules map[rule.Key]rule.Rule }
+
+func (c projectRuleCatalog) List(context.Context) ([]rule.Rule, error) { return nil, nil }
+func (c projectRuleCatalog) Get(_ context.Context, key rule.Key) (rule.Rule, error) {
+	item, ok := c.rules[key]
+	if !ok {
+		return rule.Rule{}, shared.ErrNotFound
+	}
+	return item, nil
 }
 
 func TestServiceCRUDAndAudit(t *testing.T) {
@@ -271,5 +284,55 @@ func TestRecordProjectAnalysisHydratesCurrentTriageOnly(t *testing.T) {
 	}
 	if list[0].Issues.Total != 1 || len(list[0].InternalIssues) != 1 || list[0].InternalIssues[0].Key != "current" {
 		t.Fatalf("stale finding leaked into snapshot: %+v", list[0])
+	}
+}
+
+func TestRecordProjectAnalysisExcludesCatalogHotspotsFromProjectMetrics(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	svc.SetHotspotStore(analyses)
+	svc.SetRuleCatalog(projectRuleCatalog{rules: map[rule.Key]rule.Rule{
+		"hotspot-rule": {Key: "hotspot-rule", Type: rule.TypeSecurityHotspot, Qualities: []rule.Quality{rule.QualitySecurity}},
+	}})
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &scauc.ScanResult{Findings: []finding.Finding{
+		{ID: "hotspot", DedupKey: "sast:hotspot-rule:src/main.go:7", RuleKey: "hotspot-rule", Kind: finding.KindSAST, Severity: shared.SeverityCritical, Title: "Review this", Description: "Review the security-sensitive use", Status: finding.StatusOpen},
+		{ID: "normal", DedupKey: "normal", Kind: finding.KindSCA, Severity: shared.SeverityLow, Title: "Normal", Description: "Normal issue", Status: finding.StatusOpen},
+	}}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), result); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("analysis=%+v err=%v", list, err)
+	}
+	analysis := list[0]
+	if analysis.Issues.Total != 1 || analysis.NewCode.Counts.Total != 1 {
+		t.Fatalf("hotspot counted as issue: %+v", analysis)
+	}
+	if got := analysis.Measures[qualitygate.MetricNewVulnerability]; got != 1 {
+		t.Fatalf("new vulnerability=%v, want 1 normal finding only", got)
+	}
+	if analysis.Rating.Security != "B" {
+		t.Fatalf("security rating=%q, want B from low normal issue only", analysis.Rating.Security)
+	}
+	if got := analysis.Measures[qualitygate.MetricNewCritical]; got != 0 {
+		t.Fatalf("new critical=%v, hotspot leaked into gate measures", got)
+	}
+	id := hotspot.DeterministicID(p.TenantID, p.ID, "sast:hotspot-rule:src/main.go:7")
+	projected, err := analyses.GetHotspot(ctx, p.TenantID, p.ID, id)
+	if err != nil || projected.Status != hotspot.StatusToReview || projected.Location != "src/main.go:7" {
+		t.Fatalf("projection=%+v err=%v", projected, err)
 	}
 }
