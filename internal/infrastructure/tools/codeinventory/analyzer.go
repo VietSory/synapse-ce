@@ -71,6 +71,7 @@ func (a *Analyzer) Inventory(ctx context.Context, root string) (measure.Inventor
 		return measure.Inventory{}, nil
 	}
 	byLang := map[string]measure.LanguageInventory{}
+	var fileFacts []measure.FileInventory
 	brokenFuncs := map[string]bool{} // a parser-supported language with an unparseable file: count is unreliable
 	files := 0
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -126,6 +127,29 @@ func (a *Analyzer) Inventory(ctx context.Context, root string) (measure.Inventor
 			}
 		}
 		byLang[lang] = li
+
+		relPath := path
+		if strings.HasPrefix(path, root) {
+			relPath = strings.TrimPrefix(path, root)
+			relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
+		}
+		relPath = strings.ReplaceAll(relPath, "\\", "/")
+
+		fileFact := measure.FileInventory{
+			Path:         relPath,
+			Language:     lang,
+			CodeLines:    code,
+			CommentLines: comment,
+			BlankLines:   blank,
+		}
+		if fn, supported, ok := countFunctions(lang, content); supported {
+			fileFact.FunctionsKnown = true
+			if ok {
+				fileFact.Functions = fn
+			}
+		}
+		fileFacts = append(fileFacts, fileFact)
+
 		return nil
 	})
 	if walkErr != nil && walkErr != io.EOF {
@@ -156,9 +180,11 @@ func (a *Analyzer) Inventory(ctx context.Context, root string) (measure.Inventor
 				li.FunctionsKnown = true
 				byLang[lang] = li
 			}
+			// We do not currently have per-file function counts from the AST provider in Phase 0.
+			// Per-file functions for non-Go languages will remain 0 / FunctionsKnown=false.
 		}
 	}
-	return measure.NewInventory(byLang), nil
+	return measure.NewInventory(byLang, fileFacts...), nil
 }
 
 // readBounded reads up to maxFileBytes of a regular file via Lstat (never follows a symlink out of the

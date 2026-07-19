@@ -80,6 +80,7 @@ type Analysis struct {
 	Rating         rating.Report             `json:"rating"`
 	Hotspots       hotspot.Summary           `json:"hotspots"`
 	NewHotspots    hotspot.Summary           `json:"new_hotspots"`
+	Snapshot       measure.Snapshot          `json:"snapshot"`
 }
 
 // Input supplies one completed scan's project-facing facts. Findings must be the
@@ -102,6 +103,7 @@ type Input struct {
 	Previous     *Analysis
 	Hotspots     hotspot.Summary
 	NewHotspots  hotspot.Summary
+	Snapshot     measure.Snapshot
 }
 
 // Build returns one immutable snapshot and evaluates the built-in gate at creation.
@@ -177,6 +179,7 @@ func Build(in Input) (Analysis, error) {
 		Delta: buildDelta(counts, measures, overallRating, in.Previous), Coverage: in.Coverage,
 		Duplication: in.Duplication, Rating: overallRating,
 		Hotspots: in.Hotspots, NewHotspots: in.NewHotspots,
+		Snapshot: in.Snapshot,
 	}, nil
 }
 
