@@ -137,8 +137,11 @@ type BuildSnapshotInput struct {
 // CanonicalPath normalizes a file path and strictly rejects traversal and absolute paths.
 func CanonicalPath(p string) (string, error) {
 	p = strings.ReplaceAll(p, "\\", "/")
-	if p == "" || p == "." {
+	if p == "" {
 		return "", nil
+	}
+	if p == "." {
+		return "", errors.New("canonical path: dot paths are not allowed")
 	}
 	if strings.HasPrefix(p, "/") {
 		return "", errors.New("canonical path: unix absolute paths are not allowed")
@@ -158,7 +161,7 @@ func CanonicalPath(p string) (string, error) {
 			return "", errors.New("canonical path: empty segments are not allowed")
 		}
 		if part == "." {
-			continue // usually fine to ignore but we can also reject. Let's just ignore `.`.
+			return "", errors.New("canonical path: dot segments are not allowed")
 		}
 		if part == ".." {
 			return "", errors.New("canonical path: directory traversal is not allowed")
@@ -219,6 +222,12 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 
 	seenFilePaths := make(map[string]bool)
 
+	markAttributionUnavailable := func() {
+		for _, node := range nodesByPath {
+			node.AttributionAvailable = false
+		}
+	}
+
 	// 1. Files from Inventory
 	for _, f := range in.Inventory.Files {
 		p, err := CanonicalPath(f.Path)
@@ -273,7 +282,7 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 		for _, cx := range in.Complexity.Functions {
 			p, err := CanonicalPath(cx.File)
 			if err != nil {
-				continue // Skip invalid paths in secondary reports
+				return Snapshot{}, fmt.Errorf("measure snapshot: complexity path %q: %w", cx.File, err)
 			}
 			n := nodesByPath[p]
 			if n != nil && n.Kind == NodeFile {
@@ -292,7 +301,7 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 		for _, fc := range in.Coverage.Files {
 			p, err := CanonicalPath(fc.File)
 			if err != nil {
-				continue
+				return Snapshot{}, fmt.Errorf("measure snapshot: coverage path %q: %w", fc.File, err)
 			}
 			n := nodesByPath[p]
 			if n != nil && n.Kind == NodeFile {
@@ -314,7 +323,7 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 				}
 				p, err := CanonicalPath(occ.File)
 				if err != nil {
-					continue
+					return Snapshot{}, fmt.Errorf("measure snapshot: duplication path %q: %w", occ.File, err)
 				}
 				n := nodesByPath[p]
 				if n == nil || n.Kind != NodeFile {
@@ -352,11 +361,35 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 
 	// 5. Issues
 	for _, issue := range in.Issues {
+		if strings.TrimSpace(issue.Path) == "" {
+			n := getNode("")
+			n.Counters.IssuesBySeverity[string(issue.Severity)]++
+			markAttributionUnavailable()
+
+			r, err := in.RuleCatalog.Get(issue.RuleKey)
+			if err != nil {
+				if !errors.Is(err, shared.ErrNotFound) {
+					return Snapshot{}, fmt.Errorf("measure snapshot: resolve rule %q: %w", issue.RuleKey, err)
+				}
+				n.TechDebtAvailable = false
+				n.IssueTypeAvailable = false
+				continue
+			}
+			if !r.Type.Valid() {
+				return Snapshot{}, fmt.Errorf("measure snapshot: invalid rule type %q for rule %q", r.Type, issue.RuleKey)
+			}
+			n.Counters.IssuesByType[string(r.Type)]++
+			if r.Type != rule.TypeSecurityHotspot {
+				n.Counters.RemediationEffortMinutes += r.RemediationEffort
+			}
+			continue
+		}
+
 		p, err := CanonicalPath(issue.Path)
 		n := nodesByPath[p]
 		if err != nil || n == nil {
 			n = getNode("") // Add to root if path is missing, invalid, or unmatched
-			n.AttributionAvailable = false
+			markAttributionUnavailable()
 		}
 
 		if string(issue.Severity) != "" {
@@ -373,9 +406,11 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 			continue
 		}
 
-		if r.Type.Valid() {
-			n.Counters.IssuesByType[string(r.Type)]++
+		if !r.Type.Valid() {
+			return Snapshot{}, fmt.Errorf("measure snapshot: invalid rule type %q for rule %q", r.Type, issue.RuleKey)
 		}
+
+		n.Counters.IssuesByType[string(r.Type)]++
 
 		if r.Type != rule.TypeSecurityHotspot {
 			n.Counters.RemediationEffortMinutes += r.RemediationEffort
@@ -426,6 +461,8 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 		parent.CoverageAvailable = parent.CoverageAvailable && n.CoverageAvailable
 		parent.DuplicationAvailable = parent.DuplicationAvailable && n.DuplicationAvailable
 		parent.TechDebtAvailable = parent.TechDebtAvailable && n.TechDebtAvailable
+		parent.IssueTypeAvailable = parent.IssueTypeAvailable && n.IssueTypeAvailable
+		parent.AttributionAvailable = parent.AttributionAvailable && n.AttributionAvailable
 	}
 
 	// Deduplicate blocks for directories

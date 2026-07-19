@@ -101,20 +101,20 @@ func New(analyzer ports.CodeAnalyzer, opts ...Option) *Service {
 
 // Analyze returns the code-quality findings for root, sorted deterministically by dedup key.
 func (s *Service) Analyze(ctx context.Context, root string) ([]finding.Finding, error) {
-	findings, _, err := s.analyze(ctx, root)
+	findings, _, _, err := s.analyze(ctx, root)
 	return findings, err
 }
 
-// analyze runs the rule engine + the metric bridges once, returning the findings AND the duplication
-// report it computed (so BuildReport reuses it rather than re-scanning the tree). dupReport is the zero
-// value when no duplication scanner is wired.
-func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, measure.DuplicationReport, error) {
+// analyze runs the rule engine + the metric bridges once, returning the findings, the duplication report,
+// and the complexity report. A nil pointer means the respective analyzer did not run.
+func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, *measure.DuplicationReport, *measure.ComplexityReport, error) {
 	var out []finding.Finding
-	var dupReport measure.DuplicationReport
+	var dupReport *measure.DuplicationReport
+	var compReport *measure.ComplexityReport
 
 	raws, err := s.analyzer.Analyze(ctx, root)
 	if err != nil {
-		return nil, measure.DuplicationReport{}, fmt.Errorf("code analysis: %w", err)
+		return nil, nil, nil, fmt.Errorf("code analysis: %w", err)
 	}
 	appendRaws := func(raws []ports.CodeAnalysisRawFinding) error {
 		for _, r := range raws {
@@ -129,24 +129,24 @@ func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, 
 		return nil
 	}
 	if err := appendRaws(raws); err != nil {
-		return nil, measure.DuplicationReport{}, err
+		return nil, nil, nil, err
 	}
 	if s.structural != nil {
 		structural, serr := s.structural.Analyze(ctx, root)
 		if serr != nil {
-			return nil, measure.DuplicationReport{}, fmt.Errorf("structural analysis: %w", serr)
+			return nil, nil, nil, fmt.Errorf("structural analysis: %w", serr)
 		}
 		if err := appendRaws(structural); err != nil {
-			return nil, measure.DuplicationReport{}, err
+			return nil, nil, nil, err
 		}
 	}
 
 	if s.dup != nil {
 		rep, derr := s.dup.Duplication(ctx, root)
 		if derr != nil {
-			return nil, measure.DuplicationReport{}, fmt.Errorf("duplication: %w", derr)
+			return nil, nil, nil, fmt.Errorf("duplication: %w", derr)
 		}
-		dupReport = rep
+		dupReport = &rep
 		for _, b := range rep.Blocks {
 			if len(b.Occurrences) == 0 {
 				continue
@@ -161,9 +161,10 @@ func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, 
 	if s.metrics != nil {
 		rep, available, merr := s.metrics.Complexity(ctx, root)
 		if merr != nil {
-			return nil, measure.DuplicationReport{}, fmt.Errorf("complexity: %w", merr)
+			return nil, nil, nil, fmt.Errorf("complexity: %w", merr)
 		}
 		if available {
+			compReport = &rep
 			for _, f := range rep.OverCyclomatic(s.complexityMin) {
 				title := fmt.Sprintf("High cyclomatic complexity: %d (%s)", f.Cyclomatic, f.Name)
 				desc := fmt.Sprintf("Function %q has cyclomatic complexity %d (cognitive %d), above %d. Break it into smaller units to improve testability and readability.", f.Name, f.Cyclomatic, f.Cognitive, s.complexityMin)
@@ -175,7 +176,7 @@ func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, 
 	if s.bugs != nil {
 		bugs, available, berr := s.bugs.Bugs(ctx, root)
 		if berr != nil {
-			return nil, measure.DuplicationReport{}, fmt.Errorf("bug detection: %w", berr)
+			return nil, nil, nil, fmt.Errorf("bug detection: %w", berr)
 		}
 		if available {
 			for _, b := range bugs {
@@ -185,7 +186,7 @@ func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, 
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].DedupKey < out[j].DedupKey })
-	return out, dupReport, nil
+	return out, dupReport, compReport, nil
 }
 
 // newFinding maps a raw code-quality signal to a first-party finding. The DedupKey (<kind>:<rule>:<file>:
@@ -265,21 +266,22 @@ func isTestPath(p string) bool {
 // Report is the full code-quality dashboard payload for a source tree: the per-language inventory, the
 // findings, the duplication summary, and the rolled-up A-E health ratings + technical debt.
 type Report struct {
-	Inventory   measure.Inventory         `json:"inventory"`
-	Findings    []finding.Finding         `json:"findings"`
-	Duplication measure.DuplicationReport `json:"duplication"`
-	Rating      rating.Report             `json:"rating"`
+	Inventory   measure.Inventory          `json:"inventory"`
+	Findings    []finding.Finding          `json:"findings"`
+	Duplication *measure.DuplicationReport `json:"duplication,omitempty"`
+	Complexity  *measure.ComplexityReport  `json:"complexity,omitempty"`
+	Rating      rating.Report              `json:"rating"`
 }
 
 // BuildReport computes the full dashboard report for root. Findings come from Analyze (which already
 // bridges duplication + complexity); the inventory + duplication summary + ratings are added for display.
 // Missing optional dependencies degrade to empty sections rather than erroring.
 func (s *Service) BuildReport(ctx context.Context, root string) (Report, error) {
-	findings, dup, err := s.analyze(ctx, root) // reuse the duplication report Analyze already computed
+	findings, dup, comp, err := s.analyze(ctx, root) // reuse the duplication report Analyze already computed
 	if err != nil {
 		return Report{}, err
 	}
-	rep := Report{Findings: findings, Duplication: dup}
+	rep := Report{Findings: findings, Duplication: dup, Complexity: comp}
 	if s.inventory != nil {
 		inv, ierr := s.inventory.Inventory(ctx, root)
 		if ierr != nil {

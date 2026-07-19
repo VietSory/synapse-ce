@@ -487,18 +487,17 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	resolver := &ruleResolver{catalog: s.ruleCatalog, ctx: ctx}
 
 	var inventory measure.Inventory
+	var compPtr *measure.ComplexityReport
+	var dupPtr *measure.DuplicationReport
 	if result.CodeQuality != nil {
 		inventory = result.CodeQuality.Inventory
-	}
-	dup := duplicationOf(result)
-	var dupPtr *measure.DuplicationReport
-	if len(dup.Blocks) > 0 {
-		dupPtr = &dup
+		compPtr = result.CodeQuality.Complexity
+		dupPtr = result.CodeQuality.Duplication
 	}
 
 	snapshot, err := measure.BuildSnapshot(measure.BuildSnapshotInput{
 		Inventory:   inventory,
-		Complexity:  nil, // not exposed by codequality yet, handled via finding map
+		Complexity:  compPtr,
 		Coverage:    result.LineCoverage,
 		Duplication: dupPtr,
 		Issues:      issueInputs,
@@ -642,13 +641,6 @@ func (s *Service) resolveManagedGate(ctx context.Context, tenantID shared.ID, ke
 		return qualitygate.Gate{}, err
 	}
 	return gate, nil
-}
-
-func duplicationOf(result *scauc.ScanResult) measure.DuplicationReport {
-	if result.CodeQuality == nil {
-		return measure.DuplicationReport{}
-	}
-	return result.CodeQuality.Duplication
 }
 
 func (s *Service) Delete(ctx context.Context, actor string, tenantID shared.ID, key string) error {
