@@ -224,6 +224,13 @@ func cloneProjectAnalysis(in projectanalysis.Analysis) projectanalysis.Analysis 
 		out.Coverage = &coverage
 	}
 	out.Duplication = cloneDuplication(in.Duplication)
+	if len(in.Snapshot.Nodes) > 0 {
+		out.Snapshot.Nodes = slices.Clone(in.Snapshot.Nodes)
+		for i := range out.Snapshot.Nodes {
+			out.Snapshot.Nodes[i].Counters.IssuesByType = maps.Clone(out.Snapshot.Nodes[i].Counters.IssuesByType)
+			out.Snapshot.Nodes[i].Counters.IssuesBySeverity = maps.Clone(out.Snapshot.Nodes[i].Counters.IssuesBySeverity)
+		}
+	}
 	return out
 }
 
