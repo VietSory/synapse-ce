@@ -18,6 +18,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	hotspotsuc "github.com/KKloudTarus/synapse-ce/internal/usecase/hotspots"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -54,6 +55,15 @@ func (s *Service) SetRuleCatalog(catalog ports.RuleCatalog)               { s.ru
 func (s *Service) SetFindingRepository(repo ports.FindingRepository)      { s.findings = repo }
 func (s *Service) SetQualityGates(gates *qualitygatesuc.Service)          { s.gates = gates }
 func (s *Service) SetQualityGateMutator(mutator ports.QualityGateMutator) { s.gateMutator = mutator }
+
+type ruleResolver struct {
+	catalog ports.RuleCatalog
+	ctx     context.Context
+}
+
+func (r *ruleResolver) Get(key rule.Key) (rule.Rule, error) {
+	return r.catalog.Get(r.ctx, key)
+}
 
 func (s *Service) CreateFromArchive(ctx context.Context, in CreateInput, filename string, src io.Reader) (*project.Project, error) {
 	if err := requireActor(in.CreatedBy); err != nil {
@@ -464,11 +474,45 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	if p.GateID == "" && len(gate.Conditions) > 0 {
 		gateSource = "repository"
 	}
+
+	var issueInputs []measure.IssueInput
+	for _, f := range issues {
+		issueInputs = append(issueInputs, measure.IssueInput{
+			Path:     "", // Phase A: finding model lacks explicit path; triggers AttributionAvailable=false
+			RuleKey:  rule.Key(f.RuleKey),
+			Severity: f.Severity,
+		})
+	}
+
+	resolver := &ruleResolver{catalog: s.ruleCatalog, ctx: ctx}
+
+	var inventory measure.Inventory
+	if result.CodeQuality != nil {
+		inventory = result.CodeQuality.Inventory
+	}
+	dup := duplicationOf(result)
+	var dupPtr *measure.DuplicationReport
+	if len(dup.Blocks) > 0 {
+		dupPtr = &dup
+	}
+
+	snapshot, err := measure.BuildSnapshot(measure.BuildSnapshotInput{
+		Inventory:   inventory,
+		Complexity:  nil, // not exposed by codequality yet, handled via finding map
+		Coverage:    result.LineCoverage,
+		Duplication: dupPtr,
+		Issues:      issueInputs,
+		RuleCatalog: resolver,
+	})
+	if err != nil {
+		return fmt.Errorf("build measure snapshot: %w", err)
+	}
+
 	analysis, err := projectanalysis.Build(projectanalysis.Input{
 		ID: jobID, TenantID: p.TenantID, ProjectID: p.ID, ProjectKey: p.Key, CreatedAt: completedAt,
 		SourceRef: result.SourceRef, SourceCommit: result.SourceCommit, Findings: issues, Gate: gate, GateSource: gateSource, GateExempt: result.GateExemptKeys(issues), LinesOfCode: loc,
 		Coverage: result.LineCoverage, Duplication: duplicationOf(result), Previous: baseline,
-		Hotspots: overallHsSummary, NewHotspots: newHsSummary,
+		Hotspots: overallHsSummary, NewHotspots: newHsSummary, Snapshot: snapshot,
 	})
 	if err != nil {
 		return fmt.Errorf("build project analysis: %w", err)
@@ -558,9 +602,9 @@ func (s *Service) TransitionHotspot(ctx context.Context, actor string, tenantID 
 	}
 
 	if err := s.audit.Record(ctx, ports.AuditEntry{
-		Actor:    actor,
-		Action:   "project.hotspot.review",
-		Target:   p.ID.String(),
+		Actor:  actor,
+		Action: "project.hotspot.review",
+		Target: p.ID.String(),
 		Metadata: map[string]string{
 			"project":    p.Key,
 			"hotspot_id": hotspotID.String(),
