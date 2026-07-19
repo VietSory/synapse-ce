@@ -287,13 +287,6 @@ func hotspotWhere(tenantID, projectID shared.ID, filter hotspot.ListFilter, curs
 	}
 
 	joins := ""
-	if filter.Lens == hotspot.LensNewCode {
-		joins = ` JOIN project_analyses pa ON pa.project_id = ph.project_id AND pa.tenant_id = ph.tenant_id AND pa.is_latest = true
-				  JOIN project_analysis_hotspots pah ON pah.analysis_id = pa.id AND pah.hotspot_id = ph.id AND pah.is_new = true `
-	} else if filter.Lens == hotspot.LensOverall {
-		joins = ` JOIN project_analyses pa ON pa.project_id = ph.project_id AND pa.tenant_id = ph.tenant_id AND pa.is_latest = true
-				  JOIN project_analysis_hotspots pah ON pah.analysis_id = pa.id AND pah.hotspot_id = ph.id `
-	}
 
 	if cursor && !filter.BeforeLastSeenAt.IsZero() {
 		args = append(args, filter.BeforeLastSeenAt, filter.BeforeID.String())
@@ -456,7 +449,7 @@ func (r *ProjectAnalysisStore) ListAnalysisHotspots(ctx context.Context, tenantI
 	}
 
 	query := `SELECT h.id, h.tenant_id, h.project_id, h.hotspot_key, h.finding_identity, h.rule_key, h.title, h.description, h.severity, h.finding_kind, h.cwe, h.location,
-		h.status, h.version, h.first_seen_analysis_id, h.last_seen_analysis_id, h.first_seen_at, h.last_seen_at, h.created_at, h.updated_at
+		h.status, h.version, h.first_seen_analysis_id, h.last_seen_analysis_id, h.first_seen_at, h.last_seen_at, h.created_at, h.updated_at, h.last_reviewed_by, h.last_reviewed_at
 		FROM project_hotspots h
 		JOIN project_analysis_hotspots ah ON h.id = ah.hotspot_id
 		WHERE ` + where + ` ORDER BY h.last_seen_at DESC, h.id COLLATE "C" DESC LIMIT $` + fmt.Sprint(len(args)+1)

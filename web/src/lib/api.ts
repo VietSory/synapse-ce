@@ -793,7 +793,7 @@ function mapHotspotReviewEvent(r: any): HotspotReviewEvent {
     actor: r.actor ?? '',
     status: (r.to || r.status || 'to_review') as HotspotStatus,
     rationale: r.rationale ?? '',
-    version: r.version ?? r.previous_version + 1 ?? 1,
+    version: r.version ?? (r.previous_version ? r.previous_version + 1 : 1),
     at: r.created_at || r.at || '',
   }
 }

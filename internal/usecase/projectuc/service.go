@@ -432,6 +432,9 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 		if found {
 			// Reappearance of a fixed hotspot => becomes to_review (unreviewed)
 			if ex.Status == hotspot.StatusFixed && completedAt.After(ex.LastSeenAt) {
+				if !isNew {
+					newHsTotal++ // Reopened hotspot is tracked as new code
+				}
 				continue
 			}
 			if ex.Status.Reviewed() {
@@ -486,16 +489,32 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	return nil
 }
 
-// ListHotspots returns only projections belonging to the requested tenant and Project.
+// ListHotspots returns projections belonging to the requested tenant and Project for the current analysis lens.
 func (s *Service) ListHotspots(ctx context.Context, tenantID shared.ID, key string, filter hotspot.ListFilter) (hotspot.Page, error) {
-	if s.hotspots == nil {
+	if s.hotspots == nil || s.analyses == nil {
 		return hotspot.Page{}, shared.ErrNotFound
 	}
 	p, err := s.Get(ctx, tenantID, key)
 	if err != nil {
 		return hotspot.Page{}, err
 	}
-	return s.hotspots.ListHotspots(ctx, tenantID, p.ID, filter)
+	latestMap, err := s.analyses.LatestForProjects(ctx, tenantID, []shared.ID{p.ID})
+	if err != nil {
+		return hotspot.Page{}, err
+	}
+	latest, ok := latestMap[p.ID]
+	if !ok {
+		// Empty page with A-grade summary
+		summary, _ := hotspot.NewSummary(0, 0)
+		return hotspot.Page{Summary: summary, Facets: hotspot.Facets{Statuses: map[string]int{}, RuleKeys: map[string]int{}, Severities: map[string]int{}}}, nil
+	}
+
+	page, summary, err := s.hotspots.ListAnalysisHotspots(ctx, tenantID, p.ID, shared.ID(latest.ID), filter.Lens, filter)
+	if err != nil {
+		return hotspot.Page{}, err
+	}
+	page.Summary = summary
+	return page, nil
 }
 
 // GetHotspot returns one projection only after the Project has been resolved in the caller's tenant.

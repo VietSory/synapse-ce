@@ -27,6 +27,7 @@ export function SecurityHotspotsPage() {
   const [page, setPage] = useState<HotspotPage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [refreshCount, setRefreshCount] = useState(0)
 
   const selectedId = params.get('id')
 
@@ -47,7 +48,7 @@ export function SecurityHotspotsPage() {
         if (active) setLoading(false)
       })
     return () => { active = false }
-  }, [projectKey, lens, filter])
+  }, [projectKey, lens, filter, refreshCount])
 
   const loadMore = () => {
     if (!page?.next || loading) return
@@ -139,14 +140,8 @@ export function SecurityHotspotsPage() {
               next.delete('id')
               setParams(next)
             }}
-            onTransition={(hotspot) => {
-              setPage((prev) => {
-                if (!prev) return prev
-                return {
-                  ...prev,
-                  items: prev.items.map((item) => (item.id === hotspot.id ? hotspot : item))
-                }
-              })
+            onTransition={() => {
+              setRefreshCount(c => c + 1)
             }}
           />
         </div>
