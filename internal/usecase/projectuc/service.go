@@ -477,6 +477,9 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 
 	var issueInputs []measure.IssueInput
 	for _, f := range issues {
+		if !f.Kind.IsRuleBased() {
+			continue
+		}
 		issueInputs = append(issueInputs, measure.IssueInput{
 			Path:     "", // Phase A: finding model lacks explicit path; triggers AttributionAvailable=false
 			RuleKey:  rule.Key(f.RuleKey),
