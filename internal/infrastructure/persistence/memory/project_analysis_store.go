@@ -182,6 +182,10 @@ func (s *ProjectAnalysisStore) upsertHotspotLocked(analysis projectanalysis.Anal
 		if current.TenantID != shared.ID(analysis.TenantID) || current.ProjectID != shared.ID(analysis.ProjectID) || current.Key != candidate.Key {
 			continue
 		}
+		if analysis.CreatedAt.Before(current.FirstSeenAt) || (analysis.CreatedAt.Equal(current.FirstSeenAt) && analysis.ID < current.FirstSeenAnalysisID) {
+			current.FirstSeenAnalysisID, current.FirstSeenAt = analysis.ID, analysis.CreatedAt
+			current.Audit.CreatedAt = analysis.CreatedAt
+		}
 		if analysis.CreatedAt.After(current.LastSeenAt) || (analysis.CreatedAt.Equal(current.LastSeenAt) && analysis.ID > current.LastSeenAnalysisID) {
 			current.RuleKey, current.Title, current.Description = candidate.RuleKey, candidate.Title, candidate.Description
 			current.Severity, current.Kind, current.CWE, current.Location = candidate.Severity, candidate.Kind, candidate.CWE, candidate.Location

@@ -27,6 +27,19 @@ func TestHotspotValidateAndDeterministicID(t *testing.T) {
 	}
 }
 
+func TestHotspotValidateAllowsDefaultTenant(t *testing.T) {
+	now := time.Date(2026, 7, 19, 1, 2, 3, 0, time.UTC)
+	h := Hotspot{
+		ID: "id", ProjectID: "project", Key: "sast:rule:file:1", FindingIdentity: "sast:rule:file:1",
+		RuleKey: "rule", Severity: shared.SeverityUnknown,
+		Status: StatusToReview, Version: 1, FirstSeenAnalysisID: "a1", LastSeenAnalysisID: "a1",
+		FirstSeenAt: now, LastSeenAt: now,
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("default tenant should be valid: %v", err)
+	}
+}
+
 func TestStatusValid(t *testing.T) {
 	for _, status := range []Status{StatusToReview, StatusAcknowledged, StatusFixed, StatusSafe} {
 		if !status.Valid() {

@@ -43,6 +43,11 @@ func TestProjectHotspotProjectionRescanPreservesReviewStateAndFirstSeen(t *testi
 	if err := store.SaveWithResultAndHotspots(ctx, projectionAnalysis("a2", secondAt), nil, []hotspot.Candidate{second}); err != nil {
 		t.Fatal(err)
 	}
+	older := projectionCandidate(first.Key, "older")
+	olderAt := firstAt.Add(-time.Hour)
+	if err := store.SaveWithResultAndHotspots(ctx, projectionAnalysis("a0", olderAt), nil, []hotspot.Candidate{older}); err != nil {
+		t.Fatal(err)
+	}
 	got, err := store.GetHotspot(ctx, "tenant-a", "project-a", id)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +55,7 @@ func TestProjectHotspotProjectionRescanPreservesReviewStateAndFirstSeen(t *testi
 	if got.Status != hotspot.StatusSafe || got.Version != 7 {
 		t.Fatalf("review state reset: %+v", got)
 	}
-	if got.FirstSeenAnalysisID != "a1" || !got.FirstSeenAt.Equal(firstAt) || got.LastSeenAnalysisID != "a2" || !got.LastSeenAt.Equal(secondAt) || got.Title != "updated" {
+	if got.FirstSeenAnalysisID != "a0" || !got.FirstSeenAt.Equal(olderAt) || got.LastSeenAnalysisID != "a2" || !got.LastSeenAt.Equal(secondAt) || got.Title != "updated" {
 		t.Fatalf("seen metadata/descriptive update: %+v", got)
 	}
 }

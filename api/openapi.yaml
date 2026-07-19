@@ -884,7 +884,7 @@ components:
 
     ProjectHotspotSeverity:
       type: string
-      enum: [low, medium, high, critical]
+      enum: [unknown, info, low, medium, high, critical]
 
     ProjectHotspot:
       type: object

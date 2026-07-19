@@ -53,6 +53,9 @@ func (r *ProjectAnalysisStore) SaveWithResultAndHotspots(ctx context.Context, an
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$17,$18)
 			ON CONFLICT (tenant_id, project_id, hotspot_key) DO UPDATE SET
 				finding_identity = EXCLUDED.finding_identity,
+				first_seen_analysis_id = CASE WHEN (EXCLUDED.first_seen_at, EXCLUDED.first_seen_analysis_id) < (project_hotspots.first_seen_at, project_hotspots.first_seen_analysis_id) THEN EXCLUDED.first_seen_analysis_id ELSE project_hotspots.first_seen_analysis_id END,
+				first_seen_at = CASE WHEN (EXCLUDED.first_seen_at, EXCLUDED.first_seen_analysis_id) < (project_hotspots.first_seen_at, project_hotspots.first_seen_analysis_id) THEN EXCLUDED.first_seen_at ELSE project_hotspots.first_seen_at END,
+				created_at = CASE WHEN (EXCLUDED.first_seen_at, EXCLUDED.first_seen_analysis_id) < (project_hotspots.first_seen_at, project_hotspots.first_seen_analysis_id) THEN EXCLUDED.created_at ELSE project_hotspots.created_at END,
 				rule_key = CASE WHEN (EXCLUDED.last_seen_at, EXCLUDED.last_seen_analysis_id) > (project_hotspots.last_seen_at, project_hotspots.last_seen_analysis_id) THEN EXCLUDED.rule_key ELSE project_hotspots.rule_key END,
 				title = CASE WHEN (EXCLUDED.last_seen_at, EXCLUDED.last_seen_analysis_id) > (project_hotspots.last_seen_at, project_hotspots.last_seen_analysis_id) THEN EXCLUDED.title ELSE project_hotspots.title END,
 				description = CASE WHEN (EXCLUDED.last_seen_at, EXCLUDED.last_seen_analysis_id) > (project_hotspots.last_seen_at, project_hotspots.last_seen_analysis_id) THEN EXCLUDED.description ELSE project_hotspots.description END,

@@ -27,8 +27,18 @@ func TestProjectHotspotStoreIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	// Make reruns safe when a previous process was interrupted before t.Cleanup ran.
+	if _, err := pool.Exec(ctx, `ALTER TABLE project_hotspots DROP CONSTRAINT IF EXISTS project_hotspots_test_rollback`); err != nil {
+		t.Fatal(err)
+	}
 	tenantID := shared.ID("hotspot-test-tenant")
 	projectID := shared.ID("hotspot-test-project")
+	if _, err := pool.Exec(ctx, `DELETE FROM projects WHERE tenant_id IN ($1, $2)`, tenantID, "hotspot-rollback-tenant"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM tenants WHERE id IN ($1, $2)`, tenantID, "hotspot-rollback-tenant"); err != nil {
+		t.Fatal(err)
+	}
 	_, _ = pool.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ($1,$1) ON CONFLICT DO NOTHING`, tenantID)
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenantID) })
 	p, err := project.New(projectID, tenantID, "Hotspot Test", "hotspot-test", project.SourceBinding{Kind: project.SourceGit, Value: "https://example.com/repo.git"}, nil, "", time.Now().UTC())
@@ -53,11 +63,15 @@ func TestProjectHotspotStoreIntegration(t *testing.T) {
 	if err := store.SaveWithResultAndHotspots(ctx, projectanalysis.Analysis{ID: "hotspot-analysis-2", TenantID: tenantID.String(), ProjectID: projectID.String(), CreatedAt: secondAt}, []byte(`{"result":2}`), []hotspot.Candidate{candidate}); err != nil {
 		t.Fatal(err)
 	}
+	olderAt := firstAt.Add(-time.Hour)
+	if err := store.SaveWithResultAndHotspots(ctx, projectanalysis.Analysis{ID: "hotspot-analysis-0", TenantID: tenantID.String(), ProjectID: projectID.String(), CreatedAt: olderAt}, nil, []hotspot.Candidate{candidate}); err != nil {
+		t.Fatal(err)
+	}
 	got, err := store.GetHotspot(ctx, tenantID, projectID, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != hotspot.StatusSafe || got.Version != 7 || got.FirstSeenAnalysisID != "hotspot-analysis-1" || got.LastSeenAnalysisID != "hotspot-analysis-2" || got.Title != "updated" {
+	if got.Status != hotspot.StatusSafe || got.Version != 7 || got.FirstSeenAnalysisID != "hotspot-analysis-0" || !got.FirstSeenAt.Equal(olderAt) || got.LastSeenAnalysisID != "hotspot-analysis-2" || got.Title != "updated" {
 		t.Fatalf("rescan projection=%+v", got)
 	}
 	page, err := store.ListHotspots(ctx, tenantID, projectID, hotspot.ListFilter{Limit: 1, Search: "updated"})

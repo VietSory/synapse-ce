@@ -125,7 +125,7 @@ func projectHotspotListParams(r *http.Request) (hotspot.ListFilter, error) {
 	}
 	if raw := strings.TrimSpace(q.Get("severity")); raw != "" {
 		severity := shared.Severity(raw)
-		if !severity.Valid() || severity == shared.SeverityUnknown {
+		if !severity.Valid() {
 			return hotspot.ListFilter{}, fmt.Errorf("%w: invalid hotspot severity", shared.ErrValidation)
 		}
 		filter.Severity = &severity

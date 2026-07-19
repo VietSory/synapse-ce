@@ -81,7 +81,9 @@ func DeterministicID(tenantID, projectID shared.ID, key string) shared.ID {
 
 // Validate enforces the fields required for a safe read projection.
 func (h Hotspot) Validate() error {
-	if h.ID.IsZero() || h.TenantID.IsZero() || h.ProjectID.IsZero() {
+	// An empty tenant ID is the repository's valid default tenant in
+	// single-tenant mode. Project and hotspot identities are always required.
+	if h.ID.IsZero() || h.ProjectID.IsZero() {
 		return fmt.Errorf("%w: hotspot identity is required", shared.ErrValidation)
 	}
 	if strings.TrimSpace(h.Key) == "" || strings.TrimSpace(h.FindingIdentity) == "" {
@@ -90,14 +92,8 @@ func (h Hotspot) Validate() error {
 	if strings.TrimSpace(h.RuleKey) == "" {
 		return fmt.Errorf("%w: hotspot rule key is required", shared.ErrValidation)
 	}
-	if strings.TrimSpace(h.Title) == "" || strings.TrimSpace(h.Description) == "" {
-		return fmt.Errorf("%w: hotspot descriptive fields are required", shared.ErrValidation)
-	}
-	if !h.Severity.Valid() || h.Severity == shared.SeverityUnknown {
+	if !h.Severity.Valid() {
 		return fmt.Errorf("%w: hotspot severity is invalid", shared.ErrValidation)
-	}
-	if !h.Kind.Valid() {
-		return fmt.Errorf("%w: hotspot finding kind is invalid", shared.ErrValidation)
 	}
 	if !Status(h.Status).Valid() {
 		return fmt.Errorf("%w: hotspot status is invalid", shared.ErrValidation)

@@ -92,7 +92,7 @@ func TestListProjectHotspotsReturnsScopedProjectionAndFacets(t *testing.T) {
 }
 
 func TestProjectHotspotRejectsMalformedQuery(t *testing.T) {
-	for _, query := range []string{"?status=bad", "?severity=unknown", "?limit=0", "?before_id=only", "?unexpected=x"} {
+	for _, query := range []string{"?status=bad", "?severity=bogus", "?limit=0", "?before_id=only", "?unexpected=x"} {
 		rt := &Router{log: discardLog(), projects: &projectHotspotServiceStub{}}
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/p/hotspots"+query, nil)
 		req.SetPathValue("key", "p")
