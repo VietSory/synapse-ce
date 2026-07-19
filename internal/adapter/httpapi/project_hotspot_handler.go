@@ -52,7 +52,7 @@ type projectHotspotSummaryResponse struct {
 }
 
 type projectHotspotPageResponse struct {
-	Items  []projectHotspotResponse      `json:"items"`
+	Items   []projectHotspotResponse      `json:"items"`
 	Next    *projectHotspotCursorResponse `json:"next"`
 	Facets  projectHotspotFacetsResponse  `json:"facets"`
 	Summary projectHotspotSummaryResponse `json:"summary"`
@@ -97,7 +97,7 @@ func (rt *Router) listProjectHotspots(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	
+
 	for i, item := range page.Items {
 		out.Items[i] = rt.projectHotspotDTO(item, ruleNames[item.RuleKey])
 	}
@@ -142,7 +142,7 @@ func projectHotspotListParams(r *http.Request) (hotspot.ListFilter, error) {
 	}
 	q := r.URL.Query()
 	filter := hotspot.ListFilter{RuleKey: strings.TrimSpace(q.Get("rule")), Search: strings.TrimSpace(q.Get("search")), Limit: 25}
-	
+
 	if rawLens := strings.TrimSpace(q.Get("lens")); rawLens != "" {
 		if rawLens != string(hotspot.LensOverall) && rawLens != string(hotspot.LensNewCode) {
 			return hotspot.ListFilter{}, fmt.Errorf("%w: invalid lens", shared.ErrValidation)
@@ -222,7 +222,7 @@ func (rt *Router) transitionProjectHotspot(w http.ResponseWriter, r *http.Reques
 		writeError(w, rt.log, fmt.Errorf("%w: invalid transition target status", shared.ErrValidation))
 		return
 	}
-	updated, err := rt.projects.TransitionHotspot(r.Context(), actor, shared.ID(TenantFrom(r.Context())), r.PathValue("key"), shared.ID(r.PathValue("id")), toStatus, req.Rationale, req.ExpectedVersion)
+	updated, event, err := rt.projects.TransitionHotspot(r.Context(), actor, shared.ID(TenantFrom(r.Context())), r.PathValue("key"), shared.ID(r.PathValue("id")), toStatus, req.Rationale, req.ExpectedVersion)
 	if err != nil {
 		writeError(w, rt.log, err)
 		return
@@ -236,7 +236,19 @@ func (rt *Router) transitionProjectHotspot(w http.ResponseWriter, r *http.Reques
 		}
 		ruleName = catalogRule.Name
 	}
-	writeJSON(w, http.StatusOK, rt.projectHotspotDTO(updated, ruleName))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hotspot": rt.projectHotspotDTO(updated, ruleName),
+		"event": reviewEventResponse{
+			ID:              event.ID.String(),
+			From:            string(event.From),
+			To:              string(event.To),
+			Actor:           event.Actor,
+			Rationale:       event.Rationale,
+			PreviousVersion: event.PreviousVersion,
+			Version:         event.Version,
+			CreatedAt:       event.CreatedAt,
+		},
+	})
 }
 
 func (rt *Router) projectHotspotHistory(w http.ResponseWriter, r *http.Request) {

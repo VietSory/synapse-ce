@@ -79,7 +79,7 @@ func (r *ProjectAnalysisStore) SaveWithResultAndHotspots(ctx context.Context, an
 
 	for _, item := range items {
 		var reviewEvent *hotspot.ReviewEvent
-		
+
 		if ex, found := existingMap[item.Key]; found {
 			// If it's strictly a later analysis (we check LastSeenAt conceptually, but the query uses EXCLUDED > project_hotspots)
 			// Wait, if it reappears and the existing status is fixed, AND this analysis is strictly later (which we assume if it's the current one being saved).
@@ -90,15 +90,15 @@ func (r *ProjectAnalysisStore) SaveWithResultAndHotspots(ctx context.Context, an
 				// Wait, the interface for SaveWithResultAndHotspots doesn't pass IDGenerator. We can use shared.ID(...) from a random uuid, but since we don't have idGen, we can just use sha256 or uuid string.
 				// Wait, the analysis ID is unique, so event ID can be DeterministicID(analysis.ID, item.ID, "reopen").
 				eID := hotspot.DeterministicID(shared.ID(analysis.ID), item.ID, "reopen")
-				
+
 				// Simulate transition
 				prevVersion := ex.Version
 				newVersion := ex.Version + 1
 				newStatus := hotspot.StatusToReview
-				
+
 				item.Status = newStatus
 				item.Version = newVersion
-				
+
 				reviewEvent = &hotspot.ReviewEvent{
 					ID:              eID,
 					TenantID:        item.TenantID,
@@ -154,6 +154,9 @@ func (r *ProjectAnalysisStore) SaveWithResultAndHotspots(ctx context.Context, an
 		}
 
 		actualIsNew := item.FirstSeenAnalysisID == analysis.ID && item.LastSeenAnalysisID == analysis.ID
+		if reviewEvent != nil {
+			actualIsNew = true
+		}
 
 		if _, err := tx.Exec(ctx, `INSERT INTO project_analysis_hotspots
 			(tenant_id, project_id, analysis_id, hotspot_id, is_new, status_at_analysis, version_at_analysis)
@@ -218,17 +221,18 @@ func (r *ProjectAnalysisStore) ListHotspots(ctx context.Context, tenantID, proje
 		items = items[:limit]
 	}
 	page.Items = items
-	
+
 	facetWhere, facetArgs, facetJoins := hotspotWhere(tenantID, projectID, filter, false)
-	
+
 	// Query Summary
 	var total, reviewed int
-	err = r.pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE ph.status IN ('acknowledged', 'fixed', 'safe')) FROM project_hotspots ph ` + facetJoins + ` WHERE ` + facetWhere, facetArgs...).Scan(&total, &reviewed)
+	err = r.pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE ph.status IN ('acknowledged', 'fixed', 'safe')) FROM project_hotspots ph `+facetJoins+` WHERE `+facetWhere, facetArgs...).Scan(&total, &reviewed)
 	if err != nil {
 		return hotspot.Page{}, fmt.Errorf("summary project hotspots: %w", err)
 	}
-	
-	page.Summary = hotspot.CalculateSummary(total, reviewed)
+
+	summary, _ := hotspot.NewSummary(total, reviewed)
+	page.Summary = summary
 
 	facetRows, err := r.pool.Query(ctx, `SELECT 'status' as kind, ph.status as value, count(*) FROM project_hotspots ph `+facetJoins+` WHERE `+facetWhere+` GROUP BY ph.status
 		UNION ALL SELECT 'rule', ph.rule_key, count(*) FROM project_hotspots ph `+facetJoins+` WHERE `+facetWhere+` GROUP BY ph.rule_key
@@ -277,15 +281,18 @@ func hotspotWhere(tenantID, projectID shared.ID, filter hotspot.ListFilter, curs
 		search = strings.ReplaceAll(search, "\\", "\\\\")
 		search = strings.ReplaceAll(search, "%", "\\%")
 		search = strings.ReplaceAll(search, "_", "\\_")
-		
+
 		args = append(args, "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
 		parts = append(parts, fmt.Sprintf("(ph.hotspot_key ILIKE $%d OR ph.rule_key ILIKE $%d OR ph.title ILIKE $%d OR ph.description ILIKE $%d OR ph.location ILIKE $%d)", searchArg, searchArg+1, searchArg+2, searchArg+3, searchArg+4))
 	}
-	
+
 	joins := ""
 	if filter.Lens == hotspot.LensNewCode {
 		joins = ` JOIN project_analyses pa ON pa.project_id = ph.project_id AND pa.tenant_id = ph.tenant_id AND pa.is_latest = true
 				  JOIN project_analysis_hotspots pah ON pah.analysis_id = pa.id AND pah.hotspot_id = ph.id AND pah.is_new = true `
+	} else if filter.Lens == hotspot.LensOverall {
+		joins = ` JOIN project_analyses pa ON pa.project_id = ph.project_id AND pa.tenant_id = ph.tenant_id AND pa.is_latest = true
+				  JOIN project_analysis_hotspots pah ON pah.analysis_id = pa.id AND pah.hotspot_id = ph.id `
 	}
 
 	if cursor && !filter.BeforeLastSeenAt.IsZero() {
@@ -415,18 +422,18 @@ func (r *ProjectAnalysisStore) ListAnalysisHotspots(ctx context.Context, tenantI
 	// Since we need to use the mutable status for ListHotspots (as required by "Overview updates immediately after a review"),
 	// the list returns the CURRENT state of hotspots that were present in that analysis.
 	// We filter by `is_new` if lens == NewCode.
-	
+
 	args := []any{tenantID.String(), projectID.String(), analysisID.String()}
 	parts := []string{"h.tenant_id = $1", "h.project_id = $2", "ah.analysis_id = $3"}
 	add := func(part string, value any) {
 		args = append(args, value)
 		parts = append(parts, fmt.Sprintf(part, len(args)))
 	}
-	
+
 	if lens == hotspot.LensNewCode {
 		parts = append(parts, "ah.is_new = true")
 	}
-	
+
 	if filter.Status != nil {
 		add("h.status = $%d", string(*filter.Status))
 	}
@@ -441,25 +448,27 @@ func (r *ProjectAnalysisStore) ListAnalysisHotspots(ctx context.Context, tenantI
 		args = append(args, "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%")
 		parts = append(parts, fmt.Sprintf("(h.hotspot_key ILIKE $%d OR h.rule_key ILIKE $%d OR h.title ILIKE $%d OR h.description ILIKE $%d OR h.location ILIKE $%d)", searchArg, searchArg+1, searchArg+2, searchArg+3, searchArg+4))
 	}
-	
+
 	where := strings.Join(parts, " AND ")
 	limit := filter.Limit
-	if limit <= 0 { limit = 25 }
-	
+	if limit <= 0 {
+		limit = 25
+	}
+
 	query := `SELECT h.id, h.tenant_id, h.project_id, h.hotspot_key, h.finding_identity, h.rule_key, h.title, h.description, h.severity, h.finding_kind, h.cwe, h.location,
 		h.status, h.version, h.first_seen_analysis_id, h.last_seen_analysis_id, h.first_seen_at, h.last_seen_at, h.created_at, h.updated_at
 		FROM project_hotspots h
 		JOIN project_analysis_hotspots ah ON h.id = ah.hotspot_id
-		WHERE ` + where + ` ORDER BY h.last_seen_at DESC, h.id COLLATE "C" DESC LIMIT $` + fmt.Sprint(len(args) + 1)
-	
+		WHERE ` + where + ` ORDER BY h.last_seen_at DESC, h.id COLLATE "C" DESC LIMIT $` + fmt.Sprint(len(args)+1)
+
 	args = append(args, limit+1)
-	
+
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return hotspot.Page{}, hotspot.Summary{}, fmt.Errorf("list analysis hotspots: %w", err)
 	}
 	defer rows.Close()
-	
+
 	var items []hotspot.Hotspot
 	for rows.Next() {
 		item, err := scanHotspot(rows)
@@ -471,7 +480,7 @@ func (r *ProjectAnalysisStore) ListAnalysisHotspots(ctx context.Context, tenantI
 	if err := rows.Err(); err != nil {
 		return hotspot.Page{}, hotspot.Summary{}, err
 	}
-	
+
 	page := hotspot.Page{}
 	if len(items) > limit {
 		last := items[limit-1]
@@ -479,7 +488,7 @@ func (r *ProjectAnalysisStore) ListAnalysisHotspots(ctx context.Context, tenantI
 		items = items[:limit]
 	}
 	page.Items = items
-	
+
 	// Facets (current statuses, etc)
 	facetArgs := args[:len(args)-1] // remove limit
 	facetRows, err := r.pool.Query(ctx, `SELECT 'status', h.status, count(*) FROM project_hotspots h JOIN project_analysis_hotspots ah ON h.id = ah.hotspot_id WHERE `+where+` GROUP BY h.status
@@ -505,7 +514,7 @@ func (r *ProjectAnalysisStore) ListAnalysisHotspots(ctx context.Context, tenantI
 			page.Facets.Severities[value] = count
 		}
 	}
-	
+
 	return page, summary, nil
 }
 
@@ -515,16 +524,16 @@ func (r *ProjectAnalysisStore) CurrentAnalysisHotspotSummary(ctx context.Context
 	if lens == hotspot.LensNewCode {
 		q += ` AND ah.is_new = true`
 	}
-	
+
 	rows, err := r.pool.Query(ctx, q, tenantID.String(), projectID.String(), analysisID.String())
 	if err != nil {
 		return hotspot.Summary{}, fmt.Errorf("query analysis hotspot summary: %w", err)
 	}
 	defer rows.Close()
-	
+
 	total := 0
 	reviewed := 0
-	
+
 	for rows.Next() {
 		var status string
 		if err := rows.Scan(&status); err != nil {
@@ -535,10 +544,10 @@ func (r *ProjectAnalysisStore) CurrentAnalysisHotspotSummary(ctx context.Context
 			reviewed++
 		}
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return hotspot.Summary{}, err
 	}
-	
+
 	return hotspot.NewSummary(total, reviewed)
 }

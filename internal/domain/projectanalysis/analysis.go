@@ -276,12 +276,8 @@ func buildMeasures(all, new Counts, overallRating rating.Report, duplication mea
 	if coverage != nil {
 		metrics[qualitygate.MetricCoveragePct] = coverage.Percent()
 	}
-	if hotspots.Total > 0 {
-		metrics[qualitygate.MetricSecurityHotspotsReviewed] = hotspots.ReviewedPct
-	}
-	if newHotspots.Total > 0 {
-		metrics[qualitygate.MetricNewSecurityHotspotsReviewed] = newHotspots.ReviewedPct
-	}
+	metrics[qualitygate.MetricSecurityHotspotsReviewed] = hotspots.ReviewedPct
+	metrics[qualitygate.MetricNewSecurityHotspotsReviewed] = newHotspots.ReviewedPct
 	metrics[qualitygate.MetricNewSecret] = float64(new.ByKind[string(finding.KindSecret)])
 	for _, kind := range []finding.Kind{finding.KindSCA, finding.KindSAST, finding.KindSecret, finding.KindMisconfig, finding.KindExploitation, finding.KindDAST} {
 		metrics[qualitygate.MetricNewVulnerability] += float64(new.ByKind[string(kind)])

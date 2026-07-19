@@ -373,6 +373,9 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 		}
 	}
 	all = finding.Publishable(all)
+	if s.ruleCatalog == nil {
+		return fmt.Errorf("classify project hotspots: rule catalog is not configured")
+	}
 	issues, candidates, err := hotspotsuc.Classify(ctx, all, s.ruleCatalog)
 	if err != nil {
 		return fmt.Errorf("classify project hotspots: %w", err)
@@ -381,7 +384,7 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	if result.CodeQuality != nil {
 		loc = result.CodeQuality.Inventory.Totals().CodeLines
 	}
-	
+
 	// Compute Hotspot Summaries
 	var existingHotspots []hotspot.Hotspot
 	if s.hotspots != nil {
@@ -409,7 +412,7 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	hsReviewed := 0
 	newHsTotal := 0
 	newHsReviewed := 0
-	
+
 	for _, c := range candidates {
 		ex, found := existingMap[c.Key]
 		isNew := !found
@@ -508,18 +511,18 @@ func (s *Service) GetHotspot(ctx context.Context, tenantID shared.ID, key string
 }
 
 // TransitionHotspot applies a human review decision to a hotspot.
-func (s *Service) TransitionHotspot(ctx context.Context, actor string, tenantID shared.ID, key string, hotspotID shared.ID, to hotspot.Status, rationale string, expectedVersion int) (hotspot.Hotspot, error) {
+func (s *Service) TransitionHotspot(ctx context.Context, actor string, tenantID shared.ID, key string, hotspotID shared.ID, to hotspot.Status, rationale string, expectedVersion int) (hotspot.Hotspot, hotspot.ReviewEvent, error) {
 	if err := requireActor(actor); err != nil {
-		return hotspot.Hotspot{}, err
+		return hotspot.Hotspot{}, hotspot.ReviewEvent{}, err
 	}
 	if s.hotspots == nil {
-		return hotspot.Hotspot{}, shared.ErrNotFound
+		return hotspot.Hotspot{}, hotspot.ReviewEvent{}, shared.ErrNotFound
 	}
 	p, err := s.Get(ctx, tenantID, key)
 	if err != nil {
-		return hotspot.Hotspot{}, err
+		return hotspot.Hotspot{}, hotspot.ReviewEvent{}, err
 	}
-	
+
 	cmd := hotspot.TransitionCommand{
 		TenantID:        p.TenantID,
 		ProjectID:       p.ID,
@@ -530,11 +533,11 @@ func (s *Service) TransitionHotspot(ctx context.Context, actor string, tenantID 
 		Rationale:       rationale,
 		ExpectedVersion: expectedVersion,
 	}
-	updated, _, err := s.hotspots.TransitionHotspot(ctx, cmd)
+	updated, event, err := s.hotspots.TransitionHotspot(ctx, cmd)
 	if err != nil {
-		return hotspot.Hotspot{}, fmt.Errorf("transition hotspot: %w", err)
+		return hotspot.Hotspot{}, hotspot.ReviewEvent{}, fmt.Errorf("transition hotspot: %w", err)
 	}
-	
+
 	_ = s.audit.Record(ctx, ports.AuditEntry{
 		Actor:    actor,
 		Action:   "project.hotspot.transition",
@@ -542,8 +545,8 @@ func (s *Service) TransitionHotspot(ctx context.Context, actor string, tenantID 
 		Metadata: map[string]string{"project": p.Key, "hotspot_id": hotspotID.String(), "to": string(to)},
 		At:       s.clock.Now(),
 	})
-	
-	return updated, nil
+
+	return updated, event, nil
 }
 
 // HotspotHistory returns the immutable review event history of a hotspot.

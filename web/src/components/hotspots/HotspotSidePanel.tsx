@@ -81,7 +81,7 @@ export function HotspotSidePanel({
       setRationale('')
       setSubmitError(null)
     }
-  }, [hotspot])
+  }, [hotspot?.id])
 
   const handleTransition = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -98,26 +98,29 @@ export function HotspotSidePanel({
     setSubmitting(true)
     setSubmitError(null)
     try {
-      const nextHotspot = await api.transitionProjectHotspot(
+      const res = await api.transitionProjectHotspot(
         projectKey,
         hotspot.id,
         transitionStatus,
         rationale.trim(),
         hotspot.version
       )
-      const event: HotspotReviewEvent = {
-        actor: me?.name ?? 'Unknown',
-        status: transitionStatus,
-        rationale: rationale.trim(),
-        version: nextHotspot.version,
-        at: new Date().toISOString()
-      }
-      setHotspot(nextHotspot)
-      setHistory((prev) => [event, ...prev])
+      setHotspot(res.hotspot)
+      setHistory((prev) => [res.event, ...prev])
       setRationale('')
-      onTransition?.(nextHotspot)
+      onTransition?.(res.hotspot)
     } catch (err) {
-      setSubmitError(err instanceof ApiError ? err.message : 'Failed to save review')
+      if (err instanceof ApiError && err.status === 409) {
+        setSubmitError('Another reviewer has updated this hotspot. Please review their changes and try again.')
+        try {
+          const freshHotspot = await api.getProjectHotspot(projectKey, hotspot.id)
+          const freshHistory = await api.getProjectHotspotHistory(projectKey, hotspot.id)
+          setHotspot(freshHotspot)
+          setHistory(freshHistory)
+        } catch {}
+      } else {
+        setSubmitError(err instanceof ApiError ? err.message : 'Failed to save review')
+      }
     } finally {
       setSubmitting(false)
     }

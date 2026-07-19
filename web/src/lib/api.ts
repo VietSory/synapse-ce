@@ -791,10 +791,10 @@ function mapHotspot(r: any): Hotspot {
 function mapHotspotReviewEvent(r: any): HotspotReviewEvent {
   return {
     actor: r.actor ?? '',
-    status: (r.status ?? 'to_review') as HotspotStatus,
+    status: (r.to || r.status || 'to_review') as HotspotStatus,
     rationale: r.rationale ?? '',
-    version: r.version ?? 1,
-    at: r.at ?? '',
+    version: r.version ?? r.previous_version + 1 ?? 1,
+    at: r.created_at || r.at || '',
   }
 }
 
@@ -913,12 +913,15 @@ export const api = {
     return mapHotspot(await req(`/projects/${encodeURIComponent(projectKey)}/hotspots/${encodeURIComponent(id)}`))
   },
 
-  transitionProjectHotspot: async (projectKey: string, id: string, status: HotspotStatus, rationale: string, expectedVersion: number): Promise<Hotspot> => {
+  transitionProjectHotspot: async (projectKey: string, id: string, status: HotspotStatus, rationale: string, expectedVersion: number): Promise<{ hotspot: Hotspot, event: HotspotReviewEvent }> => {
     const res = await req(`/projects/${encodeURIComponent(projectKey)}/hotspots/${encodeURIComponent(id)}/transitions`, {
       method: 'POST',
       body: JSON.stringify({ to: status, rationale, expected_version: expectedVersion }),
     })
-    return mapHotspot(res)
+    return {
+      hotspot: mapHotspot(res.hotspot),
+      event: mapHotspotReviewEvent(res.event)
+    }
   },
 
   getProjectHotspotHistory: async (projectKey: string, id: string): Promise<HotspotReviewEvent[]> => {

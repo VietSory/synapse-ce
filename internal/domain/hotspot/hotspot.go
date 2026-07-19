@@ -137,40 +137,8 @@ type Facets struct {
 }
 
 type Page struct {
-	Items  []Hotspot
+	Items   []Hotspot
 	Facets  Facets
+	Next    *Cursor
 	Summary Summary
-}
-
-type Summary struct {
-	Total       int
-	Reviewed    int
-	ReviewedPct float64
-	Grade       shared.Grade
-}
-
-func CalculateSummary(total, reviewed int) Summary {
-	if total == 0 {
-		return Summary{Total: 0, Reviewed: 0, ReviewedPct: 100, Grade: shared.GradeA}
-	}
-	pct := float64(reviewed) / float64(total) * 100
-	var grade shared.Grade
-	switch {
-	case pct >= 80:
-		grade = shared.GradeA
-	case pct >= 70:
-		grade = shared.GradeB
-	case pct >= 50:
-		grade = shared.GradeC
-	case pct >= 30:
-		grade = shared.GradeD
-	default:
-		grade = shared.GradeE
-	}
-	return Summary{
-		Total:       total,
-		Reviewed:    reviewed,
-		ReviewedPct: pct,
-		Grade:       grade,
-	}
 }
