@@ -186,15 +186,15 @@ func projectedHotspot(analysis projectanalysis.Analysis, candidate hotspot.Candi
 }
 
 func (r *ProjectAnalysisStore) ListHotspots(ctx context.Context, tenantID, projectID shared.ID, filter hotspot.ListFilter) (hotspot.Page, error) {
-	where, args := hotspotWhere(tenantID, projectID, filter, true)
+	where, args, joins := hotspotWhere(tenantID, projectID, filter, true)
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 25
 	}
 	args = append(args, limit+1)
-	query := `SELECT id, tenant_id, project_id, hotspot_key, finding_identity, rule_key, title, description, severity, finding_kind, cwe, location,
-		status, version, first_seen_analysis_id, last_seen_analysis_id, first_seen_at, last_seen_at, created_at, updated_at, last_reviewed_by, last_reviewed_at
-		FROM project_hotspots WHERE ` + where + ` ORDER BY last_seen_at DESC, id COLLATE "C" DESC LIMIT $` + fmt.Sprint(len(args))
+	query := `SELECT ph.id, ph.tenant_id, ph.project_id, ph.hotspot_key, ph.finding_identity, ph.rule_key, ph.title, ph.description, ph.severity, ph.finding_kind, ph.cwe, ph.location,
+		ph.status, ph.version, ph.first_seen_analysis_id, ph.last_seen_analysis_id, ph.first_seen_at, ph.last_seen_at, ph.created_at, ph.updated_at, ph.last_reviewed_by, ph.last_reviewed_at
+		FROM project_hotspots ph ` + joins + ` WHERE ` + where + ` ORDER BY ph.last_seen_at DESC, ph.id COLLATE "C" DESC LIMIT $` + fmt.Sprint(len(args))
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return hotspot.Page{}, fmt.Errorf("list project hotspots: %w", err)
@@ -218,10 +218,21 @@ func (r *ProjectAnalysisStore) ListHotspots(ctx context.Context, tenantID, proje
 		items = items[:limit]
 	}
 	page.Items = items
-	facetWhere, facetArgs := hotspotWhere(tenantID, projectID, filter, false)
-	facetRows, err := r.pool.Query(ctx, `SELECT 'status', status, count(*) FROM project_hotspots WHERE `+facetWhere+` GROUP BY status
-		UNION ALL SELECT 'rule', rule_key, count(*) FROM project_hotspots WHERE `+facetWhere+` GROUP BY rule_key
-		UNION ALL SELECT 'severity', severity, count(*) FROM project_hotspots WHERE `+facetWhere+` GROUP BY severity`, facetArgs...)
+	
+	facetWhere, facetArgs, facetJoins := hotspotWhere(tenantID, projectID, filter, false)
+	
+	// Query Summary
+	var total, reviewed int
+	err = r.pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE ph.status IN ('acknowledged', 'fixed', 'safe')) FROM project_hotspots ph ` + facetJoins + ` WHERE ` + facetWhere, facetArgs...).Scan(&total, &reviewed)
+	if err != nil {
+		return hotspot.Page{}, fmt.Errorf("summary project hotspots: %w", err)
+	}
+	
+	page.Summary = hotspot.CalculateSummary(total, reviewed)
+
+	facetRows, err := r.pool.Query(ctx, `SELECT 'status' as kind, ph.status as value, count(*) FROM project_hotspots ph `+facetJoins+` WHERE `+facetWhere+` GROUP BY ph.status
+		UNION ALL SELECT 'rule', ph.rule_key, count(*) FROM project_hotspots ph `+facetJoins+` WHERE `+facetWhere+` GROUP BY ph.rule_key
+		UNION ALL SELECT 'severity', ph.severity, count(*) FROM project_hotspots ph `+facetJoins+` WHERE `+facetWhere+` GROUP BY ph.severity`, facetArgs...)
 	if err != nil {
 		return hotspot.Page{}, fmt.Errorf("facet project hotspots: %w", err)
 	}
@@ -245,35 +256,45 @@ func (r *ProjectAnalysisStore) ListHotspots(ctx context.Context, tenantID, proje
 	return page, facetRows.Err()
 }
 
-func hotspotWhere(tenantID, projectID shared.ID, filter hotspot.ListFilter, cursor bool) (string, []any) {
+func hotspotWhere(tenantID, projectID shared.ID, filter hotspot.ListFilter, cursor bool) (string, []any, string) {
 	args := []any{tenantID.String(), projectID.String()}
-	parts := []string{"tenant_id = $1", "project_id = $2"}
+	parts := []string{"ph.tenant_id = $1", "ph.project_id = $2"}
 	add := func(part string, value any) {
 		args = append(args, value)
 		parts = append(parts, fmt.Sprintf(part, len(args)))
 	}
 	if filter.Status != nil {
-		add("status = $%d", string(*filter.Status))
+		add("ph.status = $%d", string(*filter.Status))
 	}
 	if strings.TrimSpace(filter.RuleKey) != "" {
-		add("rule_key = $%d", strings.TrimSpace(filter.RuleKey))
+		add("ph.rule_key = $%d", strings.TrimSpace(filter.RuleKey))
 	}
 	if filter.Severity != nil {
-		add("severity = $%d", string(*filter.Severity))
+		add("ph.severity = $%d", string(*filter.Severity))
 	}
 	if search := strings.TrimSpace(filter.Search); search != "" {
 		searchArg := len(args) + 1
+		search = strings.ReplaceAll(search, "\\", "\\\\")
+		search = strings.ReplaceAll(search, "%", "\\%")
+		search = strings.ReplaceAll(search, "_", "\\_")
+		
 		args = append(args, "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
-		parts = append(parts, fmt.Sprintf("(hotspot_key ILIKE $%d OR rule_key ILIKE $%d OR title ILIKE $%d OR description ILIKE $%d OR location ILIKE $%d)", searchArg, searchArg+1, searchArg+2, searchArg+3, searchArg+4))
+		parts = append(parts, fmt.Sprintf("(ph.hotspot_key ILIKE $%d OR ph.rule_key ILIKE $%d OR ph.title ILIKE $%d OR ph.description ILIKE $%d OR ph.location ILIKE $%d)", searchArg, searchArg+1, searchArg+2, searchArg+3, searchArg+4))
 	}
+	
+	joins := ""
+	if filter.Lens == hotspot.LensNewCode {
+		joins = ` JOIN project_analyses pa ON pa.project_id = ph.project_id AND pa.tenant_id = ph.tenant_id AND pa.is_latest = true
+				  JOIN project_analysis_hotspots pah ON pah.analysis_id = pa.id AND pah.hotspot_id = ph.id AND pah.is_new = true `
+	}
+
 	if cursor && !filter.BeforeLastSeenAt.IsZero() {
 		args = append(args, filter.BeforeLastSeenAt, filter.BeforeID.String())
 		at, id := len(args)-1, len(args)
-		parts = append(parts, fmt.Sprintf(`(last_seen_at < $%d OR (last_seen_at = $%d AND id COLLATE "C" < $%d))`, at, at, id))
+		parts = append(parts, fmt.Sprintf(`(ph.last_seen_at < $%d OR (ph.last_seen_at = $%d AND ph.id COLLATE "C" < $%d))`, at, at, id))
 	}
-	return strings.Join(parts, " AND "), args
+	return strings.Join(parts, " AND "), args, joins
 }
-
 func (r *ProjectAnalysisStore) GetHotspot(ctx context.Context, tenantID, projectID, hotspotID shared.ID) (hotspot.Hotspot, error) {
 	row := r.pool.QueryRow(ctx, `SELECT id, tenant_id, project_id, hotspot_key, finding_identity, rule_key, title, description, severity, finding_kind, cwe, location,
 		status, version, first_seen_analysis_id, last_seen_analysis_id, first_seen_at, last_seen_at, created_at, updated_at, last_reviewed_by, last_reviewed_at

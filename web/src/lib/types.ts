@@ -801,9 +801,8 @@ export type HotspotStatus = 'to_review' | 'acknowledged' | 'fixed' | 'safe'
 
 export interface Hotspot {
   id: string
-  key: string
-  findingIdentity: string
   ruleKey: string
+  ruleName: string
   title: string
   description: string
   severity: Severity
@@ -819,13 +818,14 @@ export interface Hotspot {
 }
 
 export interface HotspotListFilter {
+  lens?: 'overall' | 'new-code'
   status?: HotspotStatus
-  ruleKey?: string
+  rule?: string
   severity?: Severity
   search?: string
   limit?: number
-  beforeLastSeenAt?: string
-  beforeId?: string
+  before_last_seen_at?: string
+  before_id?: string
 }
 
 export interface HotspotPage {
@@ -836,6 +836,22 @@ export interface HotspotPage {
     ruleKeys: Record<string, number>
     severities: Record<string, number>
   }
+  summary: HotspotSummary
+}
+
+export function CanTransitionTo(from: HotspotStatus, to: HotspotStatus): boolean {
+  if (from === to) return false;
+  switch (from) {
+    case 'to_review':
+      return to === 'acknowledged' || to === 'fixed' || to === 'safe';
+    case 'acknowledged':
+      return to === 'fixed' || to === 'safe' || to === 'to_review';
+    case 'fixed':
+      return to === 'to_review';
+    case 'safe':
+      return to === 'to_review';
+  }
+  return false;
 }
 
 export interface HotspotSummary {

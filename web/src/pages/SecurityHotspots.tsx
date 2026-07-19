@@ -10,19 +10,19 @@ export function SecurityHotspotsPage() {
   const { projectKey } = useProjectRouteContext()
   const [params, setParams] = useSearchParams()
 
-  const lens = (params.get('lens') === 'new_code' ? 'new_code' : 'overall') as 'overall' | 'new_code'
+  const lens = (params.get('lens') === 'new-code' ? 'new-code' : 'overall') as 'overall' | 'new-code'
   const status = params.get('status') as any || undefined
-  const ruleKey = params.get('ruleKey') || undefined
+  const rule = params.get('rule') || undefined
   const severity = params.get('severity') as any || undefined
-  const search = params.get('q') || undefined
+  const search = params.get('search') || undefined
 
   const filter = useMemo<HotspotListFilter>(() => ({
     status,
-    ruleKey,
+    rule,
     severity,
     search,
     limit: 50,
-  }), [status, ruleKey, severity, search])
+  }), [status, rule, severity, search])
 
   const [page, setPage] = useState<HotspotPage | null>(null)
   const [loading, setLoading] = useState(true)
@@ -52,7 +52,7 @@ export function SecurityHotspotsPage() {
   const loadMore = () => {
     if (!page?.next || loading) return
     setLoading(true)
-    api.listProjectHotspots(projectKey, lens, { ...filter, beforeLastSeenAt: page.next.beforeLastSeenAt, beforeId: page.next.beforeId })
+    api.listProjectHotspots(projectKey, lens, { ...filter, before_last_seen_at: page.next.beforeLastSeenAt, before_id: page.next.beforeId })
       .then((res) => {
         setPage((prev) => prev ? { ...res, items: [...prev.items, ...res.items] } : res)
       })
@@ -65,8 +65,39 @@ export function SecurityHotspotsPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-16rem)] gap-4 overflow-hidden">
-      <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <div className="flex h-[calc(100vh-16rem)] flex-col gap-4 overflow-hidden">
+      {page?.summary && (
+        <div className="flex items-center gap-6 rounded-xl border border-border bg-card p-4 shadow-sm">
+          <div>
+            <div className="text-sm font-medium text-muted-foreground">Total Hotspots</div>
+            <div className="text-2xl font-bold">{page.summary.total}</div>
+          </div>
+          <div>
+            <div className="text-sm font-medium text-muted-foreground">Reviewed</div>
+            <div className="text-2xl font-bold">{page.summary.reviewed} ({page.summary.reviewedPct.toFixed(1)}%)</div>
+          </div>
+          <div>
+            <div className="text-sm font-medium text-muted-foreground">Security Review Grade</div>
+            <div className="text-2xl font-bold">{page.summary.grade}</div>
+          </div>
+          <div className="ml-auto flex items-center rounded-md border border-border bg-muted/50 p-1">
+            <button
+              onClick={() => { const next = new URLSearchParams(params); next.set('lens', 'overall'); setParams(next) }}
+              className={`px-3 py-1 text-sm font-medium rounded-sm ${lens === 'overall' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Overall
+            </button>
+            <button
+              onClick={() => { const next = new URLSearchParams(params); next.set('lens', 'new-code'); setParams(next) }}
+              className={`px-3 py-1 text-sm font-medium rounded-sm ${lens === 'new-code' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              New Code
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-1 gap-4 overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-sm">
         <HotspotList
           page={page}
           loading={loading}
@@ -78,14 +109,14 @@ export function SecurityHotspotsPage() {
             if (newFilter.status) next.set('status', newFilter.status)
             else next.delete('status')
             
-            if (newFilter.ruleKey) next.set('ruleKey', newFilter.ruleKey)
-            else next.delete('ruleKey')
+            if (newFilter.rule) next.set('rule', newFilter.rule)
+            else next.delete('rule')
 
             if (newFilter.severity) next.set('severity', newFilter.severity)
             else next.delete('severity')
 
-            if (newFilter.search) next.set('q', newFilter.search)
-            else next.delete('q')
+            if (newFilter.search) next.set('search', newFilter.search)
+            else next.delete('search')
 
             setParams(next, { replace: true })
           }}
@@ -120,6 +151,7 @@ export function SecurityHotspotsPage() {
           />
         </div>
       )}
+      </div>
     </div>
   )
 }

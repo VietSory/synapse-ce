@@ -3,6 +3,8 @@ import { X, CalendarClock, ShieldAlert, CheckCircle2, ShieldCheck, Shield, Alert
 import { api, ApiError } from '../../lib/api'
 import type { Hotspot, HotspotReviewEvent, HotspotStatus } from '../../lib/types'
 import { Button, ErrorState, Pill, Spinner, cn } from '../ui'
+import { CanTransitionTo } from '../../lib/types'
+import type { CurrentUser } from '../../lib/types'
 
 function StatusIcon({ status, className }: { status: HotspotStatus; className?: string }) {
   switch (status) {
@@ -37,8 +39,11 @@ export function HotspotSidePanel({
 }) {
   const [hotspot, setHotspot] = useState<Hotspot | null>(null)
   const [history, setHistory] = useState<HotspotReviewEvent[]>([])
+  const [me, setMe] = useState<CurrentUser | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  
+  const canReview = me && (me.role === 'admin' || me.role === 'reviewer')
 
   useEffect(() => {
     let active = true
@@ -46,12 +51,14 @@ export function HotspotSidePanel({
     setError(null)
     Promise.all([
       api.getProjectHotspot(projectKey, hotspotId),
-      api.getProjectHotspotHistory(projectKey, hotspotId)
+      api.getProjectHotspotHistory(projectKey, hotspotId),
+      api.me()
     ])
-      .then(([hotspotRes, historyRes]) => {
+      .then(([hotspotRes, historyRes, meRes]) => {
         if (!active) return
         setHotspot(hotspotRes)
         setHistory(historyRes)
+        setMe(meRes)
       })
       .catch((err) => {
         if (!active) return
@@ -91,13 +98,20 @@ export function HotspotSidePanel({
     setSubmitting(true)
     setSubmitError(null)
     try {
-      const { hotspot: nextHotspot, event } = await api.transitionProjectHotspot(
+      const nextHotspot = await api.transitionProjectHotspot(
         projectKey,
         hotspot.id,
         transitionStatus,
         rationale.trim(),
         hotspot.version
       )
+      const event: HotspotReviewEvent = {
+        actor: me?.name ?? 'Unknown',
+        status: transitionStatus,
+        rationale: rationale.trim(),
+        version: nextHotspot.version,
+        at: new Date().toISOString()
+      }
       setHotspot(nextHotspot)
       setHistory((prev) => [event, ...prev])
       setRationale('')
@@ -168,6 +182,12 @@ export function HotspotSidePanel({
         {hotspot.status !== 'fixed' || history.some(h => h.status === 'fixed') ? (
           <form onSubmit={handleTransition} className="rounded-lg border border-border bg-surface p-4">
             <h4 className="text-sm font-semibold text-foreground">Review Decision</h4>
+            
+            {!canReview ? (
+              <div className="mt-3 text-sm text-muted-foreground p-3 bg-muted/50 rounded-md">
+                You do not have permission to review Security Hotspots.
+              </div>
+            ) : (
             <div className="mt-3 space-y-3">
               <div>
                 <label htmlFor="status" className="sr-only">Status</label>
@@ -178,10 +198,11 @@ export function HotspotSidePanel({
                   className="w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm text-foreground focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
                   disabled={submitting}
                 >
-                  <option value="to_review">To review</option>
-                  <option value="acknowledged">Acknowledged</option>
-                  <option value="fixed">Fixed</option>
-                  <option value="safe">Safe</option>
+                  <option value={hotspot.status} disabled>{formatHotspotStatus(hotspot.status)} (Current)</option>
+                  {CanTransitionTo(hotspot.status, 'to_review') && <option value="to_review">To review</option>}
+                  {CanTransitionTo(hotspot.status, 'acknowledged') && <option value="acknowledged">Acknowledged</option>}
+                  {CanTransitionTo(hotspot.status, 'fixed') && <option value="fixed">Fixed</option>}
+                  {CanTransitionTo(hotspot.status, 'safe') && <option value="safe">Safe</option>}
                 </select>
               </div>
               <div>
@@ -210,6 +231,7 @@ export function HotspotSidePanel({
                 Save decision
               </Button>
             </div>
+            )}
           </form>
         ) : null}
 

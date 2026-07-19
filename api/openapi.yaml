@@ -394,13 +394,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProjectHotspot" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "500": { $ref: "#/components/responses/InternalServerError" }
 
 
-  /api/v1/projects/{key}/hotspots/{id}/transition:
+  /api/v1/projects/{key}/hotspots/{id}/transitions:
     parameters:
       - name: key
         in: path
@@ -1018,6 +1019,16 @@ components:
             - $ref: "#/components/schemas/ProjectHotspotCursor"
             - type: "null"
         facets: { $ref: "#/components/schemas/ProjectHotspotFacets" }
+        summary: { $ref: "#/components/schemas/ProjectHotspotSummary" }
+
+    ProjectHotspotSummary:
+      type: object
+      required: [total, reviewed, reviewed_pct, grade]
+      properties:
+        total: { type: integer, minimum: 0 }
+        reviewed: { type: integer, minimum: 0 }
+        reviewed_pct: { type: number, minimum: 0, maximum: 100 }
+        grade: { $ref: "#/components/schemas/Grade" }
 
     RuleType:
       type: string

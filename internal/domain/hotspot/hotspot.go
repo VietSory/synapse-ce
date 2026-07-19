@@ -97,7 +97,7 @@ func (h Hotspot) Validate() error {
 	if !h.Severity.Valid() {
 		return fmt.Errorf("%w: hotspot severity is invalid", shared.ErrValidation)
 	}
-	if !Status(h.Status).Valid() {
+	if !h.Status.Valid() {
 		return fmt.Errorf("%w: hotspot status is invalid", shared.ErrValidation)
 	}
 	if h.Version < 1 {
@@ -114,6 +114,7 @@ func (h Hotspot) Validate() error {
 
 // ListFilter describes the read API's tenant/project-local filters.
 type ListFilter struct {
+	Lens             Lens
 	Status           *Status
 	RuleKey          string
 	Severity         *shared.Severity
@@ -137,6 +138,39 @@ type Facets struct {
 
 type Page struct {
 	Items  []Hotspot
-	Next   *Cursor
-	Facets Facets
+	Facets  Facets
+	Summary Summary
+}
+
+type Summary struct {
+	Total       int
+	Reviewed    int
+	ReviewedPct float64
+	Grade       shared.Grade
+}
+
+func CalculateSummary(total, reviewed int) Summary {
+	if total == 0 {
+		return Summary{Total: 0, Reviewed: 0, ReviewedPct: 100, Grade: shared.GradeA}
+	}
+	pct := float64(reviewed) / float64(total) * 100
+	var grade shared.Grade
+	switch {
+	case pct >= 80:
+		grade = shared.GradeA
+	case pct >= 70:
+		grade = shared.GradeB
+	case pct >= 50:
+		grade = shared.GradeC
+	case pct >= 30:
+		grade = shared.GradeD
+	default:
+		grade = shared.GradeE
+	}
+	return Summary{
+		Total:       total,
+		Reviewed:    reviewed,
+		ReviewedPct: pct,
+		Grade:       grade,
+	}
 }

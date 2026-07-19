@@ -44,14 +44,22 @@ type projectHotspotFacetsResponse struct {
 	Severities map[string]int `json:"severities"`
 }
 
+type projectHotspotSummaryResponse struct {
+	Total       int     `json:"total"`
+	Reviewed    int     `json:"reviewed"`
+	ReviewedPct float64 `json:"reviewed_pct"`
+	Grade       string  `json:"grade"`
+}
+
 type projectHotspotPageResponse struct {
 	Items  []projectHotspotResponse      `json:"items"`
-	Next   *projectHotspotCursorResponse `json:"next"`
-	Facets projectHotspotFacetsResponse  `json:"facets"`
+	Next    *projectHotspotCursorResponse `json:"next"`
+	Facets  projectHotspotFacetsResponse  `json:"facets"`
+	Summary projectHotspotSummaryResponse `json:"summary"`
 }
 
 var projectHotspotQueryParameters = map[string]bool{
-	"status": true, "rule": true, "severity": true, "search": true,
+	"lens": true, "status": true, "rule": true, "severity": true, "search": true,
 	"limit": true, "before_last_seen_at": true, "before_id": true,
 }
 
@@ -69,9 +77,29 @@ func (rt *Router) listProjectHotspots(w http.ResponseWriter, r *http.Request) {
 	out := projectHotspotPageResponse{
 		Items:  make([]projectHotspotResponse, len(page.Items)),
 		Facets: projectHotspotFacetsResponse{Statuses: page.Facets.Statuses, RuleKeys: page.Facets.RuleKeys, Severities: page.Facets.Severities},
+		Summary: projectHotspotSummaryResponse{
+			Total:       page.Summary.Total,
+			Reviewed:    page.Summary.Reviewed,
+			ReviewedPct: page.Summary.ReviewedPct,
+			Grade:       string(page.Summary.Grade),
+		},
 	}
+	ruleNames := make(map[string]string)
+	if rt.rules != nil {
+		for _, item := range page.Items {
+			if _, ok := ruleNames[item.RuleKey]; !ok {
+				catalogRule, err := rt.rules.Get(r.Context(), rule.Key(item.RuleKey))
+				if err != nil {
+					writeError(w, rt.log, fmt.Errorf("failed to load rule catalog for %s: %w", item.RuleKey, err))
+					return
+				}
+				ruleNames[item.RuleKey] = catalogRule.Name
+			}
+		}
+	}
+	
 	for i, item := range page.Items {
-		out.Items[i] = rt.projectHotspotDTO(r.Context(), item)
+		out.Items[i] = rt.projectHotspotDTO(item, ruleNames[item.RuleKey])
 	}
 	if page.Next != nil {
 		out.Next = &projectHotspotCursorResponse{BeforeLastSeenAt: page.Next.BeforeLastSeenAt, BeforeID: page.Next.BeforeID.String()}
@@ -85,16 +113,19 @@ func (rt *Router) getProjectHotspot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, rt.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rt.projectHotspotDTO(r.Context(), item))
-}
-
-func (rt *Router) projectHotspotDTO(ctx context.Context, item hotspot.Hotspot) projectHotspotResponse {
 	ruleName := ""
 	if rt.rules != nil {
-		if catalogRule, err := rt.rules.Get(ctx, rule.Key(item.RuleKey)); err == nil {
-			ruleName = catalogRule.Name
+		catalogRule, err := rt.rules.Get(r.Context(), rule.Key(item.RuleKey))
+		if err != nil {
+			writeError(w, rt.log, fmt.Errorf("failed to load rule catalog for %s: %w", item.RuleKey, err))
+			return
 		}
+		ruleName = catalogRule.Name
 	}
+	writeJSON(w, http.StatusOK, rt.projectHotspotDTO(item, ruleName))
+}
+
+func (rt *Router) projectHotspotDTO(item hotspot.Hotspot, ruleName string) projectHotspotResponse {
 	return projectHotspotResponse{
 		ID: item.ID.String(), RuleKey: item.RuleKey, RuleName: ruleName, Title: item.Title, Description: item.Description,
 		Severity: string(item.Severity), FindingKind: string(item.Kind), CWE: item.CWE, Location: item.Location,
@@ -111,6 +142,16 @@ func projectHotspotListParams(r *http.Request) (hotspot.ListFilter, error) {
 	}
 	q := r.URL.Query()
 	filter := hotspot.ListFilter{RuleKey: strings.TrimSpace(q.Get("rule")), Search: strings.TrimSpace(q.Get("search")), Limit: 25}
+	
+	if rawLens := strings.TrimSpace(q.Get("lens")); rawLens != "" {
+		if rawLens != string(hotspot.LensOverall) && rawLens != string(hotspot.LensNewCode) {
+			return hotspot.ListFilter{}, fmt.Errorf("%w: invalid lens", shared.ErrValidation)
+		}
+		filter.Lens = hotspot.Lens(rawLens)
+	} else {
+		filter.Lens = hotspot.LensOverall
+	}
+
 	if filter.RuleKey != "" && utf8.RuneCountInString(filter.RuleKey) > 256 {
 		return hotspot.ListFilter{}, fmt.Errorf("%w: rule exceeds maximum length", shared.ErrValidation)
 	}
@@ -186,7 +227,16 @@ func (rt *Router) transitionProjectHotspot(w http.ResponseWriter, r *http.Reques
 		writeError(w, rt.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rt.projectHotspotDTO(r.Context(), updated))
+	ruleName := ""
+	if rt.rules != nil {
+		catalogRule, err := rt.rules.Get(r.Context(), rule.Key(updated.RuleKey))
+		if err != nil {
+			writeError(w, rt.log, fmt.Errorf("failed to load rule catalog for %s: %w", updated.RuleKey, err))
+			return
+		}
+		ruleName = catalogRule.Name
+	}
+	writeJSON(w, http.StatusOK, rt.projectHotspotDTO(updated, ruleName))
 }
 
 func (rt *Router) projectHotspotHistory(w http.ResponseWriter, r *http.Request) {

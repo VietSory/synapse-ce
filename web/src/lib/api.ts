@@ -771,13 +771,12 @@ function mapRuleDetail(raw: any): RuleDetail {
 function mapHotspot(r: any): Hotspot {
   return {
     id: r.id ?? '',
-    key: r.key ?? '',
-    findingIdentity: r.finding_identity ?? '',
     ruleKey: r.rule_key ?? '',
+    ruleName: r.rule_name ?? '',
     title: r.title ?? '',
     description: r.description ?? '',
     severity: (r.severity ?? 'unknown') as Severity,
-    kind: r.kind ?? '',
+    kind: r.finding_kind ?? '',
     cwe: r.cwe ?? '',
     location: r.location ?? '',
     status: (r.status ?? 'to_review') as HotspotStatus,
@@ -881,16 +880,16 @@ export const api = {
     mapProjectOverviewResponse(await req(`/projects/${encodeURIComponent(key)}/overview`)),
 
   // --- Hotspots ---
-  listProjectHotspots: async (projectKey: string, lens: 'overall' | 'new_code', filter: HotspotListFilter): Promise<HotspotPage> => {
+  listProjectHotspots: async (projectKey: string, lens: 'overall' | 'new-code', filter: HotspotListFilter): Promise<HotspotPage> => {
     const q = new URLSearchParams()
     q.set('lens', lens)
     if (filter.status) q.set('status', filter.status)
-    if (filter.ruleKey) q.set('ruleKey', filter.ruleKey)
+    if (filter.rule) q.set('rule', filter.rule)
     if (filter.severity) q.set('severity', filter.severity)
-    if (filter.search?.trim()) q.set('q', filter.search.trim())
+    if (filter.search?.trim()) q.set('search', filter.search.trim())
     if (filter.limit) q.set('limit', String(filter.limit))
-    if (filter.beforeLastSeenAt) q.set('beforeLastSeenAt', filter.beforeLastSeenAt)
-    if (filter.beforeId) q.set('beforeId', filter.beforeId)
+    if (filter.before_last_seen_at) q.set('before_last_seen_at', filter.before_last_seen_at)
+    if (filter.before_id) q.set('before_id', filter.before_id)
     const qs = q.toString()
     const res = await req(`/projects/${encodeURIComponent(projectKey)}/hotspots${qs ? `?${qs}` : ''}`)
     return {
@@ -901,6 +900,12 @@ export const api = {
         ruleKeys: res.facets?.rule_keys ?? {},
         severities: res.facets?.severities ?? {},
       },
+      summary: {
+        total: res.summary?.total ?? 0,
+        reviewed: res.summary?.reviewed ?? 0,
+        reviewedPct: res.summary?.reviewed_pct ?? 100,
+        grade: (res.summary?.grade ?? 'A') as Grade,
+      },
     }
   },
 
@@ -908,12 +913,12 @@ export const api = {
     return mapHotspot(await req(`/projects/${encodeURIComponent(projectKey)}/hotspots/${encodeURIComponent(id)}`))
   },
 
-  transitionProjectHotspot: async (projectKey: string, id: string, status: HotspotStatus, rationale: string, expectedVersion: number): Promise<{ hotspot: Hotspot, event: HotspotReviewEvent }> => {
-    const res = await req(`/projects/${encodeURIComponent(projectKey)}/hotspots/${encodeURIComponent(id)}/transition`, {
+  transitionProjectHotspot: async (projectKey: string, id: string, status: HotspotStatus, rationale: string, expectedVersion: number): Promise<Hotspot> => {
+    const res = await req(`/projects/${encodeURIComponent(projectKey)}/hotspots/${encodeURIComponent(id)}/transitions`, {
       method: 'POST',
-      body: JSON.stringify({ status, rationale, expected_version: expectedVersion }),
+      body: JSON.stringify({ to: status, rationale, expected_version: expectedVersion }),
     })
-    return { hotspot: mapHotspot(res.hotspot), event: mapHotspotReviewEvent(res.event) }
+    return mapHotspot(res)
   },
 
   getProjectHotspotHistory: async (projectKey: string, id: string): Promise<HotspotReviewEvent[]> => {
