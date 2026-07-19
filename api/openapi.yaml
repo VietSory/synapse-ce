@@ -1191,8 +1191,11 @@ components:
           $ref: '#/components/schemas/ProjectHotspotStatus'
         rationale:
           type: string
+          minLength: 3
+          maxLength: 4000
         expected_version:
           type: integer
+          minimum: 1
       required:
       - to
       - rationale

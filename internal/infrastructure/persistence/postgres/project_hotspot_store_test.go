@@ -137,8 +137,14 @@ func TestProjectHotspot_ReopenAsNewCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = store.TransitionHotspot(ctx, hotspot.TransitionCommand{
-		TenantID: "t1", ProjectID: "p1", HotspotID: id,
-		To: hotspot.StatusFixed, Actor: "user1", ExpectedVersion: item.Version,
+		TenantID:        "t1",
+		ProjectID:       "p1",
+		HotspotID:       id,
+		EventID:         "review-event-fixed",
+		To:              hotspot.StatusFixed,
+		Actor:           "user1",
+		Rationale:       "Marked fixed before reappearance test.",
+		ExpectedVersion: item.Version,
 	})
 	if err != nil {
 		t.Fatal(err)
