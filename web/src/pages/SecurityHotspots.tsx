@@ -108,6 +108,15 @@ export function SecurityHotspotsPage() {
               next.delete('id')
               setParams(next)
             }}
+            onTransition={(hotspot) => {
+              setPage((prev) => {
+                if (!prev) return prev
+                return {
+                  ...prev,
+                  items: prev.items.map((item) => (item.id === hotspot.id ? hotspot : item))
+                }
+              })
+            }}
           />
         </div>
       )}

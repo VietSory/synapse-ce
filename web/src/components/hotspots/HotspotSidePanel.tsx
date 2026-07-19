@@ -28,10 +28,12 @@ export function HotspotSidePanel({
   projectKey,
   hotspotId,
   onClose,
+  onTransition,
 }: {
   projectKey: string
   hotspotId: string
   onClose: () => void
+  onTransition?: (hotspot: Hotspot) => void
 }) {
   const [hotspot, setHotspot] = useState<Hotspot | null>(null)
   const [history, setHistory] = useState<HotspotReviewEvent[]>([])
@@ -60,6 +62,52 @@ export function HotspotSidePanel({
       })
     return () => { active = false }
   }, [projectKey, hotspotId])
+
+  const [transitionStatus, setTransitionStatus] = useState<HotspotStatus>('to_review')
+  const [rationale, setRationale] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (hotspot) {
+      setTransitionStatus(hotspot.status)
+      setRationale('')
+      setSubmitError(null)
+    }
+  }, [hotspot])
+
+  const handleTransition = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!hotspot) return
+    if (transitionStatus === hotspot.status) {
+      setSubmitError('Status must be different from current status.')
+      return
+    }
+    if (rationale.trim().length < 3) {
+      setSubmitError('Rationale must be at least 3 characters.')
+      return
+    }
+
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      const { hotspot: nextHotspot, event } = await api.transitionProjectHotspot(
+        projectKey,
+        hotspot.id,
+        transitionStatus,
+        rationale.trim(),
+        hotspot.version
+      )
+      setHotspot(nextHotspot)
+      setHistory((prev) => [event, ...prev])
+      setRationale('')
+      onTransition?.(nextHotspot)
+    } catch (err) {
+      setSubmitError(err instanceof ApiError ? err.message : 'Failed to save review')
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   if (loading && !hotspot) {
     return (
@@ -117,12 +165,53 @@ export function HotspotSidePanel({
           </p>
         </div>
 
-        {/* Placeholder for Phase 8 Review Form */}
-        <div className="rounded-lg border border-border bg-surface p-4">
-          <p className="text-center text-sm text-mutedfg">
-            Review form will be implemented in Phase 8.
-          </p>
-        </div>
+        {hotspot.status !== 'fixed' || history.some(h => h.status === 'fixed') ? (
+          <form onSubmit={handleTransition} className="rounded-lg border border-border bg-surface p-4">
+            <h4 className="text-sm font-semibold text-foreground">Review Decision</h4>
+            <div className="mt-3 space-y-3">
+              <div>
+                <label htmlFor="status" className="sr-only">Status</label>
+                <select
+                  id="status"
+                  value={transitionStatus}
+                  onChange={(e) => setTransitionStatus(e.target.value as HotspotStatus)}
+                  className="w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm text-foreground focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+                  disabled={submitting}
+                >
+                  <option value="to_review">To review</option>
+                  <option value="acknowledged">Acknowledged</option>
+                  <option value="fixed">Fixed</option>
+                  <option value="safe">Safe</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="rationale" className="sr-only">Rationale</label>
+                <textarea
+                  id="rationale"
+                  value={rationale}
+                  onChange={(e) => setRationale(e.target.value)}
+                  placeholder="Provide a rationale for this decision..."
+                  className="w-full resize-y rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+                  rows={3}
+                  disabled={submitting}
+                  maxLength={4000}
+                />
+              </div>
+              {submitError && (
+                <div className="text-xs text-red-500 dark:text-red-400">{submitError}</div>
+              )}
+              <Button
+                type="submit"
+                disabled={submitting || (transitionStatus === hotspot.status && rationale.trim().length === 0)}
+                className="w-full"
+                variant="brand"
+              >
+                {submitting ? <Spinner className="size-4 mr-2" /> : null}
+                Save decision
+              </Button>
+            </div>
+          </form>
+        ) : null}
 
         <div>
           <h4 className="text-sm font-semibold text-foreground">Review History</h4>
