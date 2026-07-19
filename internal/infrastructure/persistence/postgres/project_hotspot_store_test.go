@@ -13,7 +13,9 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
-func setupProjectHotspotStore(t *testing.T) (*ProjectAnalysisStore, func()) {
+func setupProjectHotspotStore(t *testing.T) *ProjectAnalysisStore {
+	t.Helper()
+
 	dsn := os.Getenv("SYNAPSE_TEST_DB_DSN")
 	if dsn == "" {
 		t.Skip("set SYNAPSE_TEST_DB_DSN to run the postgres integration test")
@@ -26,8 +28,9 @@ func setupProjectHotspotStore(t *testing.T) (*ProjectAnalysisStore, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := NewProjectAnalysisStore(pool)
-	return store, func() { pool.Close() }
+
+	t.Cleanup(pool.Close)
+	return NewProjectAnalysisStore(pool)
 }
 
 func seedHotspotProject(
@@ -41,6 +44,28 @@ func seedHotspotProject(
 
 	ctx := context.Background()
 	pool := store.pool
+
+	t.Cleanup(func() {
+		if _, err := pool.Exec(
+			ctx,
+			`DELETE FROM projects WHERE id=$1 AND tenant_id=$2`,
+			projectID,
+			tenantID,
+		); err != nil {
+			t.Errorf("cleanup hotspot project: %v", err)
+		}
+
+		if _, err := pool.Exec(
+			ctx,
+			`DELETE FROM tenants WHERE id=$1`,
+			tenantID,
+		); err != nil {
+			t.Errorf("cleanup hotspot tenant: %v", err)
+		}
+	})
+
+	_, _ = pool.Exec(ctx, `DELETE FROM projects WHERE id=$1 AND tenant_id=$2`, projectID, tenantID)
+	_, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenantID)
 
 	if _, err := pool.Exec(
 		ctx,
@@ -71,15 +96,10 @@ func seedHotspotProject(
 	if err := NewProjectRepository(pool).Create(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-
-	t.Cleanup(func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenantID)
-	})
 }
 
 func TestProjectHotspotStoreIntegration(t *testing.T) {
-	store, cleanup := setupProjectHotspotStore(t)
-	defer cleanup()
+	store := setupProjectHotspotStore(t)
 	ctx := context.Background()
 	pool := store.pool
 	// Make reruns safe when a previous process was interrupted before t.Cleanup ran.
@@ -168,8 +188,7 @@ func TestProjectHotspotStoreIntegration(t *testing.T) {
 
 func TestProjectHotspot_ReopenAsNewCode(t *testing.T) {
 	ctx := context.Background()
-	store, cleanup := setupProjectHotspotStore(t)
-	defer cleanup()
+	store := setupProjectHotspotStore(t)
 	
 	tenant := shared.ID("hotspot-reopen-tenant")
 	projectID := shared.ID("hotspot-reopen-project")
@@ -183,7 +202,7 @@ func TestProjectHotspot_ReopenAsNewCode(t *testing.T) {
 		Key: "sast:rule-a:main.go:1", FindingIdentity: "reopen-test", RuleKey: "rule-a", Title: "test", Description: "desc",
 		Severity: shared.SeverityHigh, Kind: "sast",
 	}
-	a1 := projectanalysis.Analysis{ID: "a1", TenantID: tenant.String(), ProjectID: projectID.String(), CreatedAt: t1}
+	a1 := projectanalysis.Analysis{ID: "hotspot-reopen-a1", TenantID: tenant.String(), ProjectID: projectID.String(), CreatedAt: t1}
 	if err := store.SaveWithResultAndHotspots(ctx, a1, nil, []hotspot.Candidate{c}); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +217,7 @@ func TestProjectHotspot_ReopenAsNewCode(t *testing.T) {
 		TenantID:        tenant,
 		ProjectID:       projectID,
 		HotspotID:       id,
-		EventID:         "review-event-fixed",
+		EventID:         "hotspot-reopen-review-fixed",
 		To:              hotspot.StatusFixed,
 		Actor:           "user1",
 		Rationale:       "Marked fixed before reappearance test.",
@@ -209,7 +228,7 @@ func TestProjectHotspot_ReopenAsNewCode(t *testing.T) {
 	}
 	
 	// 3. Later analysis detects it again
-	a2 := projectanalysis.Analysis{ID: "a2", TenantID: tenant.String(), ProjectID: projectID.String(), CreatedAt: t2}
+	a2 := projectanalysis.Analysis{ID: "hotspot-reopen-a2", TenantID: tenant.String(), ProjectID: projectID.String(), CreatedAt: t2}
 	if err := store.SaveWithResultAndHotspots(ctx, a2, nil, []hotspot.Candidate{c}); err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +258,7 @@ func TestProjectHotspot_ReopenAsNewCode(t *testing.T) {
 
 func TestProjectHotspotProjectionUpdatesFindingIdentityFromLaterAnalysis(t *testing.T) {
 	ctx := context.Background()
-	store, cleanup := setupProjectHotspotStore(t)
-	defer cleanup()
+	store := setupProjectHotspotStore(t)
 
 	t0 := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
 	t1 := t0.Add(time.Hour)
@@ -255,7 +273,7 @@ func TestProjectHotspotProjectionUpdatesFindingIdentityFromLaterAnalysis(t *test
 		Key: "k1", FindingIdentity: "old", RuleKey: "r1", Title: "t1", Description: "d1",
 		Severity: shared.SeverityHigh, Kind: finding.KindSAST, CWE: "cwe", Location: "loc",
 	}
-	a1 := projectanalysis.Analysis{ID: "a1", TenantID: tenant.String(), ProjectID: project.String(), CreatedAt: t1}
+	a1 := projectanalysis.Analysis{ID: "hotspot-identity-a1", TenantID: tenant.String(), ProjectID: project.String(), CreatedAt: t1}
 	if err := store.SaveWithResultAndHotspots(ctx, a1, nil, []hotspot.Candidate{c1}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +283,7 @@ func TestProjectHotspotProjectionUpdatesFindingIdentityFromLaterAnalysis(t *test
 		Key: "k1", FindingIdentity: "new", RuleKey: "r1", Title: "t1", Description: "d1",
 		Severity: shared.SeverityHigh, Kind: finding.KindSAST, CWE: "cwe", Location: "loc",
 	}
-	a2 := projectanalysis.Analysis{ID: "a2", TenantID: tenant.String(), ProjectID: project.String(), CreatedAt: t2}
+	a2 := projectanalysis.Analysis{ID: "hotspot-identity-a2", TenantID: tenant.String(), ProjectID: project.String(), CreatedAt: t2}
 	if err := store.SaveWithResultAndHotspots(ctx, a2, nil, []hotspot.Candidate{c2}); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +302,7 @@ func TestProjectHotspotProjectionUpdatesFindingIdentityFromLaterAnalysis(t *test
 		Key: "k1", FindingIdentity: "stale", RuleKey: "r1", Title: "t1", Description: "d1",
 		Severity: shared.SeverityHigh, Kind: finding.KindSAST, CWE: "cwe", Location: "loc",
 	}
-	a0 := projectanalysis.Analysis{ID: "a0", TenantID: tenant.String(), ProjectID: project.String(), CreatedAt: t0}
+	a0 := projectanalysis.Analysis{ID: "hotspot-identity-a0", TenantID: tenant.String(), ProjectID: project.String(), CreatedAt: t0}
 	if err := store.SaveWithResultAndHotspots(ctx, a0, nil, []hotspot.Candidate{c0}); err != nil {
 		t.Fatal(err)
 	}
