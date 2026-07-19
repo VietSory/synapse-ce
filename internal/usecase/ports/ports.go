@@ -14,6 +14,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/evidence"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/hotspot"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/ignore"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
@@ -77,6 +78,21 @@ type ProjectAnalysisStore interface {
 	LatestForProjects(ctx context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]projectanalysis.Analysis, error)
 	List(ctx context.Context, tenantID, projectID shared.ID, limit int, beforeCreatedAt time.Time, beforeID shared.ID) ([]projectanalysis.Analysis, bool, error)
 	Get(ctx context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error)
+}
+
+// ProjectAnalysisProjectionStore is the atomic write capability used when a
+// completed Project analysis also contains Security Hotspot candidates. It is
+// optional on the legacy analysis port so focused test doubles can keep their
+// smaller contract; production stores implement it.
+type ProjectAnalysisProjectionStore interface {
+	SaveWithResultAndHotspots(ctx context.Context, analysis projectanalysis.Analysis, result []byte, candidates []hotspot.Candidate) error
+}
+
+// ProjectHotspotStore reads tenant- and Project-scoped hotspot projections.
+// Review mutations are intentionally outside this PR's port.
+type ProjectHotspotStore interface {
+	ListHotspots(ctx context.Context, tenantID, projectID shared.ID, filter hotspot.ListFilter) (hotspot.Page, error)
+	GetHotspot(ctx context.Context, tenantID, projectID, hotspotID shared.ID) (hotspot.Hotspot, error)
 }
 
 // ProjectArchiveStore retains uploaded source archives so a Project can be re-analyzed.

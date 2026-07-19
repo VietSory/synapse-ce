@@ -10,6 +10,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/hotspot"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -22,8 +23,9 @@ type storedProjectAnalysis struct {
 }
 
 type ProjectAnalysisStore struct {
-	mu   sync.RWMutex
-	data []storedProjectAnalysis
+	mu       sync.RWMutex
+	data     []storedProjectAnalysis
+	hotspots []hotspot.Hotspot
 }
 
 func NewProjectAnalysisStore() *ProjectAnalysisStore { return &ProjectAnalysisStore{} }
@@ -37,6 +39,25 @@ func (s *ProjectAnalysisStore) Save(ctx context.Context, analysis projectanalysi
 func (s *ProjectAnalysisStore) SaveWithResult(_ context.Context, analysis projectanalysis.Analysis, result []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveWithResultLocked(analysis, result)
+}
+
+func (s *ProjectAnalysisStore) SaveWithResultAndHotspots(_ context.Context, analysis projectanalysis.Analysis, result []byte, candidates []hotspot.Candidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := validateCandidates(analysis, candidates); err != nil {
+		return err
+	}
+	if err := s.saveWithResultLocked(analysis, result); err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		s.upsertHotspotLocked(analysis, candidate)
+	}
+	return nil
+}
+
+func (s *ProjectAnalysisStore) saveWithResultLocked(analysis projectanalysis.Analysis, result []byte) error {
 	for _, current := range s.data {
 		if current.analysis.ID == analysis.ID {
 			return nil
@@ -134,6 +155,51 @@ func cloneProjectAnalysis(in projectanalysis.Analysis) projectanalysis.Analysis 
 	}
 	out.Duplication = cloneDuplication(in.Duplication)
 	return out
+}
+
+func validateCandidates(analysis projectanalysis.Analysis, candidates []hotspot.Candidate) error {
+	for _, candidate := range candidates {
+		item := hotspot.Hotspot{
+			ID:       hotspot.DeterministicID(shared.ID(analysis.TenantID), shared.ID(analysis.ProjectID), candidate.Key),
+			TenantID: shared.ID(analysis.TenantID), ProjectID: shared.ID(analysis.ProjectID), Key: candidate.Key,
+			FindingIdentity: candidate.FindingIdentity, RuleKey: candidate.RuleKey, Title: candidate.Title,
+			Description: candidate.Description, Severity: candidate.Severity, Kind: candidate.Kind, CWE: candidate.CWE,
+			Location: candidate.Location, Status: hotspot.StatusToReview, Version: 1,
+			FirstSeenAnalysisID: analysis.ID, LastSeenAnalysisID: analysis.ID,
+			FirstSeenAt: analysis.CreatedAt, LastSeenAt: analysis.CreatedAt,
+			Audit: shared.Audit{CreatedAt: analysis.CreatedAt, UpdatedAt: analysis.CreatedAt},
+		}
+		if err := item.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *ProjectAnalysisStore) upsertHotspotLocked(analysis projectanalysis.Analysis, candidate hotspot.Candidate) {
+	for i := range s.hotspots {
+		current := &s.hotspots[i]
+		if current.TenantID != shared.ID(analysis.TenantID) || current.ProjectID != shared.ID(analysis.ProjectID) || current.Key != candidate.Key {
+			continue
+		}
+		if analysis.CreatedAt.After(current.LastSeenAt) || (analysis.CreatedAt.Equal(current.LastSeenAt) && analysis.ID > current.LastSeenAnalysisID) {
+			current.RuleKey, current.Title, current.Description = candidate.RuleKey, candidate.Title, candidate.Description
+			current.Severity, current.Kind, current.CWE, current.Location = candidate.Severity, candidate.Kind, candidate.CWE, candidate.Location
+			current.LastSeenAnalysisID, current.LastSeenAt = analysis.ID, analysis.CreatedAt
+			current.Audit.UpdatedAt = analysis.CreatedAt
+		}
+		return
+	}
+	s.hotspots = append(s.hotspots, hotspot.Hotspot{
+		ID:       hotspot.DeterministicID(shared.ID(analysis.TenantID), shared.ID(analysis.ProjectID), candidate.Key),
+		TenantID: shared.ID(analysis.TenantID), ProjectID: shared.ID(analysis.ProjectID), Key: candidate.Key,
+		FindingIdentity: candidate.FindingIdentity, RuleKey: candidate.RuleKey, Title: candidate.Title,
+		Description: candidate.Description, Severity: candidate.Severity, Kind: candidate.Kind, CWE: candidate.CWE,
+		Location: candidate.Location, Status: hotspot.StatusToReview, Version: 1,
+		FirstSeenAnalysisID: analysis.ID, LastSeenAnalysisID: analysis.ID,
+		FirstSeenAt: analysis.CreatedAt, LastSeenAt: analysis.CreatedAt,
+		Audit: shared.Audit{CreatedAt: analysis.CreatedAt, UpdatedAt: analysis.CreatedAt},
+	})
 }
 
 func cloneCounts(in projectanalysis.Counts) projectanalysis.Counts {
