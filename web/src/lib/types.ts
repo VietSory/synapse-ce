@@ -667,7 +667,7 @@ export interface CodeRating {
 export interface CodeQualityReport {
   inventory: LanguageInventory[]
   findings: Finding[]
-  duplication: DuplicationSummary
+  duplication?: DuplicationSummary | null
   rating: CodeRating
 }
 
@@ -713,7 +713,7 @@ export interface ProjectAnalysis {
   delta: { issues: ProjectIssueCounts; measures: Record<string, number>; ratings: Record<string, number> } | null
   measures: Record<string, number>
   coverage: { coveredLines: number; totalLines: number } | null
-  duplication: DuplicationSummary
+  duplication?: DuplicationSummary | null
   rating: CodeRating
 }
 

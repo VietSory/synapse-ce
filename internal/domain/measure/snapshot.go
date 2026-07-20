@@ -11,6 +11,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
+// NodeKind identifies project, directory and file nodes.
 type NodeKind string
 
 const (
@@ -19,6 +20,7 @@ const (
 	NodeFile      NodeKind = "file"
 )
 
+// Availability distinguishes measured evidence from unavailable evidence.
 type Availability string
 
 const (
@@ -26,18 +28,21 @@ const (
 	AvailabilityUnavailable Availability = "unavailable"
 )
 
+// CountMetric requires a nil value when unavailable.
 type CountMetric struct {
 	Availability Availability `json:"availability"`
 	Value        *int         `json:"value"`
 	Reason       string       `json:"reason,omitempty"`
 }
 
+// DecimalMetric requires a nil value when unavailable.
 type DecimalMetric struct {
 	Availability Availability `json:"availability"`
 	Value        *float64     `json:"value"`
 	Reason       string       `json:"reason,omitempty"`
 }
 
+// Counters contains additive evidence used for rollups.
 type Counters struct {
 	Files        int `json:"files"`
 	Functions    int `json:"functions"`
@@ -59,6 +64,7 @@ type Counters struct {
 	RemediationEffortMinutes int `json:"remediation_effort_minutes"`
 }
 
+// Node represents a project, directory, or file node in the snapshot.
 type Node struct {
 	Path     string   `json:"path"`
 	Name     string   `json:"name"`
@@ -77,6 +83,7 @@ type Node struct {
 	AttributionAvailable bool `json:"attribution_available"`
 }
 
+// CommentDensity derives a percentage from counters and never averages children.
 func (n Node) CommentDensity() DecimalMetric {
 	total := n.Counters.CodeLines + n.Counters.CommentLines
 	if total == 0 {
@@ -86,6 +93,7 @@ func (n Node) CommentDensity() DecimalMetric {
 	return DecimalMetric{Availability: AvailabilityAvailable, Value: &val}
 }
 
+// Coverage derives a percentage from counters and never averages children.
 func (n Node) Coverage() DecimalMetric {
 	if !n.CoverageAvailable {
 		return DecimalMetric{Availability: AvailabilityUnavailable}
@@ -97,6 +105,7 @@ func (n Node) Coverage() DecimalMetric {
 	return DecimalMetric{Availability: AvailabilityAvailable, Value: &val}
 }
 
+// DuplicationDensity derives a percentage from counters and never averages children.
 func (n Node) DuplicationDensity() DecimalMetric {
 	if !n.DuplicationAvailable {
 		return DecimalMetric{Availability: AvailabilityUnavailable}
@@ -109,22 +118,26 @@ func (n Node) DuplicationDensity() DecimalMetric {
 	return DecimalMetric{Availability: AvailabilityAvailable, Value: &val}
 }
 
+// Snapshot is immutable analysis-time evidence.
 type Snapshot struct {
 	Nodes []Node `json:"nodes"`
 
 	NewCodeCoverage DecimalMetric `json:"new_code_coverage"`
 }
 
+// IssueInput represents an issue to be included in the snapshot.
 type IssueInput struct {
 	Path     string
 	RuleKey  rule.Key
 	Severity shared.Severity
 }
 
+// RuleResolver is an analysis-time immutable rule lookup abstraction.
 type RuleResolver interface {
 	Get(key rule.Key) (rule.Rule, error)
 }
 
+// BuildSnapshotInput contains the complete evidence used by the pure builder.
 type BuildSnapshotInput struct {
 	Inventory   Inventory
 	Complexity  *ComplexityReport
@@ -224,12 +237,6 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 
 	seenFilePaths := make(map[string]bool)
 
-	markAttributionUnavailable := func() {
-		for _, node := range nodesByPath {
-			node.AttributionAvailable = false
-		}
-	}
-
 	// 1. Files from Inventory
 	for _, f := range in.Inventory.Files {
 		p, err := CanonicalPath(f.Path)
@@ -275,7 +282,11 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 		getNode("") // root
 	}
 
+	initialPaths := make([]string, 0, len(nodesByPath))
 	for p := range nodesByPath {
+		initialPaths = append(initialPaths, p)
+	}
+	for _, p := range initialPaths {
 		ensureParents(p)
 	}
 
@@ -361,12 +372,14 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 		}
 	}
 
+	attributionLost := false
+
 	// 5. Issues
 	for _, issue := range in.Issues {
 		if strings.TrimSpace(issue.Path) == "" {
 			n := getNode("")
 			n.Counters.IssuesBySeverity[string(issue.Severity)]++
-			markAttributionUnavailable()
+			attributionLost = true
 
 			r, err := in.RuleCatalog.Get(issue.RuleKey)
 			if err != nil {
@@ -391,7 +404,7 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 		n := nodesByPath[p]
 		if err != nil || n == nil {
 			n = getNode("") // Add to root if path is missing, invalid, or unmatched
-			markAttributionUnavailable()
+			attributionLost = true
 		}
 
 		if string(issue.Severity) != "" {
@@ -416,6 +429,12 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 
 		if r.Type != rule.TypeSecurityHotspot {
 			n.Counters.RemediationEffortMinutes += r.RemediationEffort
+		}
+	}
+
+	if attributionLost {
+		for _, node := range nodesByPath {
+			node.AttributionAvailable = false
 		}
 	}
 
@@ -469,7 +488,7 @@ func BuildSnapshot(in BuildSnapshotInput) (Snapshot, error) {
 
 	// Deduplicate blocks for directories
 	if in.Duplication != nil {
-		// Re-sort from children to parents
+		// Propagate distinct block IDs from children to parents using the existing child-first order.
 		for _, p := range paths {
 			if p == "" {
 				continue

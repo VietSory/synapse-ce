@@ -76,12 +76,12 @@ export function CodeQualityReportView({
     (acc, language) => ({ files: acc.files + language.files, code: acc.code + language.codeLines }),
     { files: 0, code: 0 },
   )
-  const dupDensity = report.duplication.totalLines > 0 ? (100 * report.duplication.duplicatedLines) / report.duplication.totalLines : 0
-  const dupDensityDisplay = formatOverviewPercentage(dupDensity)
+  const dupDensity = report.duplication && report.duplication.totalLines > 0 ? (100 * report.duplication.duplicatedLines) / report.duplication.totalLines : 0
+  const dupDensityDisplay = report.duplication ? formatOverviewPercentage(dupDensity) : 'Unavailable'
   const debtH = Math.floor(report.rating.techDebtMinutes / 60)
   const debtM = report.rating.techDebtMinutes % 60
   const languages = [...report.inventory].sort((a, b) => b.codeLines - a.codeLines)
-  const duplicateBlocks = [...report.duplication.blocks].sort((a, b) => b.tokens - a.tokens).slice(0, 20)
+  const duplicateBlocks = report.duplication ? [...report.duplication.blocks].sort((a, b) => b.tokens - a.tokens).slice(0, 20) : []
 
   return (
     <div className="space-y-6">
@@ -105,7 +105,7 @@ export function CodeQualityReportView({
         <div className="grid grid-cols-1 gap-px bg-border sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="Technical debt" value={`${debtH}h ${debtM}m`} hint={`${report.rating.debtRatioPct.toFixed(2)}% of estimated development cost`} icon={Wrench} />
           <Metric label="Code lines" value={total.code.toLocaleString()} hint={`${total.files.toLocaleString()} source files`} icon={FileCode2} />
-          <Metric label="Duplication" value={dupDensityDisplay} hint={`${report.duplication.blocks.length.toLocaleString()} duplicate blocks`} icon={Copy} />
+          <Metric label="Duplication" value={dupDensityDisplay} hint={report.duplication ? `${report.duplication.blocks.length.toLocaleString()} duplicate blocks` : 'Duplication analysis was not run'} icon={Copy} />
           <Metric label="Issues" value={findings.length.toLocaleString()} hint={`${kindCounts.quality ?? 0} quality · ${kindCounts.reliability ?? 0} reliability`} icon={Gauge} />
         </div>
       </Card>
@@ -130,10 +130,12 @@ export function CodeQualityReportView({
         titleId={landmarkIds?.duplications}
         titleTabIndex={landmarkIds?.duplications ? -1 : undefined}
         titleClassName={landmarkIds?.duplications ? 'scroll-mt-6 rounded-sm focus:outline-none focus:ring-2 focus:ring-brand/60' : undefined}
-        actions={<div className="flex items-center gap-2"><Pill>{dupDensityDisplay} density</Pill>{report.duplication.blocks.length > duplicateBlocks.length && <span className="text-xs text-subtlefg">Showing {duplicateBlocks.length.toLocaleString()} of {report.duplication.blocks.length.toLocaleString()}</span>}</div>}
-        bodyClass={duplicateBlocks.length === 0 ? undefined : 'p-0'}
+        actions={<div className="flex items-center gap-2">{report.duplication ? <><Pill>{dupDensityDisplay} density</Pill>{report.duplication.blocks.length > duplicateBlocks.length && <span className="text-xs text-subtlefg">Showing {duplicateBlocks.length.toLocaleString()} of {report.duplication.blocks.length.toLocaleString()}</span>}</> : <Pill>Unavailable</Pill>}</div>}
+        bodyClass={!report.duplication || duplicateBlocks.length === 0 ? undefined : 'p-0'}
       >
-        {duplicateBlocks.length === 0 ? (
+        {!report.duplication ? (
+          <p className="text-sm text-mutedfg">Duplication analysis is unavailable for this report.</p>
+        ) : duplicateBlocks.length === 0 ? (
           <p className="text-sm text-mutedfg">
             {report.duplication.duplicatedLines > 0
               ? `Duplication was measured at ${dupDensityDisplay}, but block-level locations are unavailable for this analysis.`

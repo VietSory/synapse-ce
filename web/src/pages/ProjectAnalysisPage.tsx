@@ -121,7 +121,7 @@ function LatestAnalysisView({
 }) {
   const { analysis: snapshot, result: scan } = latest
   const coverage = snapshot.coverage && snapshot.coverage.totalLines > 0 ? 100 * snapshot.coverage.coveredLines / snapshot.coverage.totalLines : null
-  const duplication = snapshot.duplication.totalLines > 0 ? 100 * snapshot.duplication.duplicatedLines / snapshot.duplication.totalLines : 0
+  const duplication = snapshot.duplication && snapshot.duplication.totalLines > 0 ? 100 * snapshot.duplication.duplicatedLines / snapshot.duplication.totalLines : 0
   const dimension = ratedDimensionForNavigation(focus, lens)
   const navigationKey = `${projectKey}:${analysisRevision}:${lens}:${focus ?? 'none'}`
   return (
@@ -157,7 +157,7 @@ function LatestAnalysisView({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <HealthMetric label="Issues" value={withDelta(snapshot.issues.total, snapshot.delta?.issues.total)} />
             <HealthMetric label="Coverage" value={coverage === null ? 'Not supplied' : formatOverviewPercentage(coverage)} />
-            <HealthMetric label="Duplication" value={formatOverviewPercentage(duplication)} hint={snapshot.delta ? `${signed(snapshot.delta.measures.duplication_density ?? 0)}% vs previous` : undefined} />
+            <HealthMetric label="Duplication" value={snapshot.duplication ? formatOverviewPercentage(duplication) : 'Unavailable'} hint={snapshot.duplication && snapshot.delta ? `${signed(snapshot.delta.measures.duplication_density ?? 0)}% vs previous` : undefined} />
             <HealthMetric label="Code lines" value={snapshot.rating.linesOfCode.toLocaleString()} />
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-3">

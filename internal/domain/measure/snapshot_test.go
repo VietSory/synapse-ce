@@ -352,3 +352,41 @@ func TestSnapshotInvalidRuleType(t *testing.T) {
 		t.Fatalf("expected invalid rule type error, got %v", err)
 	}
 }
+
+func TestSnapshotAttributionUnavailable(t *testing.T) {
+	input := BuildSnapshotInput{
+		RuleCatalog: &mockResolver{m: map[rule.Key]rule.Rule{
+			"rule1": {Key: "rule1", Type: rule.TypeCodeSmell, RemediationEffort: 5},
+			"rule2": {Key: "rule2", Type: rule.TypeVulnerability, RemediationEffort: 10},
+		}},
+		Inventory: NewInventory(nil,
+			FileInventory{Path: "src/a.go", Language: "Go", CodeLines: 10},
+			FileInventory{Path: "src/b.go", Language: "Go", CodeLines: 20},
+		),
+		Issues: []IssueInput{
+			{Path: "", RuleKey: "rule1", Severity: shared.SeverityHigh}, // No path
+			{Path: "src/c.go", RuleKey: "rule2", Severity: shared.SeverityHigh}, // Missing file
+		},
+	}
+	snap, err := BuildSnapshot(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, n := range snap.Nodes {
+		if n.AttributionAvailable {
+			t.Fatalf("node %q expected AttributionAvailable=false", n.Path)
+		}
+	}
+
+	root := snap.Nodes[0]
+	if root.Counters.IssuesByType[string(rule.TypeCodeSmell)] != 1 {
+		t.Fatalf("expected 1 code smell at root, got %d", root.Counters.IssuesByType[string(rule.TypeCodeSmell)])
+	}
+	if root.Counters.IssuesByType[string(rule.TypeVulnerability)] != 1 {
+		t.Fatalf("expected 1 vulnerability at root, got %d", root.Counters.IssuesByType[string(rule.TypeVulnerability)])
+	}
+	if root.Counters.RemediationEffortMinutes != 15 {
+		t.Fatalf("expected 15 minutes of remediation effort, got %d", root.Counters.RemediationEffortMinutes)
+	}
+}
