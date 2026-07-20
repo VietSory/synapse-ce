@@ -192,4 +192,61 @@ func TestOpenAPI_StrictValidation(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("ratings and new-code coverage only applicable at project root", func(t *testing.T) {
+		walkMappings(doc, func(mapping *yaml.Node) {
+			var kind string
+			var ratingsNode *yaml.Node
+			var coverageNode *yaml.Node
+
+			for i := 0; i < len(mapping.Content); i += 2 {
+				k := mapping.Content[i]
+				v := mapping.Content[i+1]
+				if k.Value == "kind" && v.Kind == yaml.ScalarNode {
+					kind = v.Value
+				}
+				if k.Value == "ratings" && v.Kind == yaml.MappingNode {
+					ratingsNode = v
+				}
+				if k.Value == "coverage" && v.Kind == yaml.MappingNode {
+					coverageNode = v
+				}
+			}
+
+			if kind == "directory" || kind == "file" {
+				if ratingsNode != nil {
+					walkMappings(ratingsNode, func(r *yaml.Node) {
+						var avail string
+						for i := 0; i < len(r.Content); i += 2 {
+							if r.Content[i].Value == "availability" {
+								avail = r.Content[i+1].Value
+							}
+						}
+						// If this is a MeasureGradeMetric mapping (it has availability)
+						if avail != "" && avail != "not_applicable" {
+							t.Errorf("invalid example at line %d: ratings for kind %q must be not_applicable, got %q", r.Line, kind, avail)
+						}
+					})
+				}
+
+				if coverageNode != nil {
+					for i := 0; i < len(coverageNode.Content); i += 2 {
+						k := coverageNode.Content[i]
+						v := coverageNode.Content[i+1]
+						if k.Value == "new_code_coverage" && v.Kind == yaml.MappingNode {
+							var avail string
+							for j := 0; j < len(v.Content); j += 2 {
+								if v.Content[j].Value == "availability" {
+									avail = v.Content[j+1].Value
+								}
+							}
+							if avail != "" && avail != "not_applicable" {
+								t.Errorf("invalid example at line %d: new_code_coverage for kind %q must be not_applicable, got %q", v.Line, kind, avail)
+							}
+						}
+					}
+				}
+			}
+		})
+	})
 }

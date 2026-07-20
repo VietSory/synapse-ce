@@ -501,7 +501,7 @@ paths:
                             covered_lines: {availability: available, value: 700, unavailable_reason: null}
                             coverable_lines: {availability: available, value: 900, unavailable_reason: null}
                             coverage: {availability: available, value: 77.7, unavailable_reason: null}
-                            new_code_coverage: {availability: available, value: 80.0, unavailable_reason: null}
+                            new_code_coverage: {availability: not_applicable, value: null, unavailable_reason: null}
                       next_cursor: "cursor_for_next_page"
                 directoryAnalyzed:
                   summary: Directory node (Analyzed)
@@ -517,9 +517,9 @@ paths:
                       kind: directory
                       language: ""
                       ratings:
-                        security: {availability: available, grade: A, unavailable_reason: null}
-                        reliability: {availability: available, grade: B, unavailable_reason: null}
-                        maintainability: {availability: available, grade: A, unavailable_reason: null}
+                        security: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        reliability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        maintainability: {availability: not_applicable, grade: null, unavailable_reason: null}
                     children:
                       items:
                         - path: src/main.go
@@ -527,9 +527,9 @@ paths:
                           kind: file
                           language: go
                           ratings:
-                            security: {availability: available, grade: A, unavailable_reason: null}
-                            reliability: {availability: available, grade: A, unavailable_reason: null}
-                            maintainability: {availability: available, grade: A, unavailable_reason: null}
+                            security: {availability: not_applicable, grade: null, unavailable_reason: null}
+                            reliability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                            maintainability: {availability: not_applicable, grade: null, unavailable_reason: null}
                       next_cursor: null
                 fileAnalyzed:
                   summary: File node (Analyzed)
@@ -545,9 +545,9 @@ paths:
                       kind: file
                       language: go
                       ratings:
-                        security: {availability: available, grade: A, unavailable_reason: null}
-                        reliability: {availability: unavailable, grade: null, unavailable_reason: rating_not_available}
-                        maintainability: {availability: available, grade: B, unavailable_reason: null}
+                        security: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        reliability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        maintainability: {availability: not_applicable, grade: null, unavailable_reason: null}
                     children:
                       items: []
                       next_cursor: null
