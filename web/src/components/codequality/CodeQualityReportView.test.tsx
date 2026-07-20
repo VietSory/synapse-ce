@@ -55,7 +55,9 @@ describe('CodeQualityReportView', () => {
 
   it('discloses when duplicated blocks are limited', () => {
     const blocks = Array.from({ length: 21 }, (_, index) => ({ tokens: index + 1, occurrences: [{ file: `file-${index}.go`, startLine: 1, endLine: 2 }] }))
-    render(<CodeQualityReportView report={{ ...report, duplication: { ...(report.duplication as any), blocks } }} empty={<div>Unavailable</div>} />)
+    const duplication = report.duplication
+    if (!duplication) throw new Error('test fixture requires duplication')
+    render(<CodeQualityReportView report={{ ...report, duplication: { ...duplication, blocks } }} empty={<div>Unavailable</div>} />)
     expect(screen.getByText('Showing 20 of 21')).toBeInTheDocument()
   })
 
@@ -100,7 +102,6 @@ describe('CodeQualityReportView', () => {
 
   it('renders explicit unavailable state when duplication analysis did not run', () => {
     render(<CodeQualityReportView report={{ ...report, duplication: undefined }} empty={<div>Unavailable</div>} />)
-    
     expect(screen.getAllByText('Unavailable')).toHaveLength(2)
     expect(screen.getByText('Duplication analysis was not run')).toBeInTheDocument()
     expect(screen.getByText('Duplication analysis is unavailable for this report.')).toBeInTheDocument()
