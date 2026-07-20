@@ -416,6 +416,36 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/projects/{key}/measures:
+    parameters:
+    - name: key
+      in: path
+      required: true
+      schema: {type: string}
+    get:
+      tags: [projects]
+      summary: Get immutable measure node and its children for a given path
+      operationId: getProjectMeasures
+      description: >
+        Returns the measure snapshot node corresponding to the given path, along
+        with its direct children. Used for rendering code-quality tree and drill-downs.
+      parameters:
+      - name: path
+        in: query
+        description: Target path in the snapshot. Empty returns the project root.
+        schema: {type: string, default: ""}
+      responses:
+        "200":
+          description: Project measure node and children
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectMeasureResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalServerError"}
+
   /api/v1/rules:
     get:
       tags: [rules]
@@ -1255,3 +1285,86 @@ components:
       - reviewed
       - reviewed_pct
       - grade
+
+    MeasureAvailability:
+      type: string
+      enum: [available, unavailable]
+
+    MeasureCounters:
+      type: object
+      properties:
+        files: {type: integer}
+        functions: {type: integer}
+        code_lines: {type: integer}
+        comment_lines: {type: integer}
+        blank_lines: {type: integer}
+        cyclomatic: {type: integer}
+        cognitive: {type: integer}
+        covered_lines: {type: integer}
+        coverable_lines: {type: integer}
+        duplicated_lines: {type: integer}
+        duplication_blocks: {type: integer}
+        issues_by_type:
+          type: object
+          additionalProperties: {type: integer}
+        issues_by_severity:
+          type: object
+          additionalProperties: {type: integer}
+        remediation_effort_minutes: {type: integer}
+      required:
+        - files
+        - functions
+        - code_lines
+        - comment_lines
+        - blank_lines
+        - cyclomatic
+        - cognitive
+        - covered_lines
+        - coverable_lines
+        - duplicated_lines
+        - duplication_blocks
+        - issues_by_type
+        - issues_by_severity
+        - remediation_effort_minutes
+
+    MeasureNode:
+      type: object
+      properties:
+        path: {type: string}
+        name: {type: string}
+        kind:
+          type: string
+          enum: [project, directory, file]
+        parent: {type: string}
+        language: {type: string}
+        counters: {$ref: '#/components/schemas/MeasureCounters'}
+        functions_known: {type: boolean}
+        complexity_available: {type: boolean}
+        coverage_available: {type: boolean}
+        duplication_available: {type: boolean}
+        tech_debt_available: {type: boolean}
+        issue_type_available: {type: boolean}
+        attribution_available: {type: boolean}
+      required:
+        - path
+        - name
+        - kind
+        - counters
+        - functions_known
+        - complexity_available
+        - coverage_available
+        - duplication_available
+        - tech_debt_available
+        - issue_type_available
+        - attribution_available
+
+    ProjectMeasureResponse:
+      type: object
+      properties:
+        component: {$ref: '#/components/schemas/MeasureNode'}
+        children:
+          type: array
+          items: {$ref: '#/components/schemas/MeasureNode'}
+      required:
+        - component
+        - children

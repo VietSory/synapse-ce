@@ -33,6 +33,7 @@ type projectService interface {
 	AnalysisStatus(context.Context, shared.ID, string) (ports.ScanJob, error)
 	LatestAnalysis(context.Context, shared.ID, string) (projectuc.LatestAnalysis, error)
 	Overview(context.Context, shared.ID, string) (projectuc.Overview, error)
+	GetMeasures(context.Context, string, string, string) (projectuc.ProjectMeasureResponse, error)
 	ListAnalyses(context.Context, shared.ID, string, int, time.Time, shared.ID) ([]projectanalysis.Analysis, bool, error)
 	GetAnalysis(context.Context, shared.ID, string, string) (projectanalysis.Analysis, error)
 	ListHotspots(context.Context, shared.ID, string, hotspot.ListFilter) (hotspot.Page, error)
