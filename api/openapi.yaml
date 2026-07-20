@@ -416,6 +416,52 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/projects/{key}/measures:
+    parameters:
+    - name: key
+      in: path
+      required: true
+      schema: {type: string}
+    get:
+      tags: [projects]
+      summary: Get immutable measure node and its children for a given path
+      operationId: getProjectMeasures
+      description: >
+        Returns the measure snapshot node corresponding to the given path, along
+        with its direct children. Used for rendering code-quality tree and drill-downs.
+      parameters:
+      - name: path
+        in: query
+        description: Target path in the snapshot. Empty returns the project root.
+        schema: {type: string, default: ""}
+      - name: limit
+        in: query
+        description: Number of children to return.
+        schema: {type: integer, default: 50, maximum: 200, minimum: 1}
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor.
+        schema: {type: string}
+      - name: domain
+        in: query
+        description: Repeatable domains filter.
+        schema:
+          type: array
+          items:
+            type: string
+            enum: [size, complexity, coverage, duplication, issues, debt, ratings]
+      responses:
+        "200":
+          description: Project measure node and children
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectMeasureResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalServerError"}
+
   /api/v1/rules:
     get:
       tags: [rules]
@@ -1255,3 +1301,185 @@ components:
       - reviewed
       - reviewed_pct
       - grade
+
+    MeasureAvailability:
+      type: string
+      enum: [available, unavailable]
+
+
+    MeasureAvailabilityState:
+      type: string
+      enum: [available, unavailable, not_applicable]
+
+    MeasureUnavailableReason:
+      type: string
+      enum:
+        - legacy_analysis
+        - function_count_not_available
+        - no_commentable_lines
+        - complexity_not_available
+        - coverage_not_supplied
+        - no_executable_lines
+        - changed_line_coverage_not_available
+        - duplication_not_available
+        - issue_type_incomplete
+        - issue_attribution_incomplete
+        - technical_debt_incomplete
+        - rating_not_available
+
+    MeasureCountMetric:
+      type: object
+      properties:
+        availability: {$ref: '#/components/schemas/MeasureAvailabilityState'}
+        value: {type: [integer, "null"]}
+        unavailable_reason: {anyOf: [{$ref: '#/components/schemas/MeasureUnavailableReason'}, {type: 'null'}]}
+      required: [availability, value, unavailable_reason]
+
+    MeasureDecimalMetric:
+      type: object
+      properties:
+        availability: {$ref: '#/components/schemas/MeasureAvailabilityState'}
+        value: {type: [number, "null"], format: float}
+        unavailable_reason: {anyOf: [{$ref: '#/components/schemas/MeasureUnavailableReason'}, {type: 'null'}]}
+      required: [availability, value, unavailable_reason]
+
+    MeasureGradeMetric:
+      type: object
+      properties:
+        availability: {$ref: '#/components/schemas/MeasureAvailabilityState'}
+        grade: {type: [string, "null"], enum: [A, B, C, D, E]}
+        unavailable_reason: {anyOf: [{$ref: '#/components/schemas/MeasureUnavailableReason'}, {type: 'null'}]}
+      required: [availability, value, unavailable_reason]
+
+    MeasureSize:
+      type: object
+      required: [files, ncloc, comment_lines, blank_lines, functions, comment_density]
+      properties:
+        files: {$ref: '#/components/schemas/MeasureCountMetric'}
+        ncloc: {$ref: '#/components/schemas/MeasureCountMetric'}
+        comment_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        blank_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        functions: {$ref: '#/components/schemas/MeasureCountMetric'}
+        comment_density: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+
+    MeasureComplexity:
+      type: object
+      required: [cyclomatic, cognitive]
+      properties:
+        cyclomatic: {$ref: '#/components/schemas/MeasureCountMetric'}
+        cognitive: {$ref: '#/components/schemas/MeasureCountMetric'}
+
+    MeasureCoverage:
+      type: object
+      required: [covered_lines, coverable_lines, coverage, new_code_coverage]
+      properties:
+        covered_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        coverable_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        coverage: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+        new_code_coverage: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+
+    MeasureDuplication:
+      type: object
+      required: [duplicated_lines, duplication_blocks, duplication_density]
+      properties:
+        duplicated_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        duplication_blocks: {$ref: '#/components/schemas/MeasureCountMetric'}
+        duplication_density: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+
+    MeasureIssues:
+      type: object
+      required: [by_type, by_severity]
+      properties:
+        by_type:
+          type: object
+          required: [code_smell, bug, vulnerability, security_hotspot]
+          properties:
+            code_smell: {$ref: '#/components/schemas/MeasureCountMetric'}
+            bug: {$ref: '#/components/schemas/MeasureCountMetric'}
+            vulnerability: {$ref: '#/components/schemas/MeasureCountMetric'}
+            security_hotspot: {$ref: '#/components/schemas/MeasureCountMetric'}
+        by_severity:
+          type: object
+          required: [info, low, medium, high, critical]
+          properties:
+            info: {$ref: '#/components/schemas/MeasureCountMetric'}
+            low: {$ref: '#/components/schemas/MeasureCountMetric'}
+            medium: {$ref: '#/components/schemas/MeasureCountMetric'}
+            high: {$ref: '#/components/schemas/MeasureCountMetric'}
+            critical: {$ref: '#/components/schemas/MeasureCountMetric'}
+
+    MeasureDebt:
+      type: object
+      required: [remediation_effort_minutes]
+      properties:
+        remediation_effort_minutes: {$ref: '#/components/schemas/MeasureCountMetric'}
+
+    MeasureRatings:
+      type: object
+      required: [security, reliability, maintainability]
+      properties:
+        security: {$ref: '#/components/schemas/MeasureGradeMetric'}
+        reliability: {$ref: '#/components/schemas/MeasureGradeMetric'}
+        maintainability: {$ref: '#/components/schemas/MeasureGradeMetric'}
+
+    AnalysisMetadata:
+      type: object
+      properties:
+        id: {type: string}
+        created_at: {type: string, format: date-time}
+        source_ref: {type: string}
+        source_commit: {type: string}
+      required: [id, created_at]
+
+    MeasureNode:
+      type: object
+      properties:
+        path: {type: string}
+        name: {type: string}
+        kind: {type: string, enum: [project, directory, file]}
+        language: {type: string}
+        size: {$ref: '#/components/schemas/MeasureSize'}
+        complexity: {$ref: '#/components/schemas/MeasureComplexity'}
+        coverage: {$ref: '#/components/schemas/MeasureCoverage'}
+        duplication: {$ref: '#/components/schemas/MeasureDuplication'}
+        issues: {$ref: '#/components/schemas/MeasureIssues'}
+        debt: {$ref: '#/components/schemas/MeasureDebt'}
+        ratings: {$ref: '#/components/schemas/MeasureRatings'}
+      required:
+        - path
+        - name
+        - kind
+
+    ChildCollection:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/MeasureNode'}
+        next_cursor: {type: [string, "null"]}
+      required: [items]
+
+    ProjectMeasureResponse:
+      type: object
+      properties:
+        state: {type: string, enum: [not_analyzed, analyzed]}
+        project:
+          type: object
+          properties:
+            key: {type: string}
+            name: {type: string}
+        analysis: {anyOf: [{$ref: '#/components/schemas/AnalysisMetadata'}, {type: 'null'}]}
+        path: {type: string}
+        included_domains:
+          type: array
+          items: {type: string, enum: [size, complexity, coverage, duplication, issues, debt, ratings]}
+        node: {anyOf: [{$ref: '#/components/schemas/MeasureNode'}, {type: 'null'}]}
+        children: {$ref: '#/components/schemas/ChildCollection'}
+      required:
+        - state
+        - project
+        - analysis
+        - path
+        - included_domains
+        - node
+        - children
