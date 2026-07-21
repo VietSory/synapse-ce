@@ -13,8 +13,8 @@ import (
 
 type mockMeasureService struct {
 	projectService
-	err error
-	res projectuc.ProjectMeasureResponse
+	err       error
+	res       projectuc.ProjectMeasureResponse
 	cursorStr string
 }
 

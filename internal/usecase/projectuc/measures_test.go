@@ -134,7 +134,7 @@ func TestGetMeasures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		
+
 		issues := res.Node.Issues
 		if issues == nil {
 			t.Fatalf("expected issues domain to be present")
