@@ -197,7 +197,7 @@ in `internal/usecase/ports`. `cmd/*` is the composition root, with dependency in
 ## Configuration
 
 Synapse reads its configuration from the process environment. Copy `.env.example` and adjust.
-The only required variable is `SYNAPSE_API_TOKEN`. See the
+The only required variable in development is `SYNAPSE_API_TOKEN`. In production, `SYNAPSE_MEASURE_CURSOR_SECRET` is also required (generated via `openssl rand -hex 32`). See the
 [configuration reference](docs/guide/configuration.md) for the full list.
 
 Full documentation lives in [`docs/guide/`](docs/guide/README.md): introduction, installation,

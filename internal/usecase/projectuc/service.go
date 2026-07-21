@@ -44,6 +44,7 @@ type Service struct {
 	gates            *qualitygatesuc.Service
 	gateMutator      ports.QualityGateMutator
 	allowLocalSource bool
+	cursorSecret     []byte
 }
 
 func NewService(repo ports.ProjectRepository, engagements ports.EngagementRepository, clock ports.Clock, ids ports.IDGenerator, audit ports.AuditLogger, allowLocalSource bool) *Service {
@@ -59,6 +60,27 @@ func (s *Service) SetRuleCatalog(catalog ports.RuleCatalog)               { s.ru
 func (s *Service) SetFindingRepository(repo ports.FindingRepository)      { s.findings = repo }
 func (s *Service) SetQualityGates(gates *qualitygatesuc.Service)          { s.gates = gates }
 func (s *Service) SetQualityGateMutator(mutator ports.QualityGateMutator) { s.gateMutator = mutator }
+
+// ValidateCursorSecret returns an error when key is nil or shorter than 32 bytes.
+func ValidateCursorSecret(key []byte) error {
+	if len(key) < 32 {
+		return fmt.Errorf("measure cursor secret must be at least 32 bytes, got %d", len(key))
+	}
+	return nil
+}
+
+// SetCursorSecret injects the HMAC signing key for pagination cursors.
+// Returns an error when the key is absent or shorter than 32 bytes.
+// The byte slice is copied so later caller mutation cannot alter the service key.
+func (s *Service) SetCursorSecret(secret []byte) error {
+	if err := ValidateCursorSecret(secret); err != nil {
+		return err
+	}
+	copied := make([]byte, len(secret))
+	copy(copied, secret)
+	s.cursorSecret = copied
+	return nil
+}
 
 type ruleResolver struct {
 	catalog ports.RuleCatalog
@@ -500,15 +522,20 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 		if !f.Kind.IsRuleBased() {
 			continue
 		}
+		path, _, _ := qualitygate.FileLineOf(f.DedupKey)
 		issueInputs = append(issueInputs, measure.IssueInput{
-			Path:     "", // Phase A: finding model lacks explicit path; triggers AttributionAvailable=false
+			Path:     path,
 			RuleKey:  rule.Key(f.RuleKey),
 			Severity: f.Severity,
 		})
 	}
 	for _, candidate := range candidates {
+		path := candidate.Location
+		if path == "" {
+			path, _, _ = qualitygate.FileLineOf(candidate.FindingIdentity)
+		}
 		issueInputs = append(issueInputs, measure.IssueInput{
-			Path:     "", // Phase A: finding model lacks explicit path; triggers AttributionAvailable=false
+			Path:     path,
 			RuleKey:  rule.Key(candidate.RuleKey),
 			Severity: candidate.Severity,
 		})

@@ -416,6 +416,159 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/projects/{key}/measures:
+    parameters:
+    - name: key
+      in: path
+      required: true
+      schema: {type: string}
+    get:
+      tags: [projects]
+      summary: Get immutable measure node and its children for a given path
+      operationId: getProjectMeasures
+      description: >
+        Returns the measure snapshot node corresponding to the given path, along
+        with its direct children. Used for rendering code-quality tree and drill-downs.
+      parameters:
+      - name: path
+        in: query
+        description: Target path in the snapshot. Empty returns the project root.
+        schema: {type: string, default: ""}
+      - name: limit
+        in: query
+        description: Number of children to return.
+        schema: {type: integer, default: 50, maximum: 200, minimum: 1}
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor.
+        schema: {type: string}
+      - name: domain
+        in: query
+        description: Repeatable domains filter.
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+            enum: [size, complexity, coverage, duplication, issues, debt, ratings]
+      responses:
+        "200":
+          description: Project measure node and children
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectMeasureResponse"}
+              examples:
+                rootAnalyzed:
+                  summary: Project root (Analyzed)
+                  value:
+                    state: analyzed
+                    project: {key: payments-api, name: Payments API}
+                    analysis: {id: analysis-123, created_at: "2026-07-20T10:00:00Z", source_ref: main, source_commit: abc123def}
+                    path: ""
+                    included_domains: [size, coverage]
+                    node:
+                      path: ""
+                      name: ""
+                      kind: project
+                      language: ""
+                      size:
+                        files: {availability: available, value: 42, unavailable_reason: null}
+                        ncloc: {availability: available, value: 1200, unavailable_reason: null}
+                        comment_lines: {availability: available, value: 100, unavailable_reason: null}
+                        blank_lines: {availability: available, value: 50, unavailable_reason: null}
+                        functions: {availability: available, value: 120, unavailable_reason: null}
+                        comment_density: {availability: available, value: 7.69, unavailable_reason: null}
+                      coverage:
+                        covered_lines: {availability: available, value: 800, unavailable_reason: null}
+                        coverable_lines: {availability: available, value: 1000, unavailable_reason: null}
+                        coverage: {availability: available, value: 80.0, unavailable_reason: null}
+                        new_code_coverage: {availability: available, value: 85.0, unavailable_reason: null}
+                    children:
+                      items:
+                        - path: src
+                          name: src
+                          kind: directory
+                          language: ""
+                          size:
+                            files: {availability: available, value: 40, unavailable_reason: null}
+                            ncloc: {availability: available, value: 1100, unavailable_reason: null}
+                            comment_lines: {availability: available, value: 90, unavailable_reason: null}
+                            blank_lines: {availability: available, value: 45, unavailable_reason: null}
+                            functions: {availability: available, value: 110, unavailable_reason: null}
+                            comment_density: {availability: available, value: 7.56, unavailable_reason: null}
+                          coverage:
+                            covered_lines: {availability: available, value: 700, unavailable_reason: null}
+                            coverable_lines: {availability: available, value: 900, unavailable_reason: null}
+                            coverage: {availability: available, value: 77.7, unavailable_reason: null}
+                            new_code_coverage: {availability: not_applicable, value: null, unavailable_reason: null}
+                      next_cursor: "cursor_for_next_page"
+                directoryAnalyzed:
+                  summary: Directory node (Analyzed)
+                  value:
+                    state: analyzed
+                    project: {key: payments-api, name: Payments API}
+                    analysis: {id: analysis-123, created_at: "2026-07-20T10:00:00Z", source_ref: main, source_commit: abc123def}
+                    path: src
+                    included_domains: [ratings]
+                    node:
+                      path: src
+                      name: src
+                      kind: directory
+                      language: ""
+                      ratings:
+                        security: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        reliability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        maintainability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                    children:
+                      items:
+                        - path: src/main.go
+                          name: main.go
+                          kind: file
+                          language: go
+                          ratings:
+                            security: {availability: not_applicable, grade: null, unavailable_reason: null}
+                            reliability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                            maintainability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                      next_cursor: null
+                fileAnalyzed:
+                  summary: File node (Analyzed)
+                  value:
+                    state: analyzed
+                    project: {key: payments-api, name: Payments API}
+                    analysis: {id: analysis-123, created_at: "2026-07-20T10:00:00Z", source_ref: main, source_commit: abc123def}
+                    path: src/main.go
+                    included_domains: [ratings]
+                    node:
+                      path: src/main.go
+                      name: main.go
+                      kind: file
+                      language: go
+                      ratings:
+                        security: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        reliability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                        maintainability: {availability: not_applicable, grade: null, unavailable_reason: null}
+                    children:
+                      items: []
+                      next_cursor: null
+                notAnalyzed:
+                  summary: Project not analyzed
+                  value:
+                    state: not_analyzed
+                    project: {key: payments-api, name: Payments API}
+                    analysis: null
+                    path: ""
+                    included_domains: [size]
+                    node: null
+                    children:
+                      items: []
+                      next_cursor: null
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalServerError"}
+
   /api/v1/rules:
     get:
       tags: [rules]
@@ -1255,3 +1408,218 @@ components:
       - reviewed
       - reviewed_pct
       - grade
+
+
+    MeasureAvailabilityState:
+      type: string
+      enum: [available, unavailable, not_applicable]
+
+    MeasureUnavailableReason:
+      type: string
+      enum:
+        - legacy_analysis
+        - function_count_not_available
+        - no_commentable_lines
+        - complexity_not_available
+        - coverage_not_supplied
+        - no_executable_lines
+        - changed_line_coverage_not_available
+        - duplication_not_available
+        - issue_type_incomplete
+        - issue_attribution_incomplete
+        - technical_debt_incomplete
+        - rating_not_available
+
+    MeasureCountMetric:
+      type: object
+      properties:
+        availability: {$ref: '#/components/schemas/MeasureAvailabilityState'}
+        value: {type: [integer, "null"]}
+        unavailable_reason: {anyOf: [{$ref: '#/components/schemas/MeasureUnavailableReason'}, {type: 'null'}]}
+      required: [availability, value, unavailable_reason]
+
+    MeasureDecimalMetric:
+      type: object
+      properties:
+        availability: {$ref: '#/components/schemas/MeasureAvailabilityState'}
+        value: {type: [number, "null"], format: float}
+        unavailable_reason: {anyOf: [{$ref: '#/components/schemas/MeasureUnavailableReason'}, {type: 'null'}]}
+      required: [availability, value, unavailable_reason]
+
+    MeasureGradeMetric:
+      type: object
+      required: [availability, grade, unavailable_reason]
+      properties:
+        availability:
+          $ref: '#/components/schemas/MeasureAvailabilityState'
+        grade:
+          anyOf:
+            - type: string
+              enum: [A, B, C, D, E]
+            - type: "null"
+        unavailable_reason:
+          anyOf:
+            - $ref: '#/components/schemas/MeasureUnavailableReason'
+            - type: "null"
+
+    MeasureSize:
+      type: object
+      required: [files, ncloc, comment_lines, blank_lines, functions, comment_density]
+      properties:
+        files: {$ref: '#/components/schemas/MeasureCountMetric'}
+        ncloc: {$ref: '#/components/schemas/MeasureCountMetric'}
+        comment_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        blank_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        functions: {$ref: '#/components/schemas/MeasureCountMetric'}
+        comment_density: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+
+    MeasureComplexity:
+      type: object
+      required: [cyclomatic, cognitive]
+      properties:
+        cyclomatic: {$ref: '#/components/schemas/MeasureCountMetric'}
+        cognitive: {$ref: '#/components/schemas/MeasureCountMetric'}
+
+    MeasureCoverage:
+      type: object
+      required: [covered_lines, coverable_lines, coverage, new_code_coverage]
+      properties:
+        covered_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        coverable_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        coverage: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+        new_code_coverage: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+
+    MeasureDuplication:
+      type: object
+      required: [duplicated_lines, duplication_blocks, duplication_density]
+      properties:
+        duplicated_lines: {$ref: '#/components/schemas/MeasureCountMetric'}
+        duplication_blocks: {$ref: '#/components/schemas/MeasureCountMetric'}
+        duplication_density: {$ref: '#/components/schemas/MeasureDecimalMetric'}
+
+    MeasureIssues:
+      type: object
+      required: [by_type, by_severity]
+      properties:
+        by_type:
+          type: object
+          required: [code_smell, bug, vulnerability, security_hotspot]
+          properties:
+            code_smell: {$ref: '#/components/schemas/MeasureCountMetric'}
+            bug: {$ref: '#/components/schemas/MeasureCountMetric'}
+            vulnerability: {$ref: '#/components/schemas/MeasureCountMetric'}
+            security_hotspot: {$ref: '#/components/schemas/MeasureCountMetric'}
+        by_severity:
+          type: object
+          required: [info, low, medium, high, critical]
+          properties:
+            info: {$ref: '#/components/schemas/MeasureCountMetric'}
+            low: {$ref: '#/components/schemas/MeasureCountMetric'}
+            medium: {$ref: '#/components/schemas/MeasureCountMetric'}
+            high: {$ref: '#/components/schemas/MeasureCountMetric'}
+            critical: {$ref: '#/components/schemas/MeasureCountMetric'}
+
+    MeasureDebt:
+      type: object
+      required: [remediation_effort_minutes]
+      properties:
+        remediation_effort_minutes: {$ref: '#/components/schemas/MeasureCountMetric'}
+
+    MeasureRatings:
+      type: object
+      required: [security, reliability, maintainability]
+      properties:
+        security: {$ref: '#/components/schemas/MeasureGradeMetric'}
+        reliability: {$ref: '#/components/schemas/MeasureGradeMetric'}
+        maintainability: {$ref: '#/components/schemas/MeasureGradeMetric'}
+
+    AnalysisMetadata:
+      type: object
+      properties:
+        id: {type: string}
+        created_at: {type: string, format: date-time}
+        source_ref: {type: string}
+        source_commit: {type: string}
+      required: [id, created_at]
+
+    MeasureNode:
+      type: object
+      properties:
+        path: {type: string}
+        name: {type: string}
+        kind: {type: string, enum: [project, directory, file]}
+        language: {type: string}
+        size: {$ref: '#/components/schemas/MeasureSize'}
+        complexity: {$ref: '#/components/schemas/MeasureComplexity'}
+        coverage: {$ref: '#/components/schemas/MeasureCoverage'}
+        duplication: {$ref: '#/components/schemas/MeasureDuplication'}
+        issues: {$ref: '#/components/schemas/MeasureIssues'}
+        debt: {$ref: '#/components/schemas/MeasureDebt'}
+        ratings: {$ref: '#/components/schemas/MeasureRatings'}
+      required:
+        - path
+        - name
+        - kind
+
+    ChildCollection:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/MeasureNode'}
+        next_cursor: {type: [string, "null"]}
+      required: [items, next_cursor]
+
+    ProjectMetadata:
+      type: object
+      required: [key, name]
+      properties:
+        key: {type: string}
+        name: {type: string}
+
+    ProjectMeasureResponse:
+      oneOf:
+      - $ref: '#/components/schemas/ProjectMeasureAnalyzedResponse'
+      - $ref: '#/components/schemas/ProjectMeasureNotAnalyzedResponse'
+
+    ProjectMeasureAnalyzedResponse:
+      type: object
+      properties:
+        state: {type: string, enum: [analyzed]}
+        project: {$ref: '#/components/schemas/ProjectMetadata'}
+        analysis: {$ref: '#/components/schemas/AnalysisMetadata'}
+        path: {type: string}
+        included_domains:
+          type: array
+          items: {type: string, enum: [size, complexity, coverage, duplication, issues, debt, ratings]}
+        node: {$ref: '#/components/schemas/MeasureNode'}
+        children: {$ref: '#/components/schemas/ChildCollection'}
+      required:
+        - state
+        - project
+        - analysis
+        - path
+        - included_domains
+        - node
+        - children
+
+    ProjectMeasureNotAnalyzedResponse:
+      type: object
+      properties:
+        state: {type: string, enum: [not_analyzed]}
+        project: {$ref: '#/components/schemas/ProjectMetadata'}
+        analysis: {type: 'null'}
+        path: {type: string}
+        included_domains:
+          type: array
+          items: {type: string, enum: [size, complexity, coverage, duplication, issues, debt, ratings]}
+        node: {type: 'null'}
+        children: {$ref: '#/components/schemas/ChildCollection'}
+      required:
+        - state
+        - project
+        - analysis
+        - path
+        - included_domains
+        - node
+        - children
