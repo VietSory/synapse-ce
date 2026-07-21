@@ -228,6 +228,20 @@ func TestBuildFindingsSAST(t *testing.T) {
 	}
 }
 
+func TestCodeQualityFindingsUseDistinctSASTNamespace(t *testing.T) {
+	now := time.Unix(0, 0).UTC()
+	pattern := buildFindings("eng1", &ScanResult{}, now, shared.SeverityInfo, false, []ports.SASTRawFinding{{
+		File: "cmd/app/main.go", Line: 42, RuleID: "weak-hash-md5", Severity: shared.SeverityHigh,
+	}})[0]
+	quality := buildCodeQualityFindings("eng1", []finding.Finding{{
+		Kind: finding.KindSAST, RuleKey: "weak-hash-md5", Severity: shared.SeverityHigh,
+		DedupKey: "cq:sast:weak-hash-md5:cmd/app/main.go:42",
+	}}, now)[0]
+	if pattern.DedupKey == quality.DedupKey || pattern.ID == quality.ID {
+		t.Fatalf("pattern and code-quality SAST findings collided: pattern=%+v quality=%+v", pattern, quality)
+	}
+}
+
 func TestBuildSecretFindings(t *testing.T) {
 	raws := []ports.SecretRawFinding{
 		{File: "main.go", Line: 10, RuleID: "aws-key", Severity: shared.SeverityHigh, Title: "Hardcoded key"},

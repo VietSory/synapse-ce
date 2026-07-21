@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import RuleDetail from './RuleDetail'
@@ -171,20 +171,18 @@ describe('RuleDetail Page', () => {
     // Second request resolves immediately
     vi.mocked(api.getRule).mockResolvedValueOnce(otherRule)
 
-    // Navigate in the same instance
-    await waitFor(() => {
-      router.navigate('/rules/py:xss')
+    // Navigate in the same instance exactly once.
+    await act(async () => {
+      await router.navigate('/rules/py:xss')
     })
 
-    // Second request resolves and displays
-    expect(
-      await screen.findByRole('heading', {
-        name: 'XSS Vulnerability',
-      }),
-    ).toBeInTheDocument()
+    // Second request resolves and displays.
+    expect(await screen.findByRole('heading', { name: 'XSS Vulnerability' })).toBeInTheDocument()
 
-    // Now resolve the stale first response
-    resolveFirst(mockRule)
+    // Now resolve the stale first response.
+    await act(async () => {
+      resolveFirst(mockRule)
+    })
 
     await waitFor(() => {
       expect(

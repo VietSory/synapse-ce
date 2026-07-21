@@ -62,7 +62,7 @@ func TestServiceMapsAndBridges(t *testing.T) {
 		t.Fatalf("analyze: %v", err)
 	}
 	todo := byRule(fs, "quality-todo-comment")
-	if todo == nil || todo.Kind != finding.KindQuality || todo.DedupKey != "quality:quality-todo-comment:a.go:3" {
+	if todo == nil || todo.Kind != finding.KindQuality || todo.DedupKey != "cq:quality:quality-todo-comment:a.go:3" {
 		t.Errorf("todo mapping wrong: %+v", todo)
 	}
 	if todo.Class != finding.ClassFirstParty || todo.Status != finding.StatusOpen {
@@ -112,6 +112,18 @@ func (f fakeBugs) Bugs(context.Context, string) ([]ports.BugFinding, bool, error
 	return f.bugs, f.available, nil
 }
 
+func TestCodeQualitySASTKeysAreNamespaced(t *testing.T) {
+	fs, err := New(fakeAnalyzer{raws: []ports.CodeAnalysisRawFinding{{
+		Kind: "sast", RuleID: "weak-hash-md5", File: "cmd/app/main.go", Line: 42,
+	}}}).Analyze(context.Background(), "root")
+	if err != nil || len(fs) != 1 {
+		t.Fatalf("findings = %+v, err = %v", fs, err)
+	}
+	if got, want := fs[0].DedupKey, "cq:sast:weak-hash-md5:cmd/app/main.go:42"; got != want {
+		t.Fatalf("DedupKey = %q, want %q", got, want)
+	}
+}
+
 func TestBugsBridgeEmitsReliability(t *testing.T) {
 	bugs := fakeBugs{available: true, bugs: []ports.BugFinding{
 		{Rule: "reliability-unreachable-code", Message: "unreachable", File: "a.go", Line: 7},
@@ -123,7 +135,7 @@ func TestBugsBridgeEmitsReliability(t *testing.T) {
 		t.Fatalf("analyze: %v", err)
 	}
 	unr := byRule(fs, "reliability-unreachable-code")
-	if unr == nil || unr.Kind != finding.KindReliability || unr.DedupKey != "reliability:reliability-unreachable-code:a.go:7" {
+	if unr == nil || unr.Kind != finding.KindReliability || unr.DedupKey != "cq:reliability:reliability-unreachable-code:a.go:7" {
 		t.Errorf("unreachable bug mapping wrong: %+v", unr)
 	}
 	cc := byRule(fs, "reliability-constant-condition")

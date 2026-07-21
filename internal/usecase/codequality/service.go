@@ -189,13 +189,12 @@ func (s *Service) analyze(ctx context.Context, root string) ([]finding.Finding, 
 	return out, dupReport, compReport, nil
 }
 
-// newFinding maps a raw code-quality signal to a first-party finding. The DedupKey (<kind>:<rule>:<file>:
-// <line>) is the same shape the SARIF exporter's firstPartyLoc parses, so the finding gets a file:line
-// physical location automatically. The finding is TRANSIENT (read-only CLI/SARIF producer): EngagementID
-// and Audit are intentionally unset; a future scan/store wiring must populate them (as the SCA first-party
-// builders do) before persisting.
+// newFinding maps a raw code-quality signal to a first-party finding. The DedupKey
+// (cq:<kind>:<rule>:<file>:<line>) keeps this producer separate from pattern-SAST while preserving the
+// SARIF exporter physical location. The finding is TRANSIENT (read-only CLI/SARIF producer): EngagementID
+// and Audit are intentionally unset; SCA scan wiring populates them before persistence.
 func newFinding(kind, ruleID, cwe string, sev shared.Severity, title, desc, file string, line int) finding.Finding {
-	dedup := kind + ":" + ruleID + ":" + file + ":" + strconv.Itoa(line)
+	dedup := "cq:" + kind + ":" + ruleID + ":" + file + ":" + strconv.Itoa(line)
 	k := finding.KindQuality
 	switch kind {
 	case "reliability":

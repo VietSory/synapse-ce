@@ -887,7 +887,6 @@ func main() {
 		codequality.WithDuplication(duplication.New(0)),
 		codequality.WithInventory(codeinventory.New()),
 	)
-	router.SetCodeQuality(codeQualityService)
 	scaService.SetCodeQuality(codeQualityService)
 	if rulesSvc, rerr := rules.NewService(ruleCatalog); rerr != nil {
 		log.Error("rules service init failed", "err", rerr)

@@ -15,9 +15,10 @@ import (
 type scaScanRequest struct {
 	EngagementID string `json:"engagement_id"`
 	Target       string `json:"target"`
-	Kind         string `json:"kind"` // local (default) | git | archive | image
-	Ref          string `json:"ref"`  // optional git branch/tag
-	Mode         string `json:"mode"` // full (default) | vulnerabilities | licenses
+	Kind         string `json:"kind"`         // local (default) | git | archive | image
+	Ref          string `json:"ref"`          // optional git branch/tag
+	Mode         string `json:"mode"`         // full (default) | vulnerabilities | licenses
+	CodeQuality  bool   `json:"code_quality"` // include first-party code-quality findings
 }
 
 // validateScanTarget rejects a malformed target synchronously. Returns
@@ -104,7 +105,7 @@ func (rt *Router) runSCAScan(w http.ResponseWriter, r *http.Request) {
 		PrincipalFrom(r.Context()),
 		shared.ID(req.EngagementID),
 		ports.AcquireRequest{Kind: req.Kind, Value: req.Target, Ref: req.Ref},
-		scauc.ScanOptions{Mode: req.Mode},
+		scauc.ScanOptions{Mode: req.Mode, CodeQuality: req.CodeQuality},
 	)
 	if err != nil {
 		writeError(w, rt.log, err)

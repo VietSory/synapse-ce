@@ -5,7 +5,7 @@ import type { CodeQualityView } from '../lib/types'
 import { Card, EmptyState, ErrorState, Spinner } from '../components/ui'
 import { CodeQualityReportView } from '../components/codequality/CodeQualityReportView'
 
-// CodeQualityTab loads the engagement-scoped report; rendering is shared with Project shells.
+// CodeQualityTab loads the latest stored engagement-scoped report; rendering is shared with Project shells.
 export function CodeQualityTab({ engagementId }: { engagementId: string }) {
   const [view, setView] = useState<CodeQualityView | undefined>(undefined)
   const [err, setErr] = useState<string | null>(null)
@@ -20,7 +20,7 @@ export function CodeQualityTab({ engagementId }: { engagementId: string }) {
   }, [engagementId])
 
   if (err) return <ErrorState message={err} />
-  if (view === undefined) return <Spinner label="Analyzing code quality…" />
+  if (view === undefined) return <Spinner label="Loading latest code quality result…" />
 
   return (
     <CodeQualityReportView
@@ -30,7 +30,7 @@ export function CodeQualityTab({ engagementId }: { engagementId: string }) {
           <EmptyState
             icon={Gauge}
             title="Code Quality unavailable"
-            hint={view.reason || 'Code Quality requires an in-scope local source directory; this engagement has none.'}
+            hint={view.reason || 'Run an Engagement scan with Code quality enabled to generate a stored report.'}
           />
         </Card>
       }

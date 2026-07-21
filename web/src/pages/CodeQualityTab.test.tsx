@@ -19,7 +19,7 @@ describe('CodeQualityTab', () => {
   it('renders loading and backend errors', async () => {
     vi.mocked(api.codeQuality).mockReturnValue(new Promise(() => {}))
     const view = render(<CodeQualityTab engagementId="e1" />)
-    expect(screen.getByText('Analyzing code quality…')).toBeInTheDocument()
+    expect(screen.getByText('Loading latest code quality result…')).toBeInTheDocument()
     view.unmount()
 
     vi.mocked(api.codeQuality).mockRejectedValue(new Error('Analysis failed'))

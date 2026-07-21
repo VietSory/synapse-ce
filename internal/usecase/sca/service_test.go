@@ -137,11 +137,15 @@ func (c *countingLic) Scan(context.Context, *sbom.SBOM) ([]ports.LicenseFinding,
 	return []ports.LicenseFinding{{License: "MIT", Category: sbom.LicensePermissive, Verdict: ports.LicenseAllow, Components: []string{"pkg"}}}, nil
 }
 
-type countingCodeQuality struct{ calls int }
+type countingCodeQuality struct {
+	calls  int
+	report codequality.Report
+	err    error
+}
 
 func (c *countingCodeQuality) BuildReport(context.Context, string) (codequality.Report, error) {
 	c.calls++
-	return codequality.Report{}, nil
+	return c.report, c.err
 }
 
 func engagementWithScope(t *testing.T, inScope ...string) *engdom.Engagement {
@@ -216,6 +220,90 @@ func TestCodeQualityRequiresExplicitScanOption(t *testing.T) {
 	}
 	if quality.calls != 1 || project.CodeQuality == nil {
 		t.Fatalf("opted-in scan code quality: calls=%d report=%v", quality.calls, project.CodeQuality != nil)
+	}
+}
+
+func TestCodeQualityFindingsPersistWithScan(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(100, 0).UTC()
+	findings := memory.NewFindingRepository()
+	runs := memory.NewScanRunStore()
+	results := memory.NewScanResultStore()
+	evidenceStore := &fakeEvidence{}
+	evidenceService, err := evidenceuc.NewService(evidenceStore, nil, &fakeAudit{}, fakeClock{t: now}, fakeIDs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quality := &countingCodeQuality{report: codequality.Report{Findings: []finding.Finding{{
+		Title: "High complexity (internal/handler.go:42)", Description: "Split this function.", Severity: shared.SeverityMedium,
+		CWE: "CWE-1120", Sources: []string{"synapse-codeanalysis"}, Class: finding.ClassFirstParty,
+		Status: finding.StatusOpen, Kind: finding.KindQuality, RuleKey: "quality-high-complexity", DedupKey: "cq:quality:quality-high-complexity:internal/handler.go:42",
+	}}}}
+	svc := NewService(
+		&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, findings, nil, results, nil, runs, evidenceService, fakeIDs{},
+		ports.Provenance{}, fakeClock{t: now}, &fakeAudit{}, shared.SeverityHigh, 0,
+		&fakeAcquirer{dir: "/tmp/ws"}, &fakeDetector{}, fakeSBOM{}, []ports.DetectionSource{fakeVuln{}}, nil, fakeLic{}, nil,
+	)
+	svc.SetCodeQuality(quality)
+
+	for i := 0; i < 2; i++ {
+		result, err := svc.ScanWithOptions(ctx, "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull, CodeQuality: true})
+		if err != nil {
+			t.Fatalf("scan %d: %v", i, err)
+		}
+		if result.CodeQuality == nil || len(result.Findings) != 1 || result.FindingQuality.RawFindings != 1 || result.ReproDigest == "" {
+			t.Fatalf("result did not include code-quality finding: %+v", result)
+		}
+	}
+
+	stored, err := findings.ListByEngagement(ctx, "e1")
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("persisted findings = %+v, err=%v", stored, err)
+	}
+	f := stored[0]
+	if f.ID != findingID("e1", f.DedupKey) || f.EngagementID != "e1" || f.Kind != finding.KindQuality || f.RuleKey != "quality-high-complexity" || f.Class != finding.ClassFirstParty || f.Scope != sbom.ScopeProduction || !f.Audit.CreatedAt.Equal(now) {
+		t.Fatalf("persisted code-quality finding = %+v", f)
+	}
+	history, err := runs.List(ctx, "e1")
+	if err != nil || len(history) != 2 || len(history[0].FindingKeys) != 1 || history[0].FindingKeys[0] != f.DedupKey {
+		t.Fatalf("scan history = %+v, err=%v", history, err)
+	}
+	if len(evidenceStore.items) != 2 || !strings.Contains(string(evidenceStore.items[0].Content), f.DedupKey) {
+		t.Fatalf("evidence did not seal code-quality finding: %+v", evidenceStore.items)
+	}
+	data, err := results.LatestResult(ctx, "e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cached ScanResult
+	if err := json.Unmarshal(data, &cached); err != nil || len(cached.Findings) != 1 || cached.Findings[0].DedupKey != f.DedupKey {
+		t.Fatalf("cached result = %+v, err=%v", cached, err)
+	}
+}
+
+func TestCodeQualityFailurePersistsNoFindings(t *testing.T) {
+	ctx := context.Background()
+	findings := memory.NewFindingRepository()
+	runs := memory.NewScanRunStore()
+	results := memory.NewScanResultStore()
+	svc := NewService(
+		&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, findings, nil, results, nil, runs, nil, fakeIDs{},
+		ports.Provenance{}, fakeClock{t: time.Unix(100, 0).UTC()}, &fakeAudit{}, shared.SeverityHigh, 0,
+		&fakeAcquirer{dir: "/tmp/ws"}, &fakeDetector{}, fakeSBOM{}, []ports.DetectionSource{fakeVuln{}}, nil, fakeLic{}, nil,
+	)
+	svc.SetCodeQuality(&countingCodeQuality{err: errors.New("analyzer unavailable")})
+
+	if _, err := svc.ScanWithOptions(ctx, "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull, CodeQuality: true}); err == nil || !strings.Contains(err.Error(), "analyze code quality") {
+		t.Fatalf("err=%v, want code-quality failure", err)
+	}
+	if got, _ := findings.ListByEngagement(ctx, "e1"); len(got) != 0 {
+		t.Fatalf("partial findings persisted: %+v", got)
+	}
+	if got, _ := runs.List(ctx, "e1"); len(got) != 0 {
+		t.Fatalf("scan history persisted after failure: %+v", got)
+	}
+	if _, err := results.LatestResult(ctx, "e1"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("cached result error = %v, want not found", err)
 	}
 }
 

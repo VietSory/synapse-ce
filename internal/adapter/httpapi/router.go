@@ -59,7 +59,6 @@ type Router struct {
 	autoVerifier autoVerifierService // optional; nil ⇒ the LLM auto-verify route is not registered
 	threatModels threatModelService  // optional; nil ⇒ threat-model routes are not registered
 	drafts       writeupDraftService // optional; nil ⇒ writeup-draft sign-off routes are not registered
-	codeQuality  codeQualityService  // optional; nil ⇒ the code-quality route is not registered
 	projects     projectService      // optional; nil ⇒ project routes are not registered
 	qualityGates qualityGateService  // optional; nil ⇒ quality-gate routes are not registered
 	rules        rulesService        // optional; nil ⇒ rule catalog routes are not registered
@@ -274,7 +273,7 @@ func (rt *Router) routes() *http.ServeMux {
 		mux.HandleFunc("PUT /api/v1/engagements/{id}/threat-model", rt.authz(userdom.PermOperate, rt.withEngTenant(rt.putThreatModel)))
 		mux.HandleFunc("GET /api/v1/engagements/{id}/threat-model", rt.authz(userdom.PermView, rt.withEngTenant(rt.getThreatModel)))
 	}
-	if rt.codeQuality != nil { // read-only code-quality dashboard (PermView)
+	if rt.sca != nil { // persisted Code Quality reports are stored by the SCA service
 		mux.HandleFunc("GET /api/v1/engagements/{id}/code-quality", rt.authz(userdom.PermView, rt.withEngTenant(rt.codeQualityReport)))
 	}
 	if rt.drafts != nil { // AI-proposed write-up drafts – read (PermView) + human sign-off edit/accept/reject (PermReview, SoD)

@@ -407,6 +407,32 @@ func sastPriority(sev shared.Severity) int {
 	}
 }
 
+// buildCodeQualityFindings stamps the transient code-quality producer output with
+// the engagement identity and audit fields required by the finding store.
+func buildCodeQualityFindings(engagementID shared.ID, items []finding.Finding, now time.Time) []finding.Finding {
+	out := make([]finding.Finding, 0, len(items))
+	for _, item := range items {
+		scope := sbom.ClassifyScope(codeQualityFile(item.DedupKey), "")
+		item.ID = findingID(engagementID, item.DedupKey)
+		item.EngagementID = engagementID
+		item.Scope = scope
+		item.Reachability = vulnerability.Reachability(scope, true)
+		item.Impact = vulnerability.Impact(item.Severity, scope)
+		item.Priority = sastPriority(item.Severity)
+		item.Audit = shared.Audit{CreatedAt: now, UpdatedAt: now}
+		out = append(out, item)
+	}
+	return out
+}
+
+func codeQualityFile(dedupKey string) string {
+	parts := strings.Split(dedupKey, ":")
+	if len(parts) < 5 || parts[0] != "cq" {
+		return ""
+	}
+	return strings.Join(parts[3:len(parts)-1], ":")
+}
+
 // findingID is a stable id derived from the engagement + dedup key, so the same
 // issue always maps to the same finding across re-scans.
 func findingID(engagementID shared.ID, dedupKey string) shared.ID {

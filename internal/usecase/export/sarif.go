@@ -200,14 +200,13 @@ func buildSARIF(findings []finding.Finding, version string, opts SARIFOptions) *
 }
 
 // firstPartyLoc parses a first-party finding dedup key of the form
-// "<kind>:<ruleID>:<file>:<line>" (kind in sast|secret|misconfig, as written by the SCA
-// finding builders) into the engine rule id and its physical file:line. The rule id and the
-// trailing line never contain ':', so a file path that does is recovered as the middle join.
-// Returns ok=false for any other key (SCA "vuln:...", "license:...") or a malformed one.
+// "<kind>:<ruleID>:<file>:<line>" or "cq:<kind>:<ruleID>:<file>:<line>" into the engine rule id
+// and its physical file:line. The rule id and trailing line never contain ':', so a file path that does
+// is recovered as the middle join. Returns ok=false for SCA "vuln:...", "license:...", or malformed keys.
 func firstPartyLoc(key string) (ruleID, file string, line int, ok bool) {
 	var rest string
 	matched := false
-	for _, kind := range []string{"sast:", "secret:", "misconfig:", "quality:", "reliability:"} {
+	for _, kind := range []string{"cq:sast:", "cq:quality:", "cq:reliability:", "sast:", "secret:", "misconfig:"} {
 		if r, has := strings.CutPrefix(key, kind); has {
 			rest, matched = r, true
 			break

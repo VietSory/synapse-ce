@@ -140,6 +140,8 @@ func TestFirstPartyLocParsing(t *testing.T) {
 		{"sast", "sast:weak-crypto-md5:app/main.go:42", true, "weak-crypto-md5", "app/main.go", 42},
 		{"secret", "secret:aws-key:a/b/c.env:3", true, "aws-key", "a/b/c.env", 3},
 		{"misconfig", "misconfig:dockerfile-run-sudo:Dockerfile:5", true, "dockerfile-run-sudo", "Dockerfile", 5},
+		{"code-quality", "cq:quality:quality-todo:app/main.go:6", true, "quality-todo", "app/main.go", 6},
+		{"code-quality-sast", "cq:sast:weak-crypto-md5:app/main.go:42", true, "weak-crypto-md5", "app/main.go", 42},
 		{"path-with-colon", "sast:rule:weird:path.go:7", true, "rule", "weird:path.go", 7},
 		{"sca-vuln", "vuln:CVE-2020-7471:django:2.2.0", false, "", "", 0},
 		{"license", "license:GPL-3.0-only", false, "", "", 0},

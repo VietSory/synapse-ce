@@ -2176,6 +2176,14 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		}
 		result.Findings = append(result.Findings, buildMisconfigFindings(engagementID, misRaws, now, s.minSeverity)...)
 	}
+	if opts.CodeQuality && s.codeQuality != nil {
+		report, qerr := s.codeQuality.BuildReport(ctx, ws.Dir)
+		if qerr != nil {
+			return nil, fmt.Errorf("analyze code quality: %w", qerr)
+		}
+		result.CodeQuality = &report
+		result.Findings = append(result.Findings, buildCodeQualityFindings(engagementID, report.Findings, now)...)
+	}
 	// Apply the repo-committed .synapseignore accepted-risk policy. It ANNOTATES matched findings as
 	// accepted-risk (SuppressedFindings) so a CI --fail-on gate can exempt them, but does NOT remove them:
 	// they stay reported, persisted, and evidence-sealed, so an acceptance can never hide a finding from a
@@ -2210,13 +2218,6 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	result.VulnsBelowThreshold = countBelowThreshold(vulns, s.minSeverity)
 	result.UnfixedSuppressed = countUnfixedSuppressed(vulns, s.minSeverity, s.ignoreUnfixed)
 	result.FindingQuality = computeFindingQuality(result)
-	if opts.CodeQuality && s.codeQuality != nil {
-		report, qerr := s.codeQuality.BuildReport(ctx, ws.Dir)
-		if qerr != nil {
-			return nil, fmt.Errorf("analyze code quality: %w", qerr)
-		}
-		result.CodeQuality = &report
-	}
 	trace.succeed(step, "Findings derived", map[string]int{"vulnerabilities": len(vulns), "licenses": len(lics), "findings": len(result.Findings)})
 	result.DebugEvents = trace.snapshot()
 	if result.SBOM != nil {

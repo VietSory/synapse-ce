@@ -1,48 +1,104 @@
 package httpapi
 
 import (
-	"os"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
-	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/codequality"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
+	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
 )
 
-func scopeOf(in []engagement.Target, out ...engagement.Target) engagement.Scope {
-	return engagement.Scope{InScope: in, OutOfScope: out}
+type scanResultsFake struct {
+	data []byte
+	err  error
 }
 
-func TestLocalSourceDir(t *testing.T) {
-	dir := t.TempDir()
-	// A repo target whose value is an existing directory is returned.
-	got := localSourceDir(scopeOf([]engagement.Target{
-		{Kind: engagement.TargetDomain, Value: "app.example.com"},
-		{Kind: engagement.TargetRepo, Value: dir},
-	}))
-	if got != dir {
-		t.Errorf("want %q, got %q", dir, got)
+func (s scanResultsFake) SaveResult(context.Context, shared.ID, []byte) error { return nil }
+func (s scanResultsFake) LatestResult(context.Context, shared.ID) ([]byte, error) {
+	return s.data, s.err
+}
+
+func newCodeQualityRouter(t *testing.T, results ports.ScanResultStore) *Router {
+	t.Helper()
+	rt, _, _ := newEngRouter(t)
+	rt.sca = scauc.NewService(nil, nil, nil, results, nil, nil, nil, nil, ports.Provenance{}, fixedClock{}, &fakeAudit{}, shared.SeverityInfo, 0, nil, nil, nil, nil, nil, nil, nil)
+	return rt
+}
+
+func codeQualityCall(rt *Router) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/engagements/eng-1/code-quality", nil)
+	req.SetPathValue("id", "eng-1")
+	rec := httptest.NewRecorder()
+	rt.codeQualityReport(rec, req)
+	return rec
+}
+
+func TestCodeQualityReportReturnsStoredScanResult(t *testing.T) {
+	stored := codequality.Report{Findings: []finding.Finding{{Title: "Stored finding"}}}
+	data, err := json.Marshal(struct {
+		CodeQuality *codequality.Report `json:"code_quality"`
+	}{CodeQuality: &stored})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A repo target pointing at a non-existent path is ignored (no arbitrary path leaks).
-	if s := localSourceDir(scopeOf([]engagement.Target{{Kind: engagement.TargetRepo, Value: "/no/such/dir/xyz"}})); s != "" {
-		t.Errorf("non-existent path must yield \"\", got %q", s)
+	rec := codeQualityCall(newCodeQualityRouter(t, scanResultsFake{data: data}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	// A repo target pointing at a FILE (not a dir) is ignored.
-	f := dir + "/afile"
-	os.WriteFile(f, []byte("x"), 0o644)
-	if s := localSourceDir(scopeOf([]engagement.Target{{Kind: engagement.TargetRepo, Value: f}})); s != "" {
-		t.Errorf("file target must yield \"\", got %q", s)
+	var got codeQualityReportView
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
 	}
-	// Non-repo kinds (image/url) never match.
-	if s := localSourceDir(scopeOf([]engagement.Target{{Kind: engagement.TargetImage, Value: dir}})); s != "" {
-		t.Errorf("non-repo kind must yield \"\", got %q", s)
+	if !got.Available || got.Report == nil || len(got.Report.Findings) != 1 || got.Report.Findings[0].Title != "Stored finding" {
+		t.Fatalf("response = %+v", got)
 	}
-	// A repo that is also out-of-scope must be rejected (out-of-scope always wins).
-	if s := localSourceDir(scopeOf(
-		[]engagement.Target{{Kind: engagement.TargetRepo, Value: dir}},
-		engagement.Target{Kind: engagement.TargetRepo, Value: dir},
-	)); s != "" {
-		t.Errorf("out-of-scope repo must yield \"\", got %q", s)
+}
+
+func TestCodeQualityReportWithoutStoredReportIsUnavailable(t *testing.T) {
+	rec := codeQualityCall(newCodeQualityRouter(t, scanResultsFake{data: []byte(`{}`)}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if s := localSourceDir(scopeOf(nil)); s != "" {
-		t.Errorf("empty targets must yield \"\", got %q", s)
+	var got codeQualityReportView
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Available || got.Reason != codeQualityUnavailable {
+		t.Fatalf("response = %+v", got)
+	}
+}
+
+func TestCodeQualityReportWithoutScanIsUnavailable(t *testing.T) {
+	rec := codeQualityCall(newCodeQualityRouter(t, scanResultsFake{err: shared.ErrNotFound}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got codeQualityReportView
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Available || got.Reason != codeQualityUnavailable {
+		t.Fatalf("response = %+v", got)
+	}
+}
+
+func TestCodeQualityReportRejectsInvalidStoredResult(t *testing.T) {
+	rec := codeQualityCall(newCodeQualityRouter(t, scanResultsFake{data: []byte("not json")}))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCodeQualityReportSurfacesResultStoreError(t *testing.T) {
+	rec := codeQualityCall(newCodeQualityRouter(t, scanResultsFake{err: errors.New("store unavailable")}))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

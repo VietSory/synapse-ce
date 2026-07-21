@@ -46,35 +46,49 @@ func (p Profile) Apply(findings []finding.Finding) []finding.Finding {
 	return out
 }
 
-// knownKinds are the dedup-key prefixes whose rule id is the SECOND field (<kind>:<rule>:<file>:<line>).
+// knownKinds are the first-party dedup-key prefixes whose rule id follows the kind.
 var knownKinds = map[string]bool{"sast": true, "secret": true, "misconfig": true, "quality": true, "reliability": true}
 
-// RuleIDOf extracts the rule/advisory identifier a profile keys on from a finding's dedup key: the second
-// field for first-party kinds (<kind>:<rule>:...), else the first field (an SCA advisory id).
+// firstPartyParts returns the rule and path fields for legacy <kind>:<rule>:<file>:<line> keys and
+// Code Quality's collision-safe cq:<kind>:<rule>:<file>:<line> keys.
+func firstPartyParts(dedupKey string) (parts []string, offset int, ok bool) {
+	parts = strings.Split(dedupKey, ":")
+	if len(parts) >= 5 && parts[0] == "cq" && knownKinds[parts[1]] {
+		return parts, 2, true
+	}
+	if len(parts) >= 4 && knownKinds[parts[0]] {
+		return parts, 1, true
+	}
+	return nil, 0, false
+}
+
+// RuleIDOf extracts the rule/advisory identifier a profile keys on from a first-party dedup key, or the
+// first field of an SCA advisory key.
 func RuleIDOf(dedupKey string) string {
-	parts := strings.Split(dedupKey, ":")
+	parts, offset, ok := firstPartyParts(dedupKey)
+	if ok {
+		return parts[offset]
+	}
+	parts = strings.Split(dedupKey, ":")
 	if len(parts) == 0 {
 		return ""
-	}
-	if len(parts) >= 2 && knownKinds[parts[0]] {
-		return parts[1]
 	}
 	return parts[0]
 }
 
-// FileLineOf extracts the source file and 1-based line from a first-party dedup key
-// (<kind>:<rule>:<file>:<line>). ok=false for a key that is not line-anchored (e.g. an SCA advisory key),
-// so a caller can decide how to treat non-line-anchored findings under new-code gating.
+// FileLineOf extracts the source file and 1-based line from a first-party dedup key. ok=false for a key
+// that is not line-anchored (e.g. an SCA advisory key), so a caller can decide how to treat it under
+// new-code gating.
 func FileLineOf(dedupKey string) (file string, line int, ok bool) {
-	parts := strings.Split(dedupKey, ":")
-	if len(parts) < 4 || !knownKinds[parts[0]] {
+	parts, offset, ok := firstPartyParts(dedupKey)
+	if !ok {
 		return "", 0, false
 	}
 	n, err := strconv.Atoi(parts[len(parts)-1])
 	if err != nil || n < 1 {
 		return "", 0, false
 	}
-	file = strings.Join(parts[2:len(parts)-1], ":") // rejoin a Windows-y path that contained colons
+	file = strings.Join(parts[offset+1:len(parts)-1], ":") // rejoin a Windows-y path that contained colons
 	if file == "" {
 		return "", 0, false
 	}

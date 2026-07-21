@@ -11,9 +11,10 @@ func boolp(b bool) *bool { return &b }
 
 func TestRuleIDOf(t *testing.T) {
 	cases := map[string]string{
-		"quality:quality-todo-comment:a.go:3": "quality-todo-comment",
-		"sast:weak-hash-md5:x/y.go:12":        "weak-hash-md5",
-		"CVE-2024-1234:pkg:1.0.0":             "CVE-2024-1234", // SCA: no kind prefix -> first field
+		"quality:quality-todo-comment:a.go:3":    "quality-todo-comment",
+		"cq:quality:quality-todo-comment:a.go:3": "quality-todo-comment",
+		"sast:weak-hash-md5:x/y.go:12":           "weak-hash-md5",
+		"CVE-2024-1234:pkg:1.0.0":                "CVE-2024-1234", // SCA: no kind prefix -> first field
 	}
 	for dedup, want := range cases {
 		if got := RuleIDOf(dedup); got != want {
@@ -23,9 +24,14 @@ func TestRuleIDOf(t *testing.T) {
 }
 
 func TestFileLineOf(t *testing.T) {
-	f, l, ok := FileLineOf("quality:quality-todo-comment:pkg/a.go:42")
-	if !ok || f != "pkg/a.go" || l != 42 {
-		t.Errorf("got (%q,%d,%v), want (pkg/a.go,42,true)", f, l, ok)
+	for _, key := range []string{
+		"quality:quality-todo-comment:pkg/a.go:42",
+		"cq:quality:quality-todo-comment:pkg/a.go:42",
+	} {
+		f, l, ok := FileLineOf(key)
+		if !ok || f != "pkg/a.go" || l != 42 {
+			t.Errorf("FileLineOf(%q) = (%q,%d,%v), want (pkg/a.go,42,true)", key, f, l, ok)
+		}
 	}
 	if _, _, ok := FileLineOf("CVE-2024-1: pkg:1.0"); ok {
 		t.Error("an SCA (non-line-anchored) key must return ok=false")
