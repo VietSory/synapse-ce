@@ -394,7 +394,6 @@ func mapDomainMeasures(n *measure.Node, domains map[string]bool, analysis *proje
 		sevAvail, sevReason := toAvailability(true, "") // Severity is always available at root
 
 		if n.Kind != measure.NodeProject {
-			typeAvail, typeReason = toAvailability(n.IssueTypeAvailable && n.AttributionAvailable, "issue_attribution_incomplete")
 			if !n.AttributionAvailable {
 				typeAvail, typeReason = toAvailability(false, "issue_attribution_incomplete")
 			}

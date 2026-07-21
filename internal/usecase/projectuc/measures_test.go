@@ -77,6 +77,7 @@ func TestGetMeasures(t *testing.T) {
 				{Path: "", Kind: measure.NodeProject, Parent: "", IssueTypeAvailable: true, TechDebtAvailable: true, ComplexityAvailable: false, DuplicationAvailable: false},
 				{Path: "src", Kind: measure.NodeDirectory, Parent: "", AttributionAvailable: true, TechDebtAvailable: true, IssueTypeAvailable: true},
 				{Path: "src/a.go", Kind: measure.NodeFile, Parent: "src", AttributionAvailable: true, TechDebtAvailable: true, IssueTypeAvailable: true},
+				{Path: "src/b.go", Kind: measure.NodeFile, Parent: "src", AttributionAvailable: true, TechDebtAvailable: true, IssueTypeAvailable: false},
 				{Path: "src/z-dir", Kind: measure.NodeDirectory, Parent: "src", AttributionAvailable: true, TechDebtAvailable: true, IssueTypeAvailable: true},
 			},
 		},
@@ -128,6 +129,33 @@ func TestGetMeasures(t *testing.T) {
 		}
 	})
 
+	t.Run("issue availability reason mapping", func(t *testing.T) {
+		res, err := svc.GetMeasures(ctx, "tenant", "project", "src/b.go", nil, 50, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		
+		issues := res.Node.Issues
+		if issues == nil {
+			t.Fatalf("expected issues domain to be present")
+		}
+
+		if issues.ByType["bug"].Availability != AvailabilityUnavailable {
+			t.Errorf("expected bug by_type availability to be unavailable, got %v", issues.ByType["bug"].Availability)
+		}
+		if issues.ByType["bug"].Reason == nil || *issues.ByType["bug"].Reason != "issue_type_incomplete" {
+			var reason string
+			if issues.ByType["bug"].Reason != nil {
+				reason = *issues.ByType["bug"].Reason
+			}
+			t.Errorf("expected bug by_type reason to be issue_type_incomplete, got %v", reason)
+		}
+
+		if issues.BySeverity["high"].Availability != AvailabilityAvailable {
+			t.Errorf("expected high by_severity availability to be available, got %v", issues.BySeverity["high"].Availability)
+		}
+	})
+
 	t.Run("directory ordering pagination", func(t *testing.T) {
 		res1, err := svc.GetMeasures(ctx, "tenant", "project", "src", nil, 1, "")
 		if err != nil {
@@ -144,7 +172,7 @@ func TestGetMeasures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(res2.Children.Items) != 1 || res2.Children.Items[0].Path != "src/a.go" {
+		if len(res2.Children.Items) != 2 || res2.Children.Items[0].Path != "src/a.go" {
 			t.Fatalf("expected a.go second, got %v", res2.Children.Items)
 		}
 		if res2.Children.NextCursor != nil {

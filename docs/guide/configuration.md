@@ -27,6 +27,7 @@ Conventions: an empty value means unset, so the built-in default applies. Boolea
 | `SYNAPSE_AUP_VERSION` | `1.0` | Acceptable Use Policy version the operator accepts on first run. |
 | `SYNAPSE_AUP_FILE` | `data/aup-accepted.json` | File-backed path, in-memory mode only. |
 | `SYNAPSE_AUDIT_FILE` | `data/audit.jsonl` | File-backed path, in-memory mode only. |
+| `SYNAPSE_MEASURE_CURSOR_SECRET` | Ephemeral in development; required in production | HMAC key for signing Measures pagination cursors; minimum 32 bytes |
 
 ## Persistence
 
