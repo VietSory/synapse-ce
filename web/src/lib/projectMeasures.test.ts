@@ -92,4 +92,23 @@ describe('projectMeasures mapper', () => {
     const res = mapProjectMeasureResponse(raw)
     expect(res.children.nextCursor).toBe('opaque_cursor_123==')
   })
+
+  it('available + null must not become zero', () => {
+    const raw = {
+      state: 'analyzed',
+      node: {
+        size: {
+          files: { availability: 'available', value: null },
+        },
+        ratings: {
+          security: { availability: 'available', grade: null },
+        }
+      },
+    }
+    const res = mapProjectMeasureResponse(raw)
+    expect(res.node?.size?.files.availability).toBe('available')
+    expect(res.node?.size?.files.value).toBeNull()
+    expect(res.node?.ratings?.security.availability).toBe('available')
+    expect(res.node?.ratings?.security.grade).toBeNull()
+  })
 })

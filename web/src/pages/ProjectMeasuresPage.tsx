@@ -35,12 +35,15 @@ export function ProjectMeasuresPage() {
   const [data, setData] = useState<ProjectMeasureResponse | null>(null)
   
   const abortController = useRef<AbortController | null>(null)
+  const requestGenerationRef = useRef(0)
 
   useEffect(() => {
     let live = true
     setLoading(true)
     setError(null)
     setData(null)
+    
+    requestGenerationRef.current += 1
 
     if (abortController.current) {
       abortController.current.abort()
@@ -72,13 +75,25 @@ export function ProjectMeasuresPage() {
     setLoadingMore(true)
     setError(null)
 
+    const generation = requestGenerationRef.current
+    const requestedPath = path
+    const requestedDomain = domain
+
     try {
       const res = await api.projectMeasures(projectKey, {
         path,
         domain: [domain],
         limit: 100,
         cursor: data.children.nextCursor
-      })
+      }, abortController.current?.signal)
+      
+      if (
+        generation !== requestGenerationRef.current ||
+        requestedPath !== path ||
+        requestedDomain !== domain
+      ) {
+        return
+      }
       setData((prev) => {
         if (!prev) return res
         // Prevent duplicated rows by using a simple Set of paths (though backend handles cursor correctly)
@@ -176,14 +191,19 @@ export function ProjectMeasuresPage() {
       </div>
 
       {error && <ErrorState message={error} />}
+      
+      {data.node && (
+        <CurrentNodeMeasures node={data.node} domain={domain} />
+      )}
 
-      <div className="bg-bg border border-border rounded-xl overflow-hidden">
-        {sortedItems.length === 0 ? (
-          <EmptyState
-            icon={Folder}
-            title="Empty directory"
-            hint="This directory has no measurable children."
-          />
+      {data.node?.kind !== 'file' && (
+        <div className="bg-bg border border-border rounded-xl overflow-hidden">
+          {sortedItems.length === 0 ? (
+            <EmptyState
+              icon={Folder}
+              title="Empty directory"
+              hint="This directory has no measurable children."
+            />
         ) : sortedItems.length > 50 ? (
           <VirtualTable
             columns={columns(setPath)}
@@ -216,8 +236,9 @@ export function ProjectMeasuresPage() {
           </div>
         )}
       </div>
+      )}
 
-      {data.children.nextCursor && (
+      {data.node?.kind !== 'file' && data.children.nextCursor && (
         <div className="flex justify-center pt-4">
           <Button variant="secondary" onClick={loadMore} loading={loadingMore}>
             Load more
@@ -251,27 +272,99 @@ function MetricValue({ m }: { m: MeasureCountMetric | MeasureDecimalMetric | Mea
   return <span className="tabular-nums font-mono">{m.value}</span>
 }
 
+function CurrentNodeMeasures({ node, domain }: { node: MeasureNode, domain: string }) {
+  const metrics: { label: string, m: MeasureCountMetric | MeasureDecimalMetric | MeasureGradeMetric | undefined }[] = []
+  
+  if (domain === 'size') {
+    metrics.push(
+      { label: 'Files', m: node.size?.files },
+      { label: 'Lines of Code', m: node.size?.ncloc },
+      { label: 'Functions', m: node.size?.functions },
+      { label: 'Comment Lines', m: node.size?.commentLines },
+      { label: 'Blank Lines', m: node.size?.blankLines },
+      { label: 'Comment Density', m: node.size?.commentDensity }
+    )
+  } else if (domain === 'complexity') {
+    metrics.push(
+      { label: 'Cyclomatic', m: node.complexity?.cyclomatic },
+      { label: 'Cognitive', m: node.complexity?.cognitive }
+    )
+  } else if (domain === 'coverage') {
+    metrics.push(
+      { label: 'Coverage', m: node.coverage?.coverage },
+      { label: 'New Code Coverage', m: node.coverage?.newCodeCoverage },
+      { label: 'Covered Lines', m: node.coverage?.coveredLines },
+      { label: 'Coverable Lines', m: node.coverage?.coverableLines }
+    )
+  } else if (domain === 'duplication') {
+    metrics.push(
+      { label: 'Duplication Density', m: node.duplication?.duplicationDensity },
+      { label: 'Duplicated Lines', m: node.duplication?.duplicatedLines },
+      { label: 'Duplication Blocks', m: node.duplication?.duplicationBlocks }
+    )
+  } else if (domain === 'issues') {
+    metrics.push(
+      { label: 'Bugs', m: node.issues?.byType['bug'] },
+      { label: 'Vulnerabilities', m: node.issues?.byType['vulnerability'] },
+      { label: 'Code Smells', m: node.issues?.byType['code_smell'] },
+      { label: 'Security Hotspots', m: node.issues?.byType['security_hotspot'] },
+      { label: 'Blocker', m: node.issues?.bySeverity['blocker'] },
+      { label: 'Critical', m: node.issues?.bySeverity['critical'] },
+      { label: 'Major', m: node.issues?.bySeverity['major'] },
+      { label: 'Minor', m: node.issues?.bySeverity['minor'] },
+      { label: 'Info', m: node.issues?.bySeverity['info'] }
+    )
+  } else if (domain === 'debt') {
+    metrics.push(
+      { label: 'Remediation Effort (mins)', m: node.debt?.remediationEffortMinutes }
+    )
+  } else if (domain === 'ratings') {
+    metrics.push(
+      { label: 'Security', m: node.ratings?.security },
+      { label: 'Reliability', m: node.ratings?.reliability },
+      { label: 'Maintainability', m: node.ratings?.maintainability }
+    )
+  }
+
+  return (
+    <div className="bg-bg border border-border rounded-xl p-4">
+      <h3 className="text-sm font-semibold mb-3">Current Node Metrics</h3>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+        {metrics.map((item, i) => (
+          <div key={i} className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-mutedfg">{item.label}</span>
+            <div className="text-sm"><MetricValue m={item.m} /></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function getDomainColumns(domain: string): (setPath: (p: string) => void) => Column<MeasureNode>[] {
   const baseColumns: (setPath: (p: string) => void) => Column<MeasureNode>[] = (setPath) => [
     {
       header: 'Name',
       className: 'w-[40%]',
-      cell: (item) => (
-        <div className="flex items-center gap-2">
-          {item.kind === 'directory' ? <Folder className="size-4 text-branddim shrink-0" /> : <File className="size-4 text-mutedfg shrink-0" />}
-          {item.kind === 'directory' ? (
-            <button 
-              onClick={() => setPath(item.path)}
-              className="font-medium hover:underline hover:text-brand text-left truncate"
-              title={item.name}
-            >
-              {item.name}
-            </button>
-          ) : (
-            <span className="font-medium truncate" title={item.name}>{item.name}</span>
-          )}
-        </div>
-      )
+      cell: (item) => {
+        const navigable = item.kind === 'directory' || item.kind === 'file'
+        return (
+          <div className="flex items-center gap-2">
+            {item.kind === 'directory' ? <Folder className="size-4 text-branddim shrink-0" /> : <File className="size-4 text-mutedfg shrink-0" />}
+            {navigable ? (
+              <button 
+                onClick={() => setPath(item.path)}
+                className="font-medium hover:underline hover:text-brand text-left truncate"
+                title={item.name}
+              >
+                {item.name}
+              </button>
+            ) : (
+              <span className="font-medium truncate" title={item.name}>{item.name}</span>
+            )}
+          </div>
+        )
+      }
     },
     {
       header: 'Kind',

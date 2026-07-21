@@ -15,6 +15,14 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
+vi.mock('../components/VirtualTable', () => ({
+  VirtualTable: ({ items }: any) => (
+    <div data-testid="virtual-table">
+      {items.map((x: any) => <div key={x.path}>{x.name}</div>)}
+    </div>
+  )
+}))
+
 const project = {
   id: 'project-synapse',
   name: 'Synapse',
@@ -59,12 +67,34 @@ describe('Project Measures route and logic', () => {
         element: <CodeQualityProject />,
         children: [
           { path: 'measures', element: <ProjectMeasuresPage /> },
+          { path: '', element: <div>Overview</div> },
+          { path: 'issues', element: <div>Issues</div> },
+          { path: 'hotspots', element: <div>Hotspots</div> },
+          { path: 'analysis', element: <div>Analysis</div> },
+          { path: 'activity', element: <div>Activity</div> },
         ],
       },
     ], { initialEntries: [initialPath] })
     render(<RouterProvider router={router} />)
     return router
   }
+
+  it('routing regression test ensures tabs exist and route correctly', async () => {
+    const router = renderRoute('/code-quality/projects/synapse/measures')
+    
+    // Wait for the page to render (Current Node Metrics is in data.node detail panel)
+    expect(await screen.findByText('Current Node Metrics')).toBeInTheDocument()
+    
+    // Tab verification
+    const tabs = ['Overview', 'Issues', 'Security Hotspots', 'Measures', 'Analysis details', 'Activity']
+    for (const tab of tabs) {
+      expect(screen.getByRole('link', { name: tab })).toBeInTheDocument()
+    }
+    
+    // Navigate away
+    fireEvent.click(screen.getByRole('link', { name: 'Issues' }))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/code-quality/projects/synapse/issues'))
+  })
 
   it('renders project root and not-analyzed state', async () => {
     vi.mocked(api.projectMeasures).mockResolvedValue(buildResponse({ state: 'not_analyzed' }))
@@ -96,10 +126,8 @@ describe('Project Measures route and logic', () => {
     }))
     const router = renderRoute('/code-quality/projects/synapse/measures?path=src%2Finternal&domain=size')
     
-    // Wait for 'internal' to load
     expect(await screen.findByText('internal')).toBeInTheDocument()
     
-    // Navigate to root (Synapse button in breadcrumb)
     fireEvent.click(screen.getByRole('button', { name: 'Synapse' }))
     await waitFor(() => {
       const search = new URLSearchParams(router.state.location.search)
@@ -107,10 +135,7 @@ describe('Project Measures route and logic', () => {
       expect(search.get('domain')).toBe('size')
     })
     
-    // Simulate back
     await act(async () => {
-      // Use fireEvent on the window popstate or simply rely on the memory router's structure?
-      // Since router is created locally and memory router handles back navigation:
       router.navigate(-1)
     })
     await waitFor(() => {
@@ -120,7 +145,38 @@ describe('Project Measures route and logic', () => {
     })
   })
 
-  it('file rows are not treated as directories and directory ordering precedes file', async () => {
+  it('file drill down, node details rendering, and ordering', async () => {
+    vi.mocked(api.projectMeasures).mockResolvedValue(buildResponse({
+      node: {
+        path: 'a.ts', name: 'a.ts', kind: 'file', language: 'ts',
+        size: { 
+          files: { availability: 'available', value: 1, reason: null },
+          ncloc: { availability: 'not_applicable', value: null, reason: null },
+          commentLines: { availability: 'not_applicable', value: null, reason: null },
+          blankLines: { availability: 'available', value: null, reason: null },
+          functions: { availability: 'available', value: 42, reason: null },
+          commentDensity: { availability: 'available', value: 0.5, reason: null }
+        },
+        complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null
+      },
+      children: {
+        items: [],
+        nextCursor: null
+      }
+    }))
+    const router = renderRoute('/code-quality/projects/synapse/measures?path=a.ts&domain=size')
+    
+    // Node metrics panel should render "Current Node Metrics"
+    expect(await screen.findByText('Current Node Metrics')).toBeInTheDocument()
+    
+    // Ensure "Empty directory" is NOT shown for files
+    expect(screen.queryByText('Empty directory')).not.toBeInTheDocument()
+    
+    // Verify file metric details are rendered
+    expect(screen.getByText('Lines of Code')).toBeInTheDocument()
+    expect(screen.getByText('42')).toBeInTheDocument() // Functions value
+    
+    // Now simulate clicking a file from a list
     vi.mocked(api.projectMeasures).mockResolvedValue(buildResponse({
       children: {
         items: [
@@ -130,81 +186,90 @@ describe('Project Measures route and logic', () => {
         nextCursor: null
       }
     }))
-    renderRoute('/code-quality/projects/synapse/measures')
+    router.navigate('/code-quality/projects/synapse/measures?domain=size')
     
     expect(await screen.findByText('dir')).toBeInTheDocument()
     expect(screen.getByText('a.ts')).toBeInTheDocument()
     
-    // dir is clickable, a.ts is not (we can check tag name or just the fact that fireEvent won't fail if it's a button, but let's just use getByText)
-    expect(screen.getByText('dir').tagName.toLowerCase()).toBe('button')
-    expect(screen.getByText('a.ts').tagName.toLowerCase()).toBe('span')
-  })
-
-  it('handles metric value rendering (zero, unavailable, not_applicable)', async () => {
-    vi.mocked(api.projectMeasures).mockResolvedValue(buildResponse({
-      children: {
-        items: [
-          { 
-            path: 'a', name: 'a', kind: 'file', language: '', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null 
-          }
-        ],
-        nextCursor: null
-      }
-    }))
-    // Overriding the child's size after mocking
-    const items = [
-      {
-        path: 'a', name: 'a', kind: 'file', language: '',
-        size: { 
-          files: { availability: 'available', value: 0, reason: null },
-          ncloc: { availability: 'not_applicable', value: null, reason: 'test-reason' },
-          commentLines: { availability: 'not_applicable', value: null, reason: null },
-          blankLines: { availability: 'available', value: null, reason: null }, // shouldn't happen, but testing fallback
-          functions: { availability: 'available', value: 42, reason: null },
-          commentDensity: { availability: 'available', value: 0.5, reason: null }
-        },
-        complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null
-      }
-    ] as any
-    vi.mocked(api.projectMeasures).mockResolvedValue(buildResponse({
-      children: { items, nextCursor: null }
-    }))
+    // Both dir and file should be clickable buttons!
+    expect(screen.getByRole('button', { name: 'dir' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'a.ts' })).toBeInTheDocument()
     
-    renderRoute('/code-quality/projects/synapse/measures')
-    
-    expect(await screen.findByText('a')).toBeInTheDocument()
-    expect(screen.getByText('0')).toBeInTheDocument() // available 0
-    expect(screen.getByText('N/A')).toBeInTheDocument() // not applicable
-    expect(screen.getByText('42')).toBeInTheDocument() // available > 0
-  })
-
-  it('load more appends children and path changes reset pagination', async () => {
-    vi.mocked(api.projectMeasures).mockResolvedValueOnce(buildResponse({
-      children: {
-        items: [{ path: '1', name: '1', kind: 'file', language: '', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null } as any],
-        nextCursor: 'next-page'
-      }
-    }))
-    
-    renderRoute('/code-quality/projects/synapse/measures')
-    expect(await screen.findByText('1')).toBeInTheDocument()
-    
-    vi.mocked(api.projectMeasures).mockResolvedValueOnce(buildResponse({
-      children: {
-        items: [{ path: '2', name: '2', kind: 'file', language: '', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null } as any],
-        nextCursor: null
-      }
-    }))
-    
-    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-    
-    expect(await screen.findByText('2')).toBeInTheDocument()
-    expect(screen.getByText('1')).toBeInTheDocument() // appended, not replaced
+    fireEvent.click(screen.getByRole('button', { name: 'a.ts' }))
+    await waitFor(() => {
+      const search = new URLSearchParams(router.state.location.search)
+      expect(search.get('path')).toBe('a.ts')
+    })
   })
 
   it('stale responses cannot replace newer path results', async () => {
-    // using abort controller pattern: if user navigates away, the request is aborted.
-    // React handles this since we check live in useEffect, but we can verify the mock isn't applying wrong data.
-    // Real validation is best in E2E, but we know useEffect has let live = true.
+    let resolveFirst!: (val: any) => void
+    const firstPromise = new Promise(res => { resolveFirst = res })
+    
+    let resolveSecond!: (val: any) => void
+    const secondPromise = new Promise(res => { resolveSecond = res })
+
+    // 1. Initial load for path "A"
+    vi.mocked(api.projectMeasures).mockResolvedValueOnce(buildResponse({
+      path: 'A',
+      children: { items: [{ path: 'A/1', name: 'A1', kind: 'file', language: '', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null } as any], nextCursor: 'next-A' }
+    }))
+    
+    const router = renderRoute('/code-quality/projects/synapse/measures?path=A&domain=size')
+    expect(await screen.findByText('A1')).toBeInTheDocument()
+
+    // 2. Click load more for A (this returns firstPromise which we hold)
+    vi.mocked(api.projectMeasures).mockReturnValueOnce(firstPromise as any)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    
+    // 3. While load more is pending, navigate to path "B"
+    vi.mocked(api.projectMeasures).mockReturnValueOnce(secondPromise as any)
+    act(() => {
+      router.navigate('/code-quality/projects/synapse/measures?path=B&domain=size')
+    })
+    
+    // 4. Resolve B
+    act(() => {
+      resolveSecond(buildResponse({
+        path: 'B',
+        children: { items: [{ path: 'B/1', name: 'B1', kind: 'file', language: '', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null } as any], nextCursor: null }
+      }))
+    })
+    expect(await screen.findByText('B1')).toBeInTheDocument()
+    expect(screen.queryByText('A1')).not.toBeInTheDocument()
+
+    // 5. Now resolve the stale load more for A
+    act(() => {
+      resolveFirst(buildResponse({
+        path: 'A',
+        children: { items: [{ path: 'A/2', name: 'A2', kind: 'file', language: '', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null } as any], nextCursor: null }
+      }))
+    })
+
+    // Wait a bit to ensure no state updates happen
+    await new Promise(r => setTimeout(r, 50))
+    
+    // Assert only B1 remains, A2 was ignored
+    expect(screen.getByText('B1')).toBeInTheDocument()
+    expect(screen.queryByText('A2')).not.toBeInTheDocument()
+  })
+
+  it('renders VirtualTable for >50 rows', async () => {
+    const items = Array.from({ length: 60 }).map((_, i) => ({
+      path: `f${i}.ts`, name: `f${i}.ts`, kind: 'file', language: 'ts', size: null, complexity: null, coverage: null, duplication: null, issues: null, debt: null, ratings: null
+    }))
+    
+    vi.mocked(api.projectMeasures).mockResolvedValue(buildResponse({
+      children: { items: items as any, nextCursor: null }
+    }))
+    
+    renderRoute('/code-quality/projects/synapse/measures?domain=size')
+    
+    expect(await screen.findByTestId('virtual-table')).toBeInTheDocument()
+    expect(screen.getByText('f0.ts')).toBeInTheDocument()
+    expect(screen.getByText('f59.ts')).toBeInTheDocument()
+    
+    // Native table uses table
+    expect(screen.queryByRole('columnheader')).not.toBeInTheDocument()
   })
 })

@@ -112,7 +112,7 @@ function mapCountMetric(raw: any): MeasureCountMetric {
   if (!raw) return { availability: 'unavailable', value: null, reason: null }
   return {
     availability: raw.availability ?? 'unavailable',
-    value: raw.availability === 'available' ? (raw.value ?? 0) : null,
+    value: raw.availability === 'available' && typeof raw.value === 'number' ? raw.value : null,
     reason: raw.unavailable_reason ?? null,
   }
 }
@@ -121,7 +121,7 @@ function mapDecimalMetric(raw: any): MeasureDecimalMetric {
   if (!raw) return { availability: 'unavailable', value: null, reason: null }
   return {
     availability: raw.availability ?? 'unavailable',
-    value: raw.availability === 'available' ? (raw.value ?? 0) : null,
+    value: raw.availability === 'available' && typeof raw.value === 'number' ? raw.value : null,
     reason: raw.unavailable_reason ?? null,
   }
 }
@@ -130,7 +130,7 @@ function mapGradeMetric(raw: any): MeasureGradeMetric {
   if (!raw) return { availability: 'unavailable', grade: null, reason: null }
   return {
     availability: raw.availability ?? 'unavailable',
-    grade: raw.availability === 'available' ? (raw.grade ?? null) : null,
+    grade: raw.availability === 'available' && typeof raw.grade === 'string' ? raw.grade : null,
     reason: raw.unavailable_reason ?? null,
   }
 }
