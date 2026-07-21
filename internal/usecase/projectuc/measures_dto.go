@@ -13,32 +13,40 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 )
 
+// MeasureAvailabilityState describes whether a measure has a meaningful value.
 type MeasureAvailabilityState string
 
 const (
-	AvailabilityAvailable     MeasureAvailabilityState = "available"
-	AvailabilityUnavailable   MeasureAvailabilityState = "unavailable"
+	// AvailabilityAvailable indicates the measure value is present and valid.
+	AvailabilityAvailable MeasureAvailabilityState = "available"
+	// AvailabilityUnavailable indicates the measure value could not be computed.
+	AvailabilityUnavailable MeasureAvailabilityState = "unavailable"
+	// AvailabilityNotApplicable indicates the measure does not apply to this node type.
 	AvailabilityNotApplicable MeasureAvailabilityState = "not_applicable"
 )
 
+// MeasureCountMetric represents an integer measure and its availability state.
 type MeasureCountMetric struct {
 	Availability MeasureAvailabilityState `json:"availability"`
 	Value        *int                     `json:"value"`
 	Reason       *string                  `json:"unavailable_reason"`
 }
 
+// MeasureDecimalMetric represents a floating-point measure and its availability state.
 type MeasureDecimalMetric struct {
 	Availability MeasureAvailabilityState `json:"availability"`
 	Value        *float64                 `json:"value"`
 	Reason       *string                  `json:"unavailable_reason"`
 }
 
+// MeasureGradeMetric represents a letter grade (e.g., A, B, C) and its availability state.
 type MeasureGradeMetric struct {
 	Availability MeasureAvailabilityState `json:"availability"`
 	Grade        *string                  `json:"grade"`
 	Reason       *string                  `json:"unavailable_reason"`
 }
 
+// SizeMeasures encapsulates size-related metrics such as line counts and functions.
 type SizeMeasures struct {
 	Files          MeasureCountMetric   `json:"files"`
 	NCLOC          MeasureCountMetric   `json:"ncloc"`
@@ -48,11 +56,13 @@ type SizeMeasures struct {
 	CommentDensity MeasureDecimalMetric `json:"comment_density"`
 }
 
+// ComplexityMeasures encapsulates structural complexity metrics.
 type ComplexityMeasures struct {
 	Cyclomatic MeasureCountMetric `json:"cyclomatic"`
 	Cognitive  MeasureCountMetric `json:"cognitive"`
 }
 
+// CoverageMeasures encapsulates code coverage metrics.
 type CoverageMeasures struct {
 	CoveredLines    MeasureCountMetric   `json:"covered_lines"`
 	CoverableLines  MeasureCountMetric   `json:"coverable_lines"`
@@ -60,32 +70,38 @@ type CoverageMeasures struct {
 	NewCodeCoverage MeasureDecimalMetric `json:"new_code_coverage"`
 }
 
+// DuplicationMeasures encapsulates source code duplication metrics.
 type DuplicationMeasures struct {
 	DuplicatedLines    MeasureCountMetric   `json:"duplicated_lines"`
 	DuplicationBlocks  MeasureCountMetric   `json:"duplication_blocks"`
 	DuplicationDensity MeasureDecimalMetric `json:"duplication_density"`
 }
 
+// IssueMeasures encapsulates finding counts broken down by type and severity.
 type IssueMeasures struct {
 	ByType     map[string]MeasureCountMetric `json:"by_type"`
 	BySeverity map[string]MeasureCountMetric `json:"by_severity"`
 }
 
+// DebtMeasures encapsulates technical debt metrics.
 type DebtMeasures struct {
 	RemediationEffortMinutes MeasureCountMetric `json:"remediation_effort_minutes"`
 }
 
+// RatingsMeasures encapsulates high-level grades for security, reliability, and maintainability.
 type RatingsMeasures struct {
 	Security        MeasureGradeMetric `json:"security"`
 	Reliability     MeasureGradeMetric `json:"reliability"`
 	Maintainability MeasureGradeMetric `json:"maintainability"`
 }
 
+// ProjectNodeInfo provides basic identifying information about the project.
 type ProjectNodeInfo struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
 }
 
+// AnalysisMetadata provides contextual information about the analysis snapshot.
 type AnalysisMetadata struct {
 	ID           string    `json:"id"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -93,6 +109,7 @@ type AnalysisMetadata struct {
 	SourceCommit string    `json:"source_commit,omitempty"`
 }
 
+// MeasureNode represents a single directory, file, or project root with its computed measures.
 type MeasureNode struct {
 	Path        string               `json:"path"`
 	Name        string               `json:"name"`
@@ -107,11 +124,13 @@ type MeasureNode struct {
 	Ratings     *RatingsMeasures     `json:"ratings,omitempty"`
 }
 
+// ChildCollection wraps a paginated list of immediate child nodes.
 type ChildCollection struct {
 	Items      []MeasureNode `json:"items"`
 	NextCursor *string       `json:"next_cursor"`
 }
 
+// ProjectMeasureResponse is the root response payload for the measures API endpoint.
 type ProjectMeasureResponse struct {
 	State           string            `json:"state"` // "analyzed", "not_analyzed"
 	Project         ProjectNodeInfo   `json:"project"`
@@ -122,7 +141,7 @@ type ProjectMeasureResponse struct {
 	Children        ChildCollection   `json:"children"`
 }
 
-// MeasureCursor is the opaque pagination token
+// MeasureCursor is the opaque pagination token used to iterate through children.
 type MeasureCursor struct {
 	Version       int    `json:"v"`
 	AnalysisID    string `json:"a"`
@@ -136,6 +155,7 @@ type signedCursor struct {
 	Signature string        `json:"s"` // base64 string of HMAC-SHA256
 }
 
+// Encode serializes the cursor and cryptographically signs it to prevent tampering.
 func (c *MeasureCursor) Encode(secret []byte) string {
 	b, _ := json.Marshal(c)
 	mac := hmac.New(sha256.New, secret)
@@ -150,6 +170,7 @@ func (c *MeasureCursor) Encode(secret []byte) string {
 	return base64.RawURLEncoding.EncodeToString(sb)
 }
 
+// DecodeMeasureCursor decodes, verifies the signature, and validates the integrity of a pagination cursor.
 func DecodeMeasureCursor(s string, secret []byte) (*MeasureCursor, error) {
 	if s == "" {
 		return nil, nil

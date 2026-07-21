@@ -60,8 +60,12 @@ func (s Snapshot) Validate() error {
 		}
 
 		if n.Path != "" {
-			if _, exists := nodesByPath[n.Parent]; !exists {
+			parent, exists := nodesByPath[n.Parent]
+			if !exists {
 				return fmt.Errorf("measure snapshot: missing parent %q for node %q", n.Parent, n.Path)
+			}
+			if parent.Kind == NodeFile {
+				return fmt.Errorf("measure snapshot: file %q cannot have children", parent.Path)
 			}
 			if n.Path == n.Parent {
 				return fmt.Errorf("measure snapshot: self-referential node %q", n.Path)
@@ -149,16 +153,9 @@ func (s Snapshot) Validate() error {
 		}
 	}
 
-	// Cycle detection and File children check
+	// Cycle detection
 	for i := range s.Nodes {
 		n := &s.Nodes[i]
-		if n.Kind == NodeFile {
-			for j := range s.Nodes {
-				if s.Nodes[j].Parent == n.Path && s.Nodes[j].Path != n.Path {
-					return fmt.Errorf("measure snapshot: file %q cannot have children", n.Path)
-				}
-			}
-		}
 		// Cycle check
 		visited := make(map[string]bool)
 		curr := n.Path
