@@ -26,17 +26,31 @@ func (li LanguageInventory) TotalLines() int { return li.CodeLines + li.CommentL
 // Inventory is a per-language code inventory over a source tree, sorted deterministically by language.
 type Inventory struct {
 	Languages []LanguageInventory `json:"languages"`
+	Files     []FileInventory     `json:"files,omitempty"`
 }
 
-// NewInventory builds a sorted Inventory from a per-language accumulation map. Sorting by language name
-// keeps the output stable across runs (Go randomizes map iteration).
-func NewInventory(byLang map[string]LanguageInventory) Inventory {
+// FileInventory contains code size facts for a single file.
+type FileInventory struct {
+	Path           string `json:"path"`
+	Language       string `json:"language"`
+	CodeLines      int    `json:"code_lines"`
+	CommentLines   int    `json:"comment_lines"`
+	BlankLines     int    `json:"blank_lines"`
+	Functions      int    `json:"functions"`
+	FunctionsKnown bool   `json:"functions_known"`
+}
+
+// NewInventory builds a sorted Inventory from a per-language accumulation map and optional file facts.
+func NewInventory(byLang map[string]LanguageInventory, files ...FileInventory) Inventory {
 	langs := make([]LanguageInventory, 0, len(byLang))
 	for _, li := range byLang {
 		langs = append(langs, li)
 	}
 	sort.Slice(langs, func(i, j int) bool { return langs[i].Language < langs[j].Language })
-	return Inventory{Languages: langs}
+	fs := make([]FileInventory, len(files))
+	copy(fs, files)
+	sort.SliceStable(fs, func(i, j int) bool { return fs[i].Path < fs[j].Path })
+	return Inventory{Languages: langs, Files: fs}
 }
 
 // Totals sums the per-language counts into a single row labelled "TOTAL". FunctionsKnown is true only

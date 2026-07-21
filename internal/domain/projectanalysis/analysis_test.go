@@ -1,11 +1,14 @@
 package projectanalysis
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
@@ -31,6 +34,62 @@ func TestBuildFirstAnalysisTreatsEveryIssueAsNew(t *testing.T) {
 	}
 	if analysis.Delta != nil {
 		t.Fatalf("first analysis delta=%+v, want nil", analysis.Delta)
+	}
+}
+
+func TestLegacyAnalysisDecode(t *testing.T) {
+	data := []byte(`{"id":"legacy1","tenant_id":"tenant"}`)
+	var analysis Analysis
+	if err := json.Unmarshal(data, &analysis); err != nil {
+		t.Fatal(err)
+	}
+	if len(analysis.Snapshot.Nodes) != 1 {
+		t.Fatalf("expected 1 fallback root node, got %d", len(analysis.Snapshot.Nodes))
+	}
+	root := analysis.Snapshot.Nodes[0]
+	if root.Path != "" || root.Kind != measure.NodeProject {
+		t.Fatalf("expected project root node, got %+v", root)
+	}
+	if root.TechDebtAvailable || root.IssueTypeAvailable || root.AttributionAvailable || root.FunctionsKnown {
+		t.Fatalf("legacy root must have strictly unavailable measures")
+	}
+	if analysis.Snapshot.NewCodeCoverage.Availability != measure.AvailabilityUnavailable {
+		t.Fatalf("legacy new code coverage must be unavailable")
+	}
+}
+
+type mockCatalog struct{}
+
+func (m mockCatalog) Get(k rule.Key) (rule.Rule, error) {
+	return rule.Rule{}, shared.ErrNotFound
+}
+
+func TestEmptyCurrentSnapshotNotLegacy(t *testing.T) {
+	snap, err := measure.BuildSnapshot(measure.BuildSnapshotInput{
+		RuleCatalog: mockCatalog{},
+		Inventory:   measure.NewInventory(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Nodes) != 1 {
+		t.Fatalf("expected 1 root node from empty snapshot, got %d", len(snap.Nodes))
+	}
+	analysis := Analysis{ID: "empty1", TenantID: "tenant", Snapshot: snap}
+	b, err := json.Marshal(analysis)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded Analysis
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Snapshot.Nodes) != 1 {
+		t.Fatalf("expected 1 root node after roundtrip, got %d", len(decoded.Snapshot.Nodes))
+	}
+	if decoded.Snapshot.NewCodeCoverage.Reason == "legacy_analysis" {
+		t.Fatalf("empty modern snapshot incorrectly treated as legacy after roundtrip")
 	}
 }
 

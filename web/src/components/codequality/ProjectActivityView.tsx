@@ -37,7 +37,7 @@ function pointOf(analysis: ProjectAnalysis | undefined, mode: Mode, metric: Metr
     case 'security': { const grade = gradeNumber(rating.security); if (grade === undefined) return null; value = grade; display = rating.security; break }
     case 'reliability': { const grade = gradeNumber(rating.reliability); if (grade === undefined) return null; value = grade; display = rating.reliability; break }
     case 'maintainability': { const maintainability = mode === 'new' ? analysis.newCode.rating.maintainability : analysis.rating.maintainability; if (!maintainability) return null; const grade = gradeNumber(maintainability); if (grade === undefined) return null; value = grade; display = maintainability; break }
-    case 'duplication': value = analysis.duplication.totalLines ? 100 * analysis.duplication.duplicatedLines / analysis.duplication.totalLines : 0; display = `${value.toFixed(1)}%`; break
+    case 'duplication': if (!analysis.duplication) return null; value = analysis.duplication.totalLines ? 100 * analysis.duplication.duplicatedLines / analysis.duplication.totalLines : 0; display = `${value.toFixed(1)}%`; break
     case 'coverage': if (!analysis.coverage) return null; value = analysis.coverage.totalLines ? 100 * analysis.coverage.coveredLines / analysis.coverage.totalLines : 0; display = `${value.toFixed(1)}%`; break
   }
   return { id: analysis.id, label: formatDate(analysis.createdAt), commit: analysis.sourceCommit.slice(0, 12), value, display }

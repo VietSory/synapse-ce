@@ -2,6 +2,7 @@
 package projectanalysis
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -80,6 +81,49 @@ type Analysis struct {
 	Rating         rating.Report             `json:"rating"`
 	Hotspots       hotspot.Summary           `json:"hotspots"`
 	NewHotspots    hotspot.Summary           `json:"new_hotspots"`
+	Snapshot       measure.Snapshot          `json:"snapshot"`
+}
+
+// UnmarshalJSON handles legacy decoding where Snapshot might be empty or missing.
+func (a *Analysis) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	_, hasSnapshot := raw["snapshot"]
+
+	type Alias Analysis
+	aux := &struct {
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if !hasSnapshot {
+		a.Snapshot = measure.Snapshot{
+			Nodes: []measure.Node{
+				{
+					Path: "",
+					Kind: measure.NodeProject,
+					Counters: measure.Counters{
+						IssuesByType:     make(map[string]int),
+						IssuesBySeverity: make(map[string]int),
+					},
+					FunctionsKnown:       false,
+					ComplexityAvailable:  false,
+					CoverageAvailable:    false,
+					DuplicationAvailable: false,
+					TechDebtAvailable:    false,
+					IssueTypeAvailable:   false,
+					AttributionAvailable: false,
+				},
+			},
+			NewCodeCoverage: measure.DecimalMetric{Availability: measure.AvailabilityUnavailable, Reason: "legacy_analysis"},
+		}
+	}
+	return nil
 }
 
 // Input supplies one completed scan's project-facing facts. Findings must be the
@@ -102,6 +146,7 @@ type Input struct {
 	Previous     *Analysis
 	Hotspots     hotspot.Summary
 	NewHotspots  hotspot.Summary
+	Snapshot     measure.Snapshot
 }
 
 // Build returns one immutable snapshot and evaluates the built-in gate at creation.
@@ -177,6 +222,7 @@ func Build(in Input) (Analysis, error) {
 		Delta: buildDelta(counts, measures, overallRating, in.Previous), Coverage: in.Coverage,
 		Duplication: in.Duplication, Rating: overallRating,
 		Hotspots: in.Hotspots, NewHotspots: in.NewHotspots,
+		Snapshot: in.Snapshot,
 	}, nil
 }
 
