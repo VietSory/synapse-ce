@@ -8,7 +8,7 @@ import (
 
 func TestXMLStructural_MismatchedTag(t *testing.T) {
 	content := []byte(`<root><item></other></item></root>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %+v", len(findings), findings)
@@ -23,7 +23,7 @@ func TestXMLStructural_MismatchedTag(t *testing.T) {
 
 func TestXMLStructural_MismatchedTagOnly(t *testing.T) {
 	content := []byte(`<root><item></root>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %+v", len(findings), findings)
@@ -35,7 +35,7 @@ func TestXMLStructural_MismatchedTagOnly(t *testing.T) {
 
 func TestXMLStructural_UnclosedElement(t *testing.T) {
 	content := []byte(`<root><item>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 unclosed element finding, got %d: %+v", len(findings), findings)
@@ -47,7 +47,7 @@ func TestXMLStructural_UnclosedElement(t *testing.T) {
 
 func TestXMLStructural_MultipleRootElements(t *testing.T) {
 	content := []byte(`<first/><second/>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
@@ -59,7 +59,7 @@ func TestXMLStructural_MultipleRootElements(t *testing.T) {
 
 func TestXMLStructural_UndeclaredPrefix(t *testing.T) {
 	content := []byte(`<root><cfg:item/></root>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
@@ -71,7 +71,7 @@ func TestXMLStructural_UndeclaredPrefix(t *testing.T) {
 
 func TestXMLStructural_DeclaredPrefix(t *testing.T) {
 	content := []byte(`<root xmlns:cfg="http://example.com"><cfg:item/></root>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	if len(findings) != 0 {
 		t.Fatalf("expected 0 findings, got %d", len(findings))
 	}
@@ -94,7 +94,7 @@ func TestXMLStructural_InvalidCharacterReference(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.xml, func(t *testing.T) {
 			content := []byte(`<root>` + tc.xml + `</root>`)
-			findings := scanXMLStructural("test.xml", content).Findings
+			findings := scanXMLStructural("test.xml", content, -1).Findings
 			count := 0
 			for _, f := range findings {
 				if f.RuleID == xmlInvalidCharacterReferenceRuleID {
@@ -123,7 +123,7 @@ func TestXMLStructural_InvalidComment(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.xml, func(t *testing.T) {
 			content := []byte(tc.xml)
-			findings := scanXMLStructural("test.xml", content).Findings
+			findings := scanXMLStructural("test.xml", content, -1).Findings
 			count := 0
 			for _, f := range findings {
 				if f.RuleID == xmlInvalidCommentRuleID {
@@ -142,7 +142,7 @@ func TestXMLStructural_CharRefLineTracking(t *testing.T) {
 &#0;
 &#1;
 "/>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	var charRefFindings []ports.CodeAnalysisRawFinding
 	for _, f := range findings {
 		if f.RuleID == xmlInvalidCharacterReferenceRuleID {
@@ -161,7 +161,7 @@ func TestXMLStructural_CharRefLineTracking(t *testing.T) {
 func TestXMLStructural_AttributeLineTracking(t *testing.T) {
 	content := []byte(`<root
   p:value="1"/>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	var prefixFinding *ports.CodeAnalysisRawFinding
 	for _, f := range findings {
 		if f.RuleID == xmlUndeclaredPrefixRuleID {
@@ -178,7 +178,7 @@ func TestXMLStructural_AttributeLineTracking(t *testing.T) {
 	content2 := []byte(`<root xmlns:a="urn:x" xmlns:b="urn:x"
   a:value="1"
   b:value="2"/>`)
-	findings2 := scanXMLStructural("test.xml", content2).Findings
+	findings2 := scanXMLStructural("test.xml", content2, -1).Findings
 	var dupFinding *ports.CodeAnalysisRawFinding
 	for _, f := range findings2 {
 		if f.RuleID == xmlDuplicateAttributeRuleID {
@@ -199,7 +199,7 @@ func TestXMLStructural_DTD(t *testing.T) {
   <!ENTITY x "ok">
 ]>
 <root>&x;</root>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	if len(findings) != 0 {
 		t.Fatalf("expected 0 findings for valid DTD, got %d: %+v", len(findings), findings)
 	}
@@ -207,7 +207,7 @@ func TestXMLStructural_DTD(t *testing.T) {
 
 func TestXMLStructural_DuplicateExpandedAttributes(t *testing.T) {
 	content := []byte(`<root xmlns:a="urn:test" xmlns:b="urn:test" a:val="1" b:val="2"/>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %+v", len(findings), findings)
 	}
@@ -222,7 +222,7 @@ func TestXMLStructural_DTDComments(t *testing.T) {
   <!ELEMENT root EMPTY>
 ]>
 <root/>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	if len(findings) != 0 {
 		t.Fatalf("expected 0 findings for valid DTD with comment, got %d: %+v", len(findings), findings)
 	}
@@ -230,7 +230,7 @@ func TestXMLStructural_DTDComments(t *testing.T) {
 
 func TestXMLStructural_DuplicateAttributesUndeclared(t *testing.T) {
 	content := []byte(`<root a:x="1" b:x="2"/>`)
-	findings := scanXMLStructural("test.xml", content).Findings
+	findings := scanXMLStructural("test.xml", content, -1).Findings
 	dupCount := 0
 	for _, f := range findings {
 		if f.RuleID == xmlDuplicateAttributeRuleID {

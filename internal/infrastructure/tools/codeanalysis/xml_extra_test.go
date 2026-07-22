@@ -634,6 +634,36 @@ func TestXML_TokenCompletenessMatrix(t *testing.T) {
 			expected:   []string{xmlInvalidCharacterReferenceRuleID},
 			unexpected: []string{xmlNotWellFormedRuleID},
 		},
+		{
+			name:       "malformed first root + valid second root",
+			xml:        "<a@b/><d/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "invalid QName first root + valid second root",
+			xml:        "<a:b:c/><d/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed attribute QName",
+			xml:        "<a x@y=\"1\"/><b/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed token instead of attr val",
+			xml:        "<a x=\"<\"/><b/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "undefined entity in attr",
+			xml:        "<a x=\"&bogus;\"/><b/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -643,26 +673,14 @@ func TestXML_TokenCompletenessMatrix(t *testing.T) {
 			for _, f := range res {
 				findingIDs = append(findingIDs, f.RuleID)
 			}
+			sort.Strings(findingIDs)
 
-			for _, exp := range tt.expected {
-				found := false
-				for _, act := range findingIDs {
-					if act == exp {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected %s, got %+v", exp, findingIDs)
-				}
-			}
+			expected := make([]string, len(tt.expected))
+			copy(expected, tt.expected)
+			sort.Strings(expected)
 
-			for _, unexp := range tt.unexpected {
-				for _, act := range findingIDs {
-					if act == unexp {
-						t.Errorf("unexpected %s found in %+v", unexp, findingIDs)
-					}
-				}
+			if !reflect.DeepEqual(findingIDs, expected) {
+				t.Errorf("expected exact findings %v, got %v\n", expected, findingIDs)
 			}
 		})
 	}

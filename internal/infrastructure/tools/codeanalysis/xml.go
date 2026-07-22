@@ -227,22 +227,29 @@ func scanXMLFile(rel string, content []byte) []ports.CodeAnalysisRawFinding {
 	// 3. XInclude, Schema Locations, Hardcoded Secrets
 	out = append(out, scanXMLSecurityTokens(rel, content, declaredEntities)...)
 
-	// 4. Structural scan (comments, char refs, namespaces, structure)
-	structuralRes := scanXMLStructural(rel, content)
-	out = append(out, structuralRes.Findings...)
-
-	// 5. Well-formedness check (with custom entity pre-registration)
+	// 4. Well-formedness check (with custom entity pre-registration)
+	var parserFailureOffset int64 = -1
 	if f, offset, ok := scanXMLWellFormed(rel, content, declaredEntities); ok {
-		hasTerminalNear := false
-		if structuralRes.Terminal != nil {
-			term := structuralRes.Terminal
-			if offset >= term.startOffset && offset <= term.endOffset {
-				hasTerminalNear = true
+		parserFailureOffset = offset
+		out = append(out, f)
+	}
+
+	// 5. Structural scan (comments, char refs, namespaces, structure)
+	// Structural scan uses parserFailureOffset as a hard barrier.
+	structuralRes := scanXMLStructural(rel, content, parserFailureOffset)
+	
+	// Deduplicate specific terminal structural failures that overlap with generic parsing failure.
+	for _, sf := range structuralRes.Findings {
+		if structuralRes.Terminal != nil && sf.RuleID == structuralRes.Terminal.kind && parserFailureOffset >= structuralRes.Terminal.startOffset && parserFailureOffset <= structuralRes.Terminal.endOffset {
+			// Suppress the generic parser failure if the structural scanner found a specific terminal failure encompassing the exact failure offset.
+			for i, gen := range out {
+				if gen.RuleID == xmlNotWellFormedRuleID {
+					out = append(out[:i], out[i+1:]...)
+					break
+				}
 			}
 		}
-		if !hasTerminalNear {
-			out = append(out, f)
-		}
+		out = append(out, sf)
 	}
 
 	sortXMLFindings(out)

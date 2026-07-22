@@ -20,7 +20,7 @@ type xmlStructuralResult struct {
 	Terminal *xmlTerminalFailure
 }
 
-func scanXMLStructural(rel string, content []byte) xmlStructuralResult {
+func scanXMLStructural(rel string, content []byte, parserFailureOffset int64) xmlStructuralResult {
 	res := xmlStructuralResult{
 		Findings: []ports.CodeAnalysisRawFinding{},
 	}
@@ -50,6 +50,9 @@ func scanXMLStructural(rel string, content []byte) xmlStructuralResult {
 
 Outer:
 	for i < len(content) {
+		if parserFailureOffset != -1 && int64(i) > parserFailureOffset {
+			break Outer
+		}
 		if content[i] == '&' && i+1 < len(content) && content[i+1] == '#' {
 			startLine := line
 
@@ -416,7 +419,7 @@ Outer:
 					}
 					attrName := string(content[attrStart:i])
 
-					if attrName == "" {
+					if !isValidXMLName(attrName) {
 						recoveryLost = true
 						break Outer
 					}
@@ -718,14 +721,21 @@ func isValidXMLName(name string) bool {
 	if name == "" {
 		return false
 	}
-	c := name[0]
-	if (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '!' || c == '?' || c == '/' {
+	parts := strings.Split(name, ":")
+	if len(parts) > 2 {
 		return false
 	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c == '!' || c == '?' || c == '/' || c == '<' || c == '>' || c == '=' || c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '&' || c == '"' || c == '\'' {
+	for _, part := range parts {
+		if part == "" {
 			return false
+		}
+		if !isXMLNameStartByte(part[0]) {
+			return false
+		}
+		for i := 1; i < len(part); i++ {
+			if !isXMLNameByte(part[i]) {
+				return false
+			}
 		}
 	}
 	return true
