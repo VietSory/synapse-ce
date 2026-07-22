@@ -26,7 +26,7 @@ func parseDeclaredEntities(content []byte) map[string]string {
 	_, _, decls := parseXMLDeclarations(content)
 	for _, d := range decls {
 		if !d.isParam {
-			out[d.name] = d.val
+			out[d.name] = "x"
 		}
 	}
 	return out
@@ -350,12 +350,17 @@ func skipUntilExact(content []byte, i int, suffix string, line *int) int {
 
 func checkExternalDTD(buf []byte) bool {
 	tokens := parseTokensQuoteAware(string(buf))
-	for _, t := range tokens {
-		if t == "SYSTEM" || t == "PUBLIC" {
-			return true
-		}
+	if len(tokens) < 2 {
+		return false
 	}
-	return false
+	switch tokens[1] {
+	case "SYSTEM":
+		return len(tokens) >= 3
+	case "PUBLIC":
+		return len(tokens) >= 4
+	default:
+		return false
+	}
 }
 
 func parseEntityBuffer(buf []byte) *entityDecl {

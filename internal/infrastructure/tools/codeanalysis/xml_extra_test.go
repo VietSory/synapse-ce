@@ -60,6 +60,18 @@ func TestXMLDTD_ExtraLexicalRules(t *testing.T) {
 			wantIDs: []string{xmlExternalParamEntityRuleID},
 			notWant: []string{xmlExternalDTDRuleID},
 		},
+		{
+			name:    "Root element named SYSTEM is not external DTD",
+			xml:     `<!DOCTYPE SYSTEM [ <!ELEMENT SYSTEM EMPTY> ]><SYSTEM/>`,
+			wantIDs: []string{xmlDoctypePresentRuleID},
+			notWant: []string{xmlExternalDTDRuleID},
+		},
+		{
+			name:    "Root element named PUBLIC is not external DTD",
+			xml:     `<!DOCTYPE PUBLIC [ <!ELEMENT PUBLIC EMPTY> ]><PUBLIC/>`,
+			wantIDs: []string{xmlDoctypePresentRuleID},
+			notWant: []string{xmlExternalDTDRuleID},
+		},
 	}
 
 	for _, tt := range tests {
@@ -170,6 +182,67 @@ func TestXMLSecurity_ExtraRules(t *testing.T) {
 		for i := range findings1 {
 			if !reflect.DeepEqual(findings1[i], findings2[i]) {
 				t.Errorf("finding %d differs: %+v vs %+v", i, findings1[i], findings2[i])
+			}
+		}
+	})
+
+	t.Run("one namespace token -> no finding", func(t *testing.T) {
+		xmlData := []byte(`<root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://example.com/namespace"/>`)
+		findings := scanXMLFile("test.xml", xmlData)
+		for _, f := range findings {
+			if f.RuleID == xmlExternalSchemaLocationRuleID {
+				t.Errorf("unexpected %s", xmlExternalSchemaLocationRuleID)
+			}
+		}
+	})
+
+	t.Run("odd trailing namespace token -> ignore trailing namespace", func(t *testing.T) {
+		xmlData := []byte(`<root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://example.org/ns https://example.com/schema.xsd http://example.org/ns2"/>`)
+		findings := scanXMLFile("test.xml", xmlData)
+		found := false
+		for _, f := range findings {
+			if f.RuleID == xmlExternalSchemaLocationRuleID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected %s", xmlExternalSchemaLocationRuleID)
+		}
+	})
+
+	t.Run("external entity inside <password> -> external-entity only", func(t *testing.T) {
+		xmlData := []byte(`<!DOCTYPE root [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]><root><password>&xxe;</password></root>`)
+		findings := scanXMLFile("test.xml", xmlData)
+		foundXXE := false
+		for _, f := range findings {
+			if f.RuleID == xmlHardcodedSecretRuleID {
+				t.Errorf("unexpected %s for external entity ref", xmlHardcodedSecretRuleID)
+			}
+			if f.RuleID == xmlExternalEntityRuleID {
+				foundXXE = true
+			}
+		}
+		if !foundXXE {
+			t.Errorf("expected %s", xmlExternalEntityRuleID)
+		}
+	})
+
+	t.Run("empty entity inside <password> -> no hardcoded-secret", func(t *testing.T) {
+		xmlData := []byte(`<!DOCTYPE root [ <!ENTITY empty ""> ]><root><password>&empty;</password></root>`)
+		findings := scanXMLFile("test.xml", xmlData)
+		for _, f := range findings {
+			if f.RuleID == xmlHardcodedSecretRuleID {
+				t.Errorf("unexpected %s for empty entity ref", xmlHardcodedSecretRuleID)
+			}
+		}
+	})
+
+	t.Run("local entity inside <password> -> no secret invented by decoder", func(t *testing.T) {
+		xmlData := []byte(`<!DOCTYPE root [ <!ENTITY local "safe"> ]><root><password>&local;</password></root>`)
+		findings := scanXMLFile("test.xml", xmlData)
+		for _, f := range findings {
+			if f.RuleID == xmlHardcodedSecretRuleID {
+				t.Errorf("unexpected %s for local entity ref", xmlHardcodedSecretRuleID)
 			}
 		}
 	})

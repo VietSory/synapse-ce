@@ -158,12 +158,8 @@ func isExternalSchemaLocation(attrName, val string) bool {
 	} else {
 		// schemaLocation contains pairs: namespace location namespace location
 		tokens := strings.Fields(val)
-		if len(tokens) == 1 {
-			locations = tokens
-		} else {
-			for i := 1; i < len(tokens); i += 2 {
-				locations = append(locations, tokens[i])
-			}
+		for i := 1; i < len(tokens); i += 2 {
+			locations = append(locations, tokens[i])
 		}
 	}
 
