@@ -349,22 +349,21 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 
 func TestXML_FallbackSuppression(t *testing.T) {
 	// Undeclared prefix is non-terminal, so malformed attribute on the same line should STILL be reported by fallback
-	content := []byte(`<root p:x="1" bad=oops/>`)
-	findings := scanXMLFile("test.xml", content)
+	xml := []byte("<root>\n<p:x> < </p:x>\n</root>")
+	res := scanXMLFile("test.xml", xml)
 
-	hasUndeclared := false
+	hasPrefix := false
 	hasFallback := false
-	for _, f := range findings {
+	for _, f := range res {
 		if f.RuleID == xmlUndeclaredPrefixRuleID {
-			hasUndeclared = true
+			hasPrefix = true
 		}
 		if f.RuleID == xmlNotWellFormedRuleID {
 			hasFallback = true
 		}
 	}
-
-	if !hasUndeclared || !hasFallback {
-		t.Errorf("expected both undeclared prefix and not-well-formed fallback for non-terminal failure line, got: %+v", findings)
+	if !hasPrefix || !hasFallback {
+		t.Errorf("expected both undeclared prefix and not-well-formed fallback for non-terminal failure line, got: %+v", res)
 	}
 }
 
@@ -402,7 +401,7 @@ func TestXML_FullPipelineSuppression(t *testing.T) {
 		{
 			name:       "malformed attribute + mismatched tag",
 			xml:        `<root bad=oops><a></b></root>`,
-			expected:   []string{xmlMismatchedTagRuleID, xmlMismatchedTagRuleID, xmlNotWellFormedRuleID},
+			expected:   []string{xmlNotWellFormedRuleID},
 			unexpected: []string{},
 		},
 		{
@@ -424,6 +423,15 @@ func TestXML_FullPipelineSuppression(t *testing.T) {
 <root/>`,
 			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
 			unexpected: []string{},
+		},
+		{
+			name: "DTD string literal containing comment",
+			xml: `<!DOCTYPE root [
+  <!ENTITY x "<!-- invalid -- comment -->">
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID},
+			unexpected: []string{xmlInvalidCommentRuleID},
 		},
 		{
 			name: "unterminated DTD comment",
@@ -456,13 +464,13 @@ func TestXML_FullPipelineSuppression(t *testing.T) {
 		{
 			name:       "clean mismatched tag",
 			xml:        `<a></b>`,
-			expected:   []string{xmlMismatchedTagRuleID, xmlUnclosedElementRuleID},
+			expected:   []string{xmlMismatchedTagRuleID},
 			unexpected: []string{xmlNotWellFormedRuleID},
 		},
 		{
 			name:       "clean mismatched tag with whitespace",
 			xml:        `<a></b   >`,
-			expected:   []string{xmlMismatchedTagRuleID, xmlUnclosedElementRuleID},
+			expected:   []string{xmlMismatchedTagRuleID},
 			unexpected: []string{xmlNotWellFormedRuleID},
 		},
 		{
@@ -481,6 +489,42 @@ func TestXML_FullPipelineSuppression(t *testing.T) {
 			name:       "nested malformed end tag",
 			xml:        `<root><a></wrong bad=oops></root>`,
 			expected:   []string{xmlMismatchedTagRuleID, xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "mismatched tag matching name but bad syntax",
+			xml:        `<a></a bad><b>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed start tag attribute missing quote",
+			xml:        `<a bad=oops>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed start tag unterminated quote",
+			xml:        `<a x="unterminated>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "multiple roots with malformed second root",
+			xml:        `<a/><b bad=oops/>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "char ref in malformed tag",
+			xml:        `<a x=&#0;>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "unclosed element exactly one",
+			xml:        `<root><a><b>`,
+			expected:   []string{xmlUnclosedElementRuleID},
 			unexpected: []string{},
 		},
 	}

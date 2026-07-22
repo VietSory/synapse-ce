@@ -232,20 +232,12 @@ func scanXMLFile(rel string, content []byte) []ports.CodeAnalysisRawFinding {
 	out = append(out, structuralRes.Findings...)
 
 	// 5. Well-formedness check (with custom entity pre-registration)
-	// 5. Well-formedness check (with custom entity pre-registration)
 	if f, offset, ok := scanXMLWellFormed(rel, content, declaredEntities); ok {
 		hasTerminalNear := false
-		for _, term := range structuralRes.TerminalFailures {
-			if term.kind == xmlUnclosedElementRuleID {
-				if offset == term.startOffset {
-					hasTerminalNear = true
-					break
-				}
-			} else {
-				if offset >= term.startOffset-2 && offset <= term.endOffset+2 {
-					hasTerminalNear = true
-					break
-				}
+		if structuralRes.Terminal != nil {
+			term := structuralRes.Terminal
+			if offset >= term.startOffset && offset <= term.endOffset {
+				hasTerminalNear = true
 			}
 		}
 		if !hasTerminalNear {

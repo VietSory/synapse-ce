@@ -16,14 +16,13 @@ type xmlTerminalFailure struct {
 }
 
 type xmlStructuralResult struct {
-	Findings         []ports.CodeAnalysisRawFinding
-	TerminalFailures []xmlTerminalFailure
+	Findings []ports.CodeAnalysisRawFinding
+	Terminal *xmlTerminalFailure
 }
 
 func scanXMLStructural(rel string, content []byte) xmlStructuralResult {
 	res := xmlStructuralResult{
-		Findings:         []ports.CodeAnalysisRawFinding{},
-		TerminalFailures: []xmlTerminalFailure{},
+		Findings: []ports.CodeAnalysisRawFinding{},
 	}
 
 	line := 1
@@ -53,17 +52,23 @@ Outer:
 	for i < len(content) {
 		if content[i] == '&' && i+1 < len(content) && content[i+1] == '#' {
 			startLine := line
-			advance(2) // skip &#
-			consumed, finding, terminal := checkCharRef(content, i, startLine, rel, false)
+
+			consumed, finding, terminal := checkCharRef(content, i+2, startLine, rel, false)
+			consumed += 2
+
 			if finding != nil {
 				res.Findings = append(res.Findings, *finding)
 				if terminal {
-					res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-						kind:        finding.RuleID,
-						reportLine:  startLine,
-						startOffset: int64(i),
-						endOffset:   int64(i + consumed),
-					})
+					if res.Terminal == nil {
+						res.Terminal = &xmlTerminalFailure{
+							kind:        finding.RuleID,
+							reportLine:  startLine,
+							startOffset: int64(i),
+							endOffset:   int64(i + consumed),
+						}
+					}
+					recoveryLost = true
+					break Outer
 				}
 			}
 			advance(consumed)
@@ -93,12 +98,16 @@ Outer:
 							startLine,
 							"Comment contains '--' or ends with '-'.",
 						))
-						res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-							kind:        xmlInvalidCommentRuleID,
-							reportLine:  startLine,
-							startOffset: int64(commentStart),
-							endOffset:   int64(end + 3),
-						})
+						if res.Terminal == nil {
+							res.Terminal = &xmlTerminalFailure{
+								kind:        xmlInvalidCommentRuleID,
+								reportLine:  startLine,
+								startOffset: int64(commentStart),
+								endOffset:   int64(end + 3),
+							}
+						}
+						recoveryLost = true
+						break Outer
 					}
 					advance(end - i + 3)
 				} else {
@@ -108,13 +117,16 @@ Outer:
 						startLine,
 						"Unterminated comment.",
 					))
-					res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-						kind:        xmlInvalidCommentRuleID,
-						reportLine:  startLine,
-						startOffset: int64(len(content)),
-						endOffset:   int64(len(content)),
-					})
-					return res
+					if res.Terminal == nil {
+						res.Terminal = &xmlTerminalFailure{
+							kind:        xmlInvalidCommentRuleID,
+							reportLine:  startLine,
+							startOffset: int64(len(content)),
+							endOffset:   int64(len(content)),
+						}
+					}
+					recoveryLost = true
+					break Outer
 				}
 				continue
 			}
@@ -159,7 +171,7 @@ Outer:
 				var q byte
 				bracketDepth := 0
 				for i < len(content) {
-					if hasPrefixExact(content, i, "<!--") {
+					if !inStr && hasPrefixExact(content, i, "<!--") {
 						commentStart := i
 						commentStartLine := line
 						advance(4)
@@ -181,12 +193,16 @@ Outer:
 									commentStartLine,
 									"Comment contains '--' or ends with '-'.",
 								))
-								res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-									kind:        xmlInvalidCommentRuleID,
-									reportLine:  commentStartLine,
-									startOffset: int64(commentStart),
-									endOffset:   int64(end + 3),
-								})
+								if res.Terminal == nil {
+									res.Terminal = &xmlTerminalFailure{
+										kind:        xmlInvalidCommentRuleID,
+										reportLine:  commentStartLine,
+										startOffset: int64(commentStart),
+										endOffset:   int64(end + 3),
+									}
+								}
+								recoveryLost = true
+								break Outer
 							}
 							advance(end - i + 3)
 						} else {
@@ -196,13 +212,16 @@ Outer:
 								commentStartLine,
 								"Unterminated comment.",
 							))
-							res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-								kind:        xmlInvalidCommentRuleID,
-								reportLine:  commentStartLine,
-								startOffset: int64(len(content)),
-								endOffset:   int64(len(content)),
-							})
-							return res
+							if res.Terminal == nil {
+								res.Terminal = &xmlTerminalFailure{
+									kind:        xmlInvalidCommentRuleID,
+									reportLine:  commentStartLine,
+									startOffset: int64(len(content)),
+									endOffset:   int64(len(content)),
+								}
+							}
+							recoveryLost = true
+							break Outer
 						}
 						continue
 					}
@@ -259,6 +278,10 @@ Outer:
 				}
 				tagEnd := i
 
+				if !endTagSyntaxValid {
+					recoveryLost = true
+				}
+
 				if len(elemStack) > 0 {
 					top := elemStack[len(elemStack)-1]
 					if top.name != name {
@@ -278,16 +301,16 @@ Outer:
 								fmt.Sprintf("Mismatched end tag </%s>. Expected </%s>.", name, top.name),
 							))
 							if endTagSyntaxValid {
-								res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-									kind:        xmlMismatchedTagRuleID,
-									reportLine:  startLine,
-									startOffset: int64(tagStart),
-									endOffset:   int64(tagEnd),
-								})
-							}
-							elemStack = elemStack[:found]
-							nsStack = nsStack[:found]
-							if !endTagSyntaxValid {
+								if res.Terminal == nil {
+									res.Terminal = &xmlTerminalFailure{
+										kind:        xmlMismatchedTagRuleID,
+										reportLine:  startLine,
+										startOffset: int64(tagStart),
+										endOffset:   int64(tagEnd),
+									}
+								}
+								elemStack = elemStack[:found]
+								nsStack = nsStack[:found]
 								recoveryLost = true
 								break Outer
 							}
@@ -299,22 +322,24 @@ Outer:
 								fmt.Sprintf("Mismatched end tag </%s> with no matching open element.", name),
 							))
 							if endTagSyntaxValid {
-								res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-									kind:        xmlMismatchedTagRuleID,
-									reportLine:  startLine,
-									startOffset: int64(tagStart),
-									endOffset:   int64(tagEnd),
-								})
-							}
-							if !endTagSyntaxValid {
+								if res.Terminal == nil {
+									res.Terminal = &xmlTerminalFailure{
+										kind:        xmlMismatchedTagRuleID,
+										reportLine:  startLine,
+										startOffset: int64(tagStart),
+										endOffset:   int64(tagEnd),
+									}
+								}
 								recoveryLost = true
 								break Outer
 							}
 						}
 					} else {
-						elemStack = elemStack[:len(elemStack)-1]
-						if len(nsStack) > 0 {
-							nsStack = nsStack[:len(nsStack)-1]
+						if endTagSyntaxValid {
+							elemStack = elemStack[:len(elemStack)-1]
+							if len(nsStack) > 0 {
+								nsStack = nsStack[:len(nsStack)-1]
+							}
 						}
 					}
 				} else {
@@ -325,17 +350,21 @@ Outer:
 						fmt.Sprintf("Mismatched end tag </%s> with no open element.", name),
 					))
 					if endTagSyntaxValid {
-						res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-							kind:        xmlMismatchedTagRuleID,
-							reportLine:  startLine,
-							startOffset: int64(tagStart),
-							endOffset:   int64(tagEnd),
-						})
-					}
-					if !endTagSyntaxValid {
+						if res.Terminal == nil {
+							res.Terminal = &xmlTerminalFailure{
+								kind:        xmlMismatchedTagRuleID,
+								reportLine:  startLine,
+								startOffset: int64(tagStart),
+								endOffset:   int64(tagEnd),
+							}
+						}
 						recoveryLost = true
 						break Outer
 					}
+				}
+
+				if recoveryLost {
+					break Outer
 				}
 				continue
 			}
@@ -344,6 +373,7 @@ Outer:
 			if hasPrefixExact(content, i, "<") {
 				tagStart := i
 				startLine := line
+
 				advance(1)
 
 				end := i
@@ -378,6 +408,7 @@ Outer:
 						continue
 					}
 
+					nameLine := line
 					attrStart := i
 					for i < len(content) && content[i] != '=' && content[i] != '>' && !isXMLSpaceByte(content[i]) && content[i] != '/' {
 						advance(1)
@@ -394,8 +425,7 @@ Outer:
 
 					attrVal := ""
 					valStart := 0
-					nameLine := line
-					valueLine := line
+					var valueLine int
 					if i < len(content) && content[i] == '=' {
 						advance(1)
 						for i < len(content) && isXMLSpaceByte(content[i]) {
@@ -409,11 +439,20 @@ Outer:
 							for i < len(content) && content[i] != q {
 								advance(1)
 							}
-							if i < len(content) {
+							if i < len(content) && content[i] == q {
 								attrVal = string(content[valStart:i])
 								advance(1)
+							} else {
+								recoveryLost = true
+								break Outer
 							}
+						} else {
+							recoveryLost = true
+							break Outer
 						}
+					} else {
+						recoveryLost = true
+						break Outer
 					}
 					attrs = append(attrs, attrToken{name: attrName, val: attrVal, startOffset: valStart, nameLine: nameLine, valueLine: valueLine})
 				}
@@ -432,12 +471,16 @@ Outer:
 							startLine,
 							"Multiple root elements detected.",
 						))
-						res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-							kind:        xmlMultipleRootElementsRuleID,
-							reportLine:  startLine,
-							startOffset: int64(tagStart),
-							endOffset:   int64(tagEnd),
-						})
+						if res.Terminal == nil {
+							res.Terminal = &xmlTerminalFailure{
+								kind:        xmlMultipleRootElementsRuleID,
+								reportLine:  startLine,
+								startOffset: int64(tagStart),
+								endOffset:   int64(tagEnd),
+							}
+						}
+						recoveryLost = true
+						break Outer
 					}
 				}
 
@@ -536,28 +579,29 @@ Outer:
 					for vIdx < len(vBytes) {
 						if vBytes[vIdx] == '\n' {
 							vLine++
-							vIdx++
-							continue
 						}
 						if vBytes[vIdx] == '&' && vIdx+1 < len(vBytes) && vBytes[vIdx+1] == '#' {
-							refStart := attr.startOffset + vIdx
-							vIdx += 2
-							consumed, finding, terminal := checkCharRef(vBytes, vIdx, vLine, rel, true)
-							if finding != nil {
-								res.Findings = append(res.Findings, *finding)
-								if terminal {
-									res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
-										kind:        finding.RuleID,
-										reportLine:  vLine,
-										startOffset: int64(refStart),
-										endOffset:   int64(refStart + 2 + consumed),
-									})
+							vConsumed, vFinding, vTerminal := checkCharRef(vBytes, vIdx+2, vLine, rel, true)
+							vConsumed += 2
+							if vFinding != nil {
+								res.Findings = append(res.Findings, *vFinding)
+								if vTerminal {
+									if res.Terminal == nil {
+										res.Terminal = &xmlTerminalFailure{
+											kind:        vFinding.RuleID,
+											reportLine:  vLine,
+											startOffset: int64(attr.startOffset + vIdx),
+											endOffset:   int64(attr.startOffset + len(attr.val) + 1),
+										}
+									}
+									recoveryLost = true
+									break Outer
 								}
 							}
-							vIdx += consumed
-						} else {
-							vIdx++
+							vIdx += vConsumed
+							continue
 						}
+						vIdx++
 					}
 				}
 
@@ -569,28 +613,24 @@ Outer:
 			}
 		}
 
-		if i < len(content) && content[i] == '\n' {
-			line++
-			i++
-		} else if i < len(content) {
-			i++
-		}
+		advance(1)
 	}
 
-	if !recoveryLost {
-		for _, e := range elemStack {
-			res.Findings = append(res.Findings, xmlRawFinding(
-				xmlUnclosedElementRuleID,
-				rel,
-				e.line,
-				fmt.Sprintf("Unclosed element <%s>.", e.name),
-			))
-			res.TerminalFailures = append(res.TerminalFailures, xmlTerminalFailure{
+	if !recoveryLost && len(elemStack) > 0 {
+		e := elemStack[len(elemStack)-1]
+		res.Findings = append(res.Findings, xmlRawFinding(
+			xmlUnclosedElementRuleID,
+			rel,
+			e.line,
+			fmt.Sprintf("Unclosed element <%s>.", e.name),
+		))
+		if res.Terminal == nil {
+			res.Terminal = &xmlTerminalFailure{
 				kind:        xmlUnclosedElementRuleID,
 				reportLine:  e.line,
 				startOffset: int64(len(content)),
 				endOffset:   int64(len(content)),
-			})
+			}
 		}
 	}
 

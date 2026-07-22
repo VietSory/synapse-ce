@@ -37,10 +37,10 @@ func TestXMLStructural_UnclosedElement(t *testing.T) {
 	content := []byte(`<root><item>`)
 	findings := scanXMLStructural("test.xml", content).Findings
 
-	if len(findings) != 2 {
-		t.Fatalf("expected 2 unclosed element findings, got %d: %+v", len(findings), findings)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 unclosed element finding, got %d: %+v", len(findings), findings)
 	}
-	if findings[0].RuleID != xmlUnclosedElementRuleID || findings[1].RuleID != xmlUnclosedElementRuleID {
+	if findings[0].RuleID != xmlUnclosedElementRuleID {
 		t.Errorf("expected xml:unclosed-element")
 	}
 }
@@ -150,14 +150,11 @@ func TestXMLStructural_CharRefLineTracking(t *testing.T) {
 		}
 	}
 
-	if len(charRefFindings) != 2 {
-		t.Fatalf("expected 2 invalid char refs, got %d: %+v", len(charRefFindings), charRefFindings)
+	if len(charRefFindings) != 1 {
+		t.Fatalf("expected 1 invalid char ref, got %d: %+v", len(charRefFindings), charRefFindings)
 	}
 	if charRefFindings[0].Line != 2 {
 		t.Errorf("expected first char ref on line 2, got line %d", charRefFindings[0].Line)
-	}
-	if charRefFindings[1].Line != 3 {
-		t.Errorf("expected second char ref on line 3, got line %d", charRefFindings[1].Line)
 	}
 }
 
