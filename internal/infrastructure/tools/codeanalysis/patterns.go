@@ -12,6 +12,7 @@ import (
 const (
 	kindQuality     = "quality"
 	kindReliability = "reliability"
+	kindSAST        = "sast"
 )
 
 // rule is one deterministic maintainability/reliability check over a source line. Either re or match is

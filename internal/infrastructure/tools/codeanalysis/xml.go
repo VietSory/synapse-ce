@@ -6,21 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
+	domainrule "github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
 const (
-	xmlNotWellFormedRuleID      = "xml:not-well-formed"
-	xmlDuplicateAttributeRuleID = "xml:duplicate-attribute"
+	xmlNotWellFormedRuleID          = "xml:not-well-formed"
+	xmlDuplicateAttributeRuleID     = "xml:duplicate-attribute"
+	xmlExternalEntityRuleID         = "xml:external-entity"
+	xmlExternalDTDRuleID            = "xml:external-dtd"
+	xmlExternalParamEntityRuleID    = "xml:external-parameter-entity"
+	xmlXIncludeRuleID               = "xml:xinclude"
+	xmlEntityExpansionRuleID        = "xml:entity-expansion"
+	xmlDoctypePresentRuleID         = "xml:doctype-present"
+	xmlExternalSchemaLocationRuleID = "xml:external-schema-location"
+	xmlHardcodedSecretRuleID        = "xml:hardcoded-secret" // #nosec G101 -- Stable rule identifier, not a credential.
 )
 
 type xmlRule struct {
 	id       string
 	title    string
+	kind     string
+	cwe      string
 	severity shared.Severity
+	ruleType domainrule.Type
+	quality  domainrule.Quality
 }
 
 func builtinXMLRules() []xmlRule {
@@ -28,13 +42,102 @@ func builtinXMLRules() []xmlRule {
 		{
 			id:       xmlNotWellFormedRuleID,
 			title:    "XML document is not well formed",
+			kind:     kindReliability,
+			cwe:      "",
 			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
 		},
 		{
 			id:       xmlDuplicateAttributeRuleID,
 			title:    "Duplicate XML attribute",
+			kind:     kindReliability,
+			cwe:      "",
 			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
 		},
+		{
+			id:       xmlExternalEntityRuleID,
+			title:    "External general entity declaration",
+			kind:     kindSAST,
+			cwe:      "CWE-611",
+			severity: shared.SeverityHigh,
+			ruleType: domainrule.TypeVulnerability,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlExternalDTDRuleID,
+			title:    "External DOCTYPE declaration",
+			kind:     kindSAST,
+			cwe:      "CWE-611",
+			severity: shared.SeverityHigh,
+			ruleType: domainrule.TypeVulnerability,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlExternalParamEntityRuleID,
+			title:    "External parameter entity declaration",
+			kind:     kindSAST,
+			cwe:      "CWE-611",
+			severity: shared.SeverityHigh,
+			ruleType: domainrule.TypeVulnerability,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlXIncludeRuleID,
+			title:    "XInclude element in XML document",
+			kind:     kindSAST,
+			cwe:      "CWE-611",
+			severity: shared.SeverityHigh,
+			ruleType: domainrule.TypeVulnerability,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlEntityExpansionRuleID,
+			title:    "Dangerous XML entity expansion structure",
+			kind:     kindSAST,
+			cwe:      "CWE-776",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeSecurityHotspot,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlDoctypePresentRuleID,
+			title:    "XML DOCTYPE declaration present",
+			kind:     kindSAST,
+			cwe:      "CWE-611",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeSecurityHotspot,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlExternalSchemaLocationRuleID,
+			title:    "External XML schema location reference",
+			kind:     kindSAST,
+			cwe:      "CWE-611",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeSecurityHotspot,
+			quality:  domainrule.QualitySecurity,
+		},
+		{
+			id:       xmlHardcodedSecretRuleID,
+			title:    "Hardcoded secret in XML configuration",
+			kind:     kindSAST,
+			cwe:      "CWE-798",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeSecurityHotspot,
+			quality:  domainrule.QualitySecurity,
+		},
+	}
+}
+
+var xmlRulesByID map[string]xmlRule
+
+func init() {
+	xmlRulesByID = make(map[string]xmlRule)
+	for _, r := range builtinXMLRules() {
+		xmlRulesByID[r.id] = r
 	}
 }
 
@@ -51,31 +154,80 @@ func isXMLSource(ext, lang string) bool {
 }
 
 func scanXMLFile(rel string, content []byte) []ports.CodeAnalysisRawFinding {
-	out := scanXMLDuplicateAttributes(rel, content)
-	if f, ok := scanXMLWellFormed(rel, content); ok {
+	declaredEntities := parseDeclaredEntities(content)
+
+	var out []ports.CodeAnalysisRawFinding
+
+	// 1. Lexical / DTD Scan
+	out = append(out, scanXMLDTD(rel, content)...)
+
+	// 2. Duplicate attributes scan
+	out = append(out, scanXMLDuplicateAttributes(rel, content)...)
+
+	// 3. XInclude, Schema Locations, Hardcoded Secrets
+	out = append(out, scanXMLSecurityTokens(rel, content, declaredEntities)...)
+
+	// 4. Well-formedness check (with custom entity pre-registration)
+	if f, ok := scanXMLWellFormed(rel, content, declaredEntities); ok {
 		out = append(out, f)
 	}
+
+	sortXMLFindings(out)
 	return out
 }
 
-func xmlRawFinding(id, title string, severity shared.Severity, rel string, line int, desc string) ports.CodeAnalysisRawFinding {
+func sortXMLFindings(findings []ports.CodeAnalysisRawFinding) {
+	sort.SliceStable(findings, func(i, j int) bool {
+		if findings[i].Line != findings[j].Line {
+			return findings[i].Line < findings[j].Line
+		}
+		if findings[i].RuleID != findings[j].RuleID {
+			return findings[i].RuleID < findings[j].RuleID
+		}
+		return findings[i].Description < findings[j].Description
+	})
+}
+
+func xmlRawFinding(id string, rel string, line int, desc string) ports.CodeAnalysisRawFinding {
 	if line <= 0 {
 		line = 1
 	}
+	r, ok := xmlRulesByID[id]
+	if !ok {
+		return ports.CodeAnalysisRawFinding{
+			Kind:        kindReliability,
+			RuleID:      id,
+			Severity:    shared.SeverityMedium,
+			Title:       id,
+			Description: desc,
+			File:        rel,
+			Line:        line,
+		}
+	}
 	return ports.CodeAnalysisRawFinding{
-		Kind:        kindReliability,
-		RuleID:      id,
-		CWE:         "",
-		Severity:    severity,
-		Title:       title,
+		Kind:        r.kind,
+		RuleID:      r.id,
+		CWE:         r.cwe,
+		Severity:    r.severity,
+		Title:       r.title,
 		Description: desc,
 		File:        rel,
 		Line:        line,
 	}
 }
 
-func scanXMLWellFormed(rel string, content []byte) (ports.CodeAnalysisRawFinding, bool) {
+func scanXMLWellFormed(rel string, content []byte, declaredEntities map[string]string) (ports.CodeAnalysisRawFinding, bool) {
 	dec := xml.NewDecoder(bytes.NewReader(content))
+	if len(declaredEntities) > 0 {
+		dec.Entity = make(map[string]string)
+		for name, val := range declaredEntities {
+			if val != "" {
+				dec.Entity[name] = val
+			} else {
+				dec.Entity[name] = "placeholder"
+			}
+		}
+	}
 	rootCount := 0
 	depth := 0
 	for {
@@ -84,8 +236,6 @@ func scanXMLWellFormed(rel string, content []byte) (ports.CodeAnalysisRawFinding
 			if rootCount == 0 && len(bytes.TrimSpace(content)) > 0 {
 				return xmlRawFinding(
 					xmlNotWellFormedRuleID,
-					"XML document is not well formed",
-					shared.SeverityMedium,
 					rel,
 					1,
 					"XML parsing reached the end of the file without a document element.",
@@ -102,8 +252,6 @@ func scanXMLWellFormed(rel string, content []byte) (ports.CodeAnalysisRawFinding
 			msg := strings.TrimSpace(err.Error())
 			return xmlRawFinding(
 				xmlNotWellFormedRuleID,
-				"XML document is not well formed",
-				shared.SeverityMedium,
 				rel,
 				line,
 				"XML parsing failed before the full document could be read: "+msg+".",
@@ -117,8 +265,6 @@ func scanXMLWellFormed(rel string, content []byte) (ports.CodeAnalysisRawFinding
 					line, _ := dec.InputPos()
 					return xmlRawFinding(
 						xmlNotWellFormedRuleID,
-						"XML document is not well formed",
-						shared.SeverityMedium,
 						rel,
 						line,
 						"XML parsing found more than one top-level document element.",
@@ -208,8 +354,6 @@ func scanXMLDuplicateAttributes(rel string, content []byte) []ports.CodeAnalysis
 				desc := fmt.Sprintf("Element start tag repeats attribute %q, which violates XML well-formedness and can make configuration interpretation ambiguous.", name)
 				out = append(out, xmlRawFinding(
 					xmlDuplicateAttributeRuleID,
-					"Duplicate XML attribute",
-					shared.SeverityLow,
 					rel,
 					attrLine,
 					desc,

@@ -2,12 +2,15 @@ package codequality
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/codeanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
@@ -241,5 +244,71 @@ func TestIsTestPath(t *testing.T) {
 		if got := isTestPath(path); got != want {
 			t.Errorf("isTestPath(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+func TestServiceBridgesXMLSASTFindings(t *testing.T) {
+	analyzer := fakeAnalyzer{raws: []ports.CodeAnalysisRawFinding{
+		{Kind: "sast", RuleID: "xml:external-entity", CWE: "CWE-611", Severity: shared.SeverityHigh, Title: "External general entity declaration", File: "config.xml", Line: 2},
+		{Kind: "sast", RuleID: "xml:entity-expansion", CWE: "CWE-776", Severity: shared.SeverityMedium, Title: "Dangerous XML entity expansion structure", File: "payload.xml", Line: 5},
+		{Kind: "reliability", RuleID: "xml:not-well-formed", CWE: "", Severity: shared.SeverityMedium, Title: "XML document is not well formed", File: "bad.xml", Line: 1},
+	}}
+
+	svc := New(analyzer)
+	fs, err := svc.Analyze(context.Background(), "root")
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+
+	xxe := byRule(fs, "xml:external-entity")
+	if xxe == nil || xxe.Kind != finding.KindSAST {
+		t.Fatalf("expected XML external-entity to become KindSAST, got %+v", xxe)
+	}
+
+	exp := byRule(fs, "xml:entity-expansion")
+	if exp == nil || exp.Kind != finding.KindSAST {
+		t.Fatalf("expected XML entity-expansion to become KindSAST, got %+v", exp)
+	}
+
+	mal := byRule(fs, "xml:not-well-formed")
+	if mal == nil || mal.Kind != finding.KindReliability {
+		t.Fatalf("expected XML not-well-formed to remain KindReliability, got %+v", mal)
+	}
+}
+
+func TestServiceRealXMLAnalyzerIntegration(t *testing.T) {
+	// Create a temporary directory with a malicious XML
+	dir := t.TempDir()
+	xmlPath := filepath.Join(dir, "config.xml")
+	maliciousXML := `<!DOCTYPE root [
+		<!ENTITY xxe SYSTEM "file:///etc/passwd">
+	]>
+	<root>&xxe;</root>`
+	if err := os.WriteFile(xmlPath, []byte(maliciousXML), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Instantiate real analyzer
+	realAnalyzer := codeanalysis.New()
+
+	// Instantiate service
+	svc := New(realAnalyzer)
+
+	fs, err := svc.Analyze(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+
+	// We expect the real analyzer to find xml:external-entity
+	// and bridge it to KindSAST
+	xxe := byRule(fs, "xml:external-entity")
+	if xxe == nil {
+		t.Fatalf("expected real analyzer to detect xml:external-entity, got findings: %+v", fs)
+	}
+	if xxe.Kind != finding.KindSAST {
+		t.Errorf("expected KindSAST, got %q", xxe.Kind)
+	}
+	if !strings.HasSuffix(xxe.DedupKey, "config.xml:2") {
+		t.Errorf("expected DedupKey for config.xml line 2, got %q", xxe.DedupKey)
 	}
 }
