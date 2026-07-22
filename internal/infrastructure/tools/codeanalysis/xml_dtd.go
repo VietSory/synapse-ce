@@ -328,10 +328,8 @@ func parseXMLDeclarations(content []byte) xmlDeclarationScan {
 							}
 						}
 					} else if !decl.isParam {
-						// Limit decoder entries to prevent memory exhaustion
-						if len(scan.decoderEntities) < 10000 {
-							scan.decoderEntities[decl.name] = "x"
-						}
+						// Let file size limits protect against unbounded memory.
+						scan.decoderEntities[decl.name] = "x"
 						
 						if len(scan.expansionEntities) < maxEntityDeclarations {
 							scan.expansionEntities[decl.name] = decl.val
