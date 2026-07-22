@@ -24,7 +24,7 @@ const (
 	xmlEntityExpansionRuleID        = "xml:entity-expansion"
 	xmlDoctypePresentRuleID         = "xml:doctype-present"
 	xmlExternalSchemaLocationRuleID = "xml:external-schema-location"
-	xmlHardcodedSecretRuleID        = "xml:hardcoded-secret"
+	xmlHardcodedSecretRuleID        = "xml:hardcoded-secret" // #nosec G101 -- Stable rule identifier, not a credential.
 )
 
 type xmlRule struct {

