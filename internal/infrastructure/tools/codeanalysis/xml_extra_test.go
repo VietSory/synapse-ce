@@ -279,7 +279,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
 		}
 		xmlData.WriteString("]><root/>")
-		
+
 		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
 		foundOverflow := false
 		for _, f := range findings {
@@ -316,7 +316,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 		}
 		xmlData.WriteString("  <!ENTITY % pe SYSTEM \"http://bad.com/dtd\"> %pe;\n")
 		xmlData.WriteString("]><root/>")
-		
+
 		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
 		foundPE := false
 		for _, f := range findings {
@@ -336,7 +336,7 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
 		}
 		xmlData.WriteString("]><root>&e10100;</root>")
-		
+
 		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
 		for _, f := range findings {
 			if f.RuleID == xmlNotWellFormedRuleID {

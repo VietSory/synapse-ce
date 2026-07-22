@@ -316,7 +316,7 @@ func parseXMLDeclarations(content []byte) xmlDeclarationScan {
 			if content[i] == '>' {
 				if decl := parseEntityBuffer(entityBuf); decl != nil {
 					decl.line = entityStartLine
-					
+
 					if decl.isExt {
 						if decl.isParam {
 							if len(scan.externalParam) < maxEntityDeclarations {
@@ -330,7 +330,7 @@ func parseXMLDeclarations(content []byte) xmlDeclarationScan {
 					} else if !decl.isParam {
 						// Let file size limits protect against unbounded memory.
 						scan.decoderEntities[decl.name] = "x"
-						
+
 						if len(scan.expansionEntities) < maxEntityDeclarations {
 							scan.expansionEntities[decl.name] = decl.val
 							scan.expansionLines[decl.name] = decl.line
