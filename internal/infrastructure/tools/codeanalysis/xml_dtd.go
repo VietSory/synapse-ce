@@ -21,68 +21,74 @@ type entityDecl struct {
 	isExt   bool
 }
 
+type xmlDeclarationScan struct {
+	doctypeLine int
+	externalDTD bool
+
+	externalGeneral []entityDecl
+	externalParam   []entityDecl
+
+	decoderEntities map[string]string
+
+	expansionEntities map[string]string
+	expansionLines    map[string]int
+	expansionOverflow bool
+}
+
 func parseDeclaredEntities(content []byte) map[string]string {
-	out := make(map[string]string)
-	_, _, decls := parseXMLDeclarations(content)
-	for _, d := range decls {
-		if !d.isParam {
-			out[d.name] = "x"
-		}
-	}
-	return out
+	scan := parseXMLDeclarations(content)
+	return scan.decoderEntities
 }
 
 func scanXMLDTD(rel string, content []byte) []ports.CodeAnalysisRawFinding {
 	var out []ports.CodeAnalysisRawFinding
 
-	doctypeLine, hasExtDTD, decls := parseXMLDeclarations(content)
+	scan := parseXMLDeclarations(content)
 
-	if hasExtDTD {
+	if scan.externalDTD {
 		out = append(out, xmlRawFinding(
 			xmlExternalDTDRuleID,
 			rel,
-			doctypeLine,
+			scan.doctypeLine,
 			"External DOCTYPE reference can lead to XML External Entity (XXE) vulnerabilities or server-side request forgery.",
 		))
 	}
 
-	hasExtEntity := false
-	hasExtParamEntity := false
-	hasEntityExpansion := false
+	for _, d := range scan.externalParam {
+		out = append(out, xmlRawFinding(
+			xmlExternalParamEntityRuleID,
+			rel,
+			d.line,
+			fmt.Sprintf("External parameter entity %q can lead to XXE attacks or out-of-band data exfiltration.", d.name),
+		))
+	}
 
-	internalMap := make(map[string]string)
-	internalLines := make(map[string]int)
-
-	for _, d := range decls {
-		if d.isExt {
-			if d.isParam {
-				hasExtParamEntity = true
-				out = append(out, xmlRawFinding(
-					xmlExternalParamEntityRuleID,
-					rel,
-					d.line,
-					fmt.Sprintf("External parameter entity %q can lead to XXE attacks or out-of-band data exfiltration.", d.name),
-				))
-			} else {
-				hasExtEntity = true
-				out = append(out, xmlRawFinding(
-					xmlExternalEntityRuleID,
-					rel,
-					d.line,
-					fmt.Sprintf("External general entity %q can lead to file disclosure or XXE vulnerabilities.", d.name),
-				))
-			}
-		} else if !d.isParam {
-			internalMap[d.name] = d.val
-			internalLines[d.name] = d.line
-		}
+	for _, d := range scan.externalGeneral {
+		out = append(out, xmlRawFinding(
+			xmlExternalEntityRuleID,
+			rel,
+			d.line,
+			fmt.Sprintf("External general entity %q can lead to file disclosure or XXE vulnerabilities.", d.name),
+		))
 	}
 
 	reportedExpansion := make(map[string]bool)
-	for name, val := range internalMap {
-		declLine := internalLines[name]
+	hasEntityExpansion := false
+
+	if scan.expansionOverflow {
+		hasEntityExpansion = true
+		out = append(out, xmlRawFinding(
+			xmlEntityExpansionRuleID,
+			rel,
+			scan.doctypeLine,
+			"Excessive number of entity declarations detected, indicating potential entity-expansion DoS (Billion Laughs).",
+		))
+	}
+
+	for name, val := range scan.expansionEntities {
+		declLine := scan.expansionLines[name]
 		visited := make(map[string]bool)
-		isDangerous, _ := hasDangerousExpansion(name, val, internalMap, visited, 0)
+		isDangerous, _ := hasDangerousExpansion(name, val, scan.expansionEntities, visited, 0)
 		if isDangerous {
 			hasEntityExpansion = true
 			if !reportedExpansion[name] {
@@ -97,11 +103,11 @@ func scanXMLDTD(rel string, content []byte) []ports.CodeAnalysisRawFinding {
 		}
 	}
 
-	if doctypeLine > 0 && !hasExtDTD && !hasExtEntity && !hasExtParamEntity && !hasEntityExpansion {
+	if scan.doctypeLine > 0 && !scan.externalDTD && len(scan.externalGeneral) == 0 && len(scan.externalParam) == 0 && !hasEntityExpansion {
 		out = append(out, xmlRawFinding(
 			xmlDoctypePresentRuleID,
 			rel,
-			doctypeLine,
+			scan.doctypeLine,
 			"XML DOCTYPE declaration is present. Review parser configuration to ensure DTD processing and entity expansion are disabled.",
 		))
 	}
@@ -172,11 +178,14 @@ const (
 	stateEntity
 )
 
-func parseXMLDeclarations(content []byte) (int, bool, []entityDecl) {
+func parseXMLDeclarations(content []byte) xmlDeclarationScan {
+	scan := xmlDeclarationScan{
+		decoderEntities:   make(map[string]string),
+		expansionEntities: make(map[string]string),
+		expansionLines:    make(map[string]int),
+	}
+
 	line := 1
-	var doctypeLine int
-	var hasExtDTD bool
-	var decls []entityDecl
 	var entityBuf []byte
 	var doctypeBuf []byte
 	var entityStartLine int
@@ -208,7 +217,7 @@ func parseXMLDeclarations(content []byte) (int, bool, []entityDecl) {
 		case stateNormal:
 			if content[i] == '<' && hasPrefixExact(content, i, "<!DOCTYPE") {
 				if i+9 < len(content) && isXMLSpaceByte(content[i+9]) {
-					doctypeLine = line
+					scan.doctypeLine = line
 					state = stateDoctype
 					doctypeBuf = doctypeBuf[:0]
 					i += 9
@@ -237,7 +246,7 @@ func parseXMLDeclarations(content []byte) (int, bool, []entityDecl) {
 			}
 			if content[i] == '[' {
 				if checkExternalDTD(doctypeBuf) {
-					hasExtDTD = true
+					scan.externalDTD = true
 				}
 				state = stateInternalSubset
 				i++
@@ -245,7 +254,7 @@ func parseXMLDeclarations(content []byte) (int, bool, []entityDecl) {
 			}
 			if content[i] == '>' {
 				if checkExternalDTD(doctypeBuf) {
-					hasExtDTD = true
+					scan.externalDTD = true
 				}
 				state = stateNormal
 				i++
@@ -307,9 +316,29 @@ func parseXMLDeclarations(content []byte) (int, bool, []entityDecl) {
 			if content[i] == '>' {
 				if decl := parseEntityBuffer(entityBuf); decl != nil {
 					decl.line = entityStartLine
-					decls = append(decls, *decl)
-					if len(decls) >= maxEntityDeclarations {
-						return doctypeLine, hasExtDTD, decls
+					
+					if decl.isExt {
+						if decl.isParam {
+							if len(scan.externalParam) < maxEntityDeclarations {
+								scan.externalParam = append(scan.externalParam, *decl)
+							}
+						} else {
+							if len(scan.externalGeneral) < maxEntityDeclarations {
+								scan.externalGeneral = append(scan.externalGeneral, *decl)
+							}
+						}
+					} else if !decl.isParam {
+						// Limit decoder entries to prevent memory exhaustion
+						if len(scan.decoderEntities) < 10000 {
+							scan.decoderEntities[decl.name] = "x"
+						}
+						
+						if len(scan.expansionEntities) < maxEntityDeclarations {
+							scan.expansionEntities[decl.name] = decl.val
+							scan.expansionLines[decl.name] = decl.line
+						} else {
+							scan.expansionOverflow = true
+						}
 					}
 				}
 				state = stateInternalSubset
@@ -320,7 +349,7 @@ func parseXMLDeclarations(content []byte) (int, bool, []entityDecl) {
 			i++
 		}
 	}
-	return doctypeLine, hasExtDTD, decls
+	return scan
 }
 
 func hasPrefixExact(content []byte, i int, prefix string) bool {

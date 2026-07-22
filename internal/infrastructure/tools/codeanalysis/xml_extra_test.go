@@ -1,7 +1,9 @@
 package codeanalysis
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -243,6 +245,65 @@ func TestXMLSecurity_ExtraRules(t *testing.T) {
 		for _, f := range findings {
 			if f.RuleID == xmlHardcodedSecretRuleID {
 				t.Errorf("unexpected %s for local entity ref", xmlHardcodedSecretRuleID)
+			}
+		}
+	})
+}
+
+func TestXMLDTD_OverflowDeclarations(t *testing.T) {
+	t.Run("external general entity after 500 benign entities is detected", func(t *testing.T) {
+		var xmlData strings.Builder
+		xmlData.WriteString("<!DOCTYPE root [\n")
+		for i := 0; i < 500; i++ {
+			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+		}
+		xmlData.WriteString("  <!ENTITY xxe SYSTEM \"file:///etc/passwd\">\n")
+		xmlData.WriteString("]><root/>")
+
+		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
+		foundXXE := false
+		for _, f := range findings {
+			if f.RuleID == xmlExternalEntityRuleID {
+				foundXXE = true
+			}
+		}
+		if !foundXXE {
+			t.Errorf("expected %s for external entity after cap", xmlExternalEntityRuleID)
+		}
+	})
+
+	t.Run("more than 500 internal entities emit overflow", func(t *testing.T) {
+		var xmlData strings.Builder
+		xmlData.WriteString("<!DOCTYPE root [\n")
+		for i := 0; i < 501; i++ {
+			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+		}
+		xmlData.WriteString("]><root/>")
+		
+		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
+		foundOverflow := false
+		for _, f := range findings {
+			if f.RuleID == xmlEntityExpansionRuleID && strings.Contains(f.Description, "Excessive number") {
+				foundOverflow = true
+			}
+		}
+		if !foundOverflow {
+			t.Errorf("expected %s for entity overflow", xmlEntityExpansionRuleID)
+		}
+	})
+
+	t.Run("501 internal entities + reference to entity 501 does not emit not-well-formed", func(t *testing.T) {
+		var xmlData strings.Builder
+		xmlData.WriteString("<!DOCTYPE root [\n")
+		for i := 0; i <= 501; i++ {
+			xmlData.WriteString(fmt.Sprintf("  <!ENTITY e%d \"value\">\n", i))
+		}
+		xmlData.WriteString("]><root>&e501;</root>")
+
+		findings := scanXMLFile("test.xml", []byte(xmlData.String()))
+		for _, f := range findings {
+			if f.RuleID == xmlNotWellFormedRuleID {
+				t.Errorf("unexpected %s for entity 501 ref", xmlNotWellFormedRuleID)
 			}
 		}
 	})
