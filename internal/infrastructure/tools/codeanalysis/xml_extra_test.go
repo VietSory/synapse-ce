@@ -3,6 +3,7 @@ package codeanalysis
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -344,4 +345,168 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestXML_FallbackSuppression(t *testing.T) {
+	// Undeclared prefix is non-terminal, so malformed attribute on the same line should STILL be reported by fallback
+	content := []byte(`<root p:x="1" bad=oops/>`)
+	findings := scanXMLFile("test.xml", content)
+
+	hasUndeclared := false
+	hasFallback := false
+	for _, f := range findings {
+		if f.RuleID == xmlUndeclaredPrefixRuleID {
+			hasUndeclared = true
+		}
+		if f.RuleID == xmlNotWellFormedRuleID {
+			hasFallback = true
+		}
+	}
+
+	if !hasUndeclared || !hasFallback {
+		t.Errorf("expected both undeclared prefix and not-well-formed fallback for non-terminal failure line, got: %+v", findings)
+	}
+}
+
+func TestXML_FullPipelineSuppression(t *testing.T) {
+	tests := []struct {
+		name       string
+		xml        string
+		expected   []string
+		unexpected []string
+	}{
+		{
+			name:       "mismatched tag only",
+			xml:        `<root><item></root>`,
+			expected:   []string{xmlMismatchedTagRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "multiple root elements only",
+			xml:        `<first/><second/>`,
+			expected:   []string{xmlMultipleRootElementsRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "invalid character reference only",
+			xml:        `<root>&#0;</root>`,
+			expected:   []string{xmlInvalidCharacterReferenceRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "invalid character reference in attribute only",
+			xml:        `<root a="&#0;"/>`,
+			expected:   []string{xmlInvalidCharacterReferenceRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "malformed attribute + mismatched tag",
+			xml:        `<root bad=oops><a></b></root>`,
+			expected:   []string{xmlMismatchedTagRuleID, xmlMismatchedTagRuleID, xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name: "invalid comment inside DTD",
+			xml: `<!DOCTYPE root [
+  <!-- invalid -- comment -->
+  <!ELEMENT root EMPTY>
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
+			unexpected: []string{},
+		},
+		{
+			name: "DTD comment body ending in -",
+			xml: `<!DOCTYPE root [
+  <!-- invalid --->
+  <!ELEMENT root EMPTY>
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
+			unexpected: []string{},
+		},
+		{
+			name: "unterminated DTD comment",
+			xml: `<!DOCTYPE root [
+  <!-- invalid 
+  <!ELEMENT root EMPTY>
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "closed invalid comment",
+			xml:        `<root><!-- invalid -- comment --></root>`,
+			expected:   []string{xmlInvalidCommentRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "comment ending in hyphen",
+			xml:        `<root><!-- invalid ---></root>`,
+			expected:   []string{xmlInvalidCommentRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "valid comment",
+			xml:        `<root><!-- valid comment --></root>`,
+			expected:   []string{},
+			unexpected: []string{xmlInvalidCommentRuleID, xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "clean mismatched tag",
+			xml:        `<a></b>`,
+			expected:   []string{xmlMismatchedTagRuleID, xmlUnclosedElementRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "clean mismatched tag with whitespace",
+			xml:        `<a></b   >`,
+			expected:   []string{xmlMismatchedTagRuleID, xmlUnclosedElementRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "malformed end tag attribute",
+			xml:        `<a></b bad=oops>`,
+			expected:   []string{xmlMismatchedTagRuleID, xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed end tag token",
+			xml:        `<a></b x>`,
+			expected:   []string{xmlMismatchedTagRuleID, xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "nested malformed end tag",
+			xml:        `<root><a></wrong bad=oops></root>`,
+			expected:   []string{xmlMismatchedTagRuleID, xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := scanXMLFile("test.xml", []byte(tc.xml))
+			var got []string
+			for _, f := range findings {
+				got = append(got, f.RuleID)
+			}
+			sort.Strings(got)
+			expected := make([]string, len(tc.expected))
+			copy(expected, tc.expected)
+			sort.Strings(expected)
+
+			if len(got) != len(expected) {
+				t.Errorf("expected %v, got %v\nfindings: %+v", expected, got, findings)
+			} else {
+				for i := range got {
+					if got[i] != expected[i] {
+						t.Errorf("expected %v, got %v\nfindings: %+v", expected, got, findings)
+						break
+					}
+				}
+			}
+		})
+	}
 }

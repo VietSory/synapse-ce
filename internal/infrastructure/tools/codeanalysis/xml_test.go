@@ -33,10 +33,10 @@ func TestXMLBugRules(t *testing.T) {
 	if !byRuleFile[xmlDuplicateAttributeRuleID+":duplicate-attribute.xml"] {
 		t.Fatalf("expected %s on duplicate-attribute.xml, got %+v", xmlDuplicateAttributeRuleID, findings)
 	}
-	if !byRuleFile[xmlNotWellFormedRuleID+":not-well-formed.xml"] {
-		t.Fatalf("expected %s on not-well-formed.xml, got %+v", xmlNotWellFormedRuleID, findings)
+	if !byRuleFile[xmlMismatchedTagRuleID+":not-well-formed.xml"] {
+		t.Fatalf("expected %s on not-well-formed.xml, got %+v", xmlMismatchedTagRuleID, findings)
 	}
-	if byRuleFile[xmlDuplicateAttributeRuleID+":compliant.xml"] || byRuleFile[xmlNotWellFormedRuleID+":compliant.xml"] {
+	if byRuleFile[xmlDuplicateAttributeRuleID+":compliant.xml"] || byRuleFile[xmlMismatchedTagRuleID+":compliant.xml"] {
 		t.Fatalf("compliant.xml unexpectedly produced XML bug findings: %+v", findings)
 	}
 }

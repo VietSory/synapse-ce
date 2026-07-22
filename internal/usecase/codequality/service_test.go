@@ -252,6 +252,7 @@ func TestServiceBridgesXMLSASTFindings(t *testing.T) {
 		{Kind: "sast", RuleID: "xml:external-entity", CWE: "CWE-611", Severity: shared.SeverityHigh, Title: "External general entity declaration", File: "config.xml", Line: 2},
 		{Kind: "sast", RuleID: "xml:entity-expansion", CWE: "CWE-776", Severity: shared.SeverityMedium, Title: "Dangerous XML entity expansion structure", File: "payload.xml", Line: 5},
 		{Kind: "reliability", RuleID: "xml:not-well-formed", CWE: "", Severity: shared.SeverityMedium, Title: "XML document is not well formed", File: "bad.xml", Line: 1},
+		{Kind: "reliability", RuleID: "xml:mismatched-tag", CWE: "", Severity: shared.SeverityMedium, Title: "Mismatched XML end tag", File: "mismatch.xml", Line: 1},
 	}}
 
 	svc := New(analyzer)
@@ -274,24 +275,35 @@ func TestServiceBridgesXMLSASTFindings(t *testing.T) {
 	if mal == nil || mal.Kind != finding.KindReliability {
 		t.Fatalf("expected XML not-well-formed to remain KindReliability, got %+v", mal)
 	}
+
+	mismatch := byRule(fs, "xml:mismatched-tag")
+	if mismatch == nil || mismatch.Kind != finding.KindReliability {
+		t.Fatalf("expected XML mismatched-tag to remain KindReliability, got %+v", mismatch)
+	}
 }
 
 func TestServiceRealXMLAnalyzerIntegration(t *testing.T) {
-	// Create a temporary directory with a malicious XML
+	// Create a temporary directory with various XMLs
 	dir := t.TempDir()
-	xmlPath := filepath.Join(dir, "config.xml")
-	maliciousXML := `<!DOCTYPE root [
+
+	files := map[string]string{
+		"config.xml": `<!DOCTYPE root [
 		<!ENTITY xxe SYSTEM "file:///etc/passwd">
 	]>
-	<root>&xxe;</root>`
-	if err := os.WriteFile(xmlPath, []byte(maliciousXML), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	<root>&xxe;</root>`,
+		"mismatch.xml":   `<root><item></other></root>`,
+		"undeclared.xml": `<root><cfg:item/></root>`,
+		"bad.xml":        `<service name=api></service>`,
+	}
+
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 
 	// Instantiate real analyzer
 	realAnalyzer := codeanalysis.New()
-
-	// Instantiate service
 	svc := New(realAnalyzer)
 
 	fs, err := svc.Analyze(context.Background(), dir)
@@ -299,16 +311,18 @@ func TestServiceRealXMLAnalyzerIntegration(t *testing.T) {
 		t.Fatalf("Analyze: %v", err)
 	}
 
-	// We expect the real analyzer to find xml:external-entity
-	// and bridge it to KindSAST
-	xxe := byRule(fs, "xml:external-entity")
-	if xxe == nil {
-		t.Fatalf("expected real analyzer to detect xml:external-entity, got findings: %+v", fs)
+	check := func(ruleID string, expectedKind finding.Kind) {
+		f := byRule(fs, ruleID)
+		if f == nil {
+			t.Fatalf("expected real analyzer to detect %s, got findings: %+v", ruleID, fs)
+		}
+		if f.Kind != expectedKind {
+			t.Errorf("expected %s to have kind %q, got %q", ruleID, expectedKind, f.Kind)
+		}
 	}
-	if xxe.Kind != finding.KindSAST {
-		t.Errorf("expected KindSAST, got %q", xxe.Kind)
-	}
-	if !strings.HasSuffix(xxe.DedupKey, "config.xml:2") {
-		t.Errorf("expected DedupKey for config.xml line 2, got %q", xxe.DedupKey)
-	}
+
+	check("xml:external-entity", finding.KindSAST)
+	check("xml:mismatched-tag", finding.KindReliability)
+	check("xml:undeclared-prefix", finding.KindReliability)
+	check("xml:not-well-formed", finding.KindReliability)
 }

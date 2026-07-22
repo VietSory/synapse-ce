@@ -2139,7 +2139,13 @@ xml:external-entity
 xml:external-parameter-entity
 xml:external-schema-location
 xml:hardcoded-secret
+xml:invalid-character-reference
+xml:invalid-comment
+xml:mismatched-tag
+xml:multiple-root-elements
 xml:not-well-formed
+xml:unclosed-element
+xml:undeclared-prefix
 xml:xinclude
 xpath-injection
 xxe-insecure-xml-parsing
