@@ -31,6 +31,22 @@ const (
 	xmlUndeclaredPrefixRuleID          = "xml:undeclared-prefix"
 	xmlInvalidCharacterReferenceRuleID = "xml:invalid-character-reference"
 	xmlInvalidCommentRuleID            = "xml:invalid-comment"
+
+	// Maintainability rules.
+	xmlSchemaMissingRuleID                 = "xml:schema-missing"
+	xmlDuplicateSchemaNamespaceRuleID      = "xml:duplicate-schema-namespace"
+	xmlUnusedSchemaLocationRuleID          = "xml:unused-schema-location"
+	xmlUnusedNamespaceDeclarationRuleID    = "xml:unused-namespace-declaration"
+	xmlRedundantNamespaceDeclarationRuleID = "xml:redundant-namespace-declaration"
+	xmlNamespacePrefixShadowingRuleID      = "xml:namespace-prefix-shadowing"
+	xmlMultiplePrefixesSameNamespaceRuleID = "xml:multiple-prefixes-same-namespace"
+	xmlExcessiveNestingDepthRuleID         = "xml:excessive-nesting-depth"
+	xmlTooManyAttributesRuleID             = "xml:too-many-attributes"
+	xmlTooManyChildElementsRuleID          = "xml:too-many-child-elements"
+	xmlOversizedElementRuleID              = "xml:oversized-element"
+	xmlCommentedOutMarkupRuleID            = "xml:commented-out-markup"
+	xmlRedundantCDATASectionRuleID         = "xml:redundant-cdata-section"
+	xmlOversizedCommentRuleID              = "xml:oversized-comment"
 )
 
 type xmlRule struct {
@@ -189,6 +205,133 @@ func builtinXMLRules() []xmlRule {
 			ruleType: domainrule.TypeBug,
 			quality:  domainrule.QualityReliability,
 		},
+		// Maintainability rules.
+		{
+			id:       xmlSchemaMissingRuleID,
+			title:    "XML document has no schema association",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityInfo,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlDuplicateSchemaNamespaceRuleID,
+			title:    "Schema location repeats a namespace",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlUnusedSchemaLocationRuleID,
+			title:    "Schema location targets an unused namespace",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityInfo,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlUnusedNamespaceDeclarationRuleID,
+			title:    "Namespace declaration is never used",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlRedundantNamespaceDeclarationRuleID,
+			title:    "Namespace declaration repeats an inherited binding",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityInfo,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlNamespacePrefixShadowingRuleID,
+			title:    "Namespace prefix is rebound in a nested scope",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlMultiplePrefixesSameNamespaceRuleID,
+			title:    "One namespace uses multiple prefixes",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityInfo,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlExcessiveNestingDepthRuleID,
+			title:    "XML structure is excessively nested",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlTooManyAttributesRuleID,
+			title:    "XML element has too many attributes",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlTooManyChildElementsRuleID,
+			title:    "XML element contains too many heterogeneous children",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlOversizedElementRuleID,
+			title:    "XML element is excessively large",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlCommentedOutMarkupRuleID,
+			title:    "XML comment contains disabled markup",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlRedundantCDATASectionRuleID,
+			title:    "CDATA section contains no markup-sensitive characters",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityInfo,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
+		{
+			id:       xmlOversizedCommentRuleID,
+			title:    "XML comment is excessively large",
+			kind:     kindQuality,
+			cwe:      "",
+			severity: shared.SeverityInfo,
+			ruleType: domainrule.TypeCodeSmell,
+			quality:  domainrule.QualityMaintainability,
+		},
 	}
 }
 
@@ -255,6 +398,13 @@ func scanXMLFile(rel string, content []byte) []ports.CodeAnalysisRawFinding {
 	}
 
 	sortXMLFindings(out)
+
+	// 5. Maintainability scan — only when parser accepted the full document.
+	if parserFailureOffset < 0 {
+		out = append(out, scanXMLMaintainability(rel, content)...)
+		sortXMLFindings(out)
+	}
+
 	return out
 }
 

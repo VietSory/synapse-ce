@@ -532,8 +532,11 @@ func TestXML_FullPipelineSuppression(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			findings := scanXMLFile("test.xml", []byte(tc.xml))
-			var got []string
+			got := make([]string, 0)
 			for _, f := range findings {
+				if f.Kind == kindQuality {
+					continue
+				}
 				got = append(got, f.RuleID)
 			}
 			sort.Strings(got)
@@ -541,15 +544,8 @@ func TestXML_FullPipelineSuppression(t *testing.T) {
 			copy(expected, tc.expected)
 			sort.Strings(expected)
 
-			if len(got) != len(expected) {
+			if !reflect.DeepEqual(got, expected) {
 				t.Errorf("expected %v, got %v\nfindings: %+v", expected, got, findings)
-			} else {
-				for i := range got {
-					if got[i] != expected[i] {
-						t.Errorf("expected %v, got %v\nfindings: %+v", expected, got, findings)
-						break
-					}
-				}
 			}
 		})
 	}
@@ -708,6 +704,9 @@ func TestXML_TokenCompletenessMatrix(t *testing.T) {
 			res := scanXMLFile("test.xml", []byte(tt.xml))
 			findingIDs := []string{}
 			for _, f := range res {
+				if f.Kind == kindQuality {
+					continue
+				}
 				findingIDs = append(findingIDs, f.RuleID)
 			}
 			sort.Strings(findingIDs)
