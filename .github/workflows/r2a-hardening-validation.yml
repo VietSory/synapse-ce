@@ -1,0 +1,37 @@
+name: R2A Hardening Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 9
+      - name: Install web dependencies
+        run: cd web && pnpm install --frozen-lockfile
+      - name: Focused race tests
+        run: go test -race ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve ./internal/usecase/ports
+      - name: Repeated shuffled focused tests
+        run: go test -count=20 -shuffle=on ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve ./internal/usecase/ports
+      - name: make build
+        run: make build
+      - name: make vet
+        run: make vet
+      - name: make test
+        run: make test
+      - name: make typecheck
+        run: make typecheck
