@@ -1,0 +1,68 @@
+name: R2B Deep Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify gofmt
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(gofmt -l internal/domain/jsresolution internal/infrastructure/tools/jsresolve)
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+
+      - name: Focused tests
+        run: go test ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve
+
+      - name: Focused race tests
+        run: go test -race ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve
+
+      - name: Repeated shuffled tests
+        run: go test -shuffle=on -count=20 ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve
+
+      - name: Make build
+        run: make build
+
+      - name: Make vet
+        run: make vet
+
+      - name: Make test
+        run: make test
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 9
+
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Make typecheck
+        run: make typecheck
+
+      - name: Web production build
+        run: pnpm --dir web build
