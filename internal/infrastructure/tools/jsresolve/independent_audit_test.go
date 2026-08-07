@@ -67,6 +67,24 @@ func TestAuditExtendedGlobCannotSilentlyDisappear(t *testing.T) {
 	}
 }
 
+func TestAuditNPMPositiveOverrideAfterNegationCannotSilentlyDisappear(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeJSON(t, filepath.Join(root, "package.json"), map[string]any{
+		"name": "root", "private": true, "packageManager": "npm@12.0.1",
+		"workspaces": []string{"packages/**", "!packages/b/**", "packages/b/a"},
+	})
+	writeJSON(t, filepath.Join(root, "packages", "b", "a", "package.json"), map[string]any{"name": "a"})
+
+	got, err := NewInventoryBuilder().Build(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !packagesByPath(got.Packages)["packages/b/a"].Workspace && got.Complete {
+		t.Fatalf("npm positive override was silently converted to permanent exclusion: %#v", got)
+	}
+}
+
 func TestAuditPNPMYAMLAnchorCannotSilentlyDisappear(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
