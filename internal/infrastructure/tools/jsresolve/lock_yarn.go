@@ -137,7 +137,7 @@ func yarnRequestIsNPMRegistry(name, request string) bool {
 	}
 	if strings.HasPrefix(request, "npm:") {
 		target := strings.TrimPrefix(request, "npm:")
-		if targetName := yarnLockSpecName(target); targetName != "" {
+		if targetName := packageAliasTargetName(target); targetName != "" {
 			normalized, err := jsresolution.NormalizePackageName(targetName)
 			return err == nil && normalized == name
 		}

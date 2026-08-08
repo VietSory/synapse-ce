@@ -30,6 +30,51 @@ func TestResolverR2CNonRegistryManifestRequestNeedsLockEvidence(t *testing.T) {
 	}
 }
 
+func TestResolverR2CBareNPMAliasNeedsIdentityEvidence(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeJSON(t, r2bJoin(root, "package.json"), map[string]any{
+		"name": "root", "dependencies": map[string]string{"alias": "npm:lodash"},
+	})
+	doc := &sbom.SBOM{Components: []sbom.Component{
+		{Name: "alias", Version: "4.17.21", PURL: "pkg:npm/alias@4.17.21"},
+		{Name: "lodash", Version: "4.17.21", PURL: "pkg:npm/lodash@4.17.21"},
+	}}
+
+	got, err := NewResolver().Resolve(context.Background(), root, graphWithExternal("src/index.ts", "alias"), doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Imports[0].Status == jsresolution.StatusComponent || got.Complete {
+		t.Fatalf("bare npm alias became a definitive component under the alias name: %#v coverage=%#v", got.Imports[0], got.Coverage)
+	}
+}
+
+func TestResolverR2CYarnBareNPMAliasCannotSelectAliasComponent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeJSON(t, r2bJoin(root, "package.json"), map[string]any{
+		"name":           "root",
+		"packageManager": "yarn@4.9.0",
+		"dependencies":   map[string]string{"alias": "npm:lodash"},
+	})
+	writeFile(t, r2bJoin(root, "yarn.lock"), `alias@npm:lodash:
+  version: 4.17.21
+`)
+	doc := &sbom.SBOM{Components: []sbom.Component{
+		{Name: "alias", Version: "4.17.21", PURL: "pkg:npm/alias@4.17.21"},
+		{Name: "lodash", Version: "4.17.21", PURL: "pkg:npm/lodash@4.17.21"},
+	}}
+
+	got, err := NewResolver().Resolve(context.Background(), root, graphWithExternal("src/index.ts", "alias"), doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Imports[0].Status == jsresolution.StatusComponent || got.Complete {
+		t.Fatalf("Yarn bare npm alias selected an exact component under the alias name: %#v coverage=%#v", got.Imports[0], got.Coverage)
+	}
+}
+
 func TestResolverR2CExternalLockCannotEraseIdentityChangingManifestProtocol(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
