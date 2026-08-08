@@ -246,7 +246,7 @@ func buildCompleteLockContext(ctx context.Context, root string, packages []jsres
 }
 
 func classifyLockParseCoverage(err error) jsresolution.CoverageIssueKind {
-	if errors.Is(err, errUnsupportedPNPMImporterLayout) || errors.Is(err, errUnsupportedNPMLockLayout) {
+	if errors.Is(err, errUnsupportedPNPMImporterLayout) || errors.Is(err, errUnsupportedNPMLockLayout) || errors.Is(err, errUnsupportedYarnLockLayout) {
 		return jsresolution.CoverageUnsupportedMetadata
 	}
 	return jsresolution.CoverageMalformedMetadata

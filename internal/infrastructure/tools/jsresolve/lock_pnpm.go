@@ -15,20 +15,40 @@ import (
 var errUnsupportedPNPMImporterLayout = errors.New("unsupported pnpm importer layout")
 
 type pnpmImporterDependency struct {
-	importer  string
-	name      string
-	specifier string
-	version   string
+	importer      string
+	name          string
+	specifier     string
+	version       string
+	specifierSeen bool
+	versionSeen   bool
 }
 
 func parsePNPMLockSelections(ctx context.Context, raw rawLockFile, workspaces map[string][]jsresolution.PackageIdentity, limits resolverLimits) ([]lockSelection, []jsresolution.CoverageIssue, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(raw.content))
+	selectedContent, err := selectPNPMV9LockDocument(raw.content, limits.maxLockLineBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(selectedContent))
 	scanner.Buffer(make([]byte, 0, 64*1024), limits.maxLockLineBytes)
-	inImporters := false
+	section := ""
+	lockfileVersion := ""
+	seenImporters := false
+	seenPackages := false
+	seenSnapshots := false
 	currentImporter := ""
 	currentGroup := ""
 	var current *pnpmImporterDependency
 	var records []pnpmImporterDependency
+	packageIdentities := map[string]struct{}{}
+	snapshotIdentities := map[string]struct{}{}
+	packageEntries := 0
+	snapshotEntries := 0
+	topSeen := map[string]struct{}{}
+	importerSeen := map[string]struct{}{}
+	groupSeen := map[string]struct{}{}
+	dependencySeen := map[string]struct{}{}
+	packageSeen := map[string]struct{}{}
+	snapshotSeen := map[string]struct{}{}
 	flush := func() {
 		if current != nil {
 			records = append(records, *current)
@@ -42,8 +62,9 @@ func parsePNPMLockSelections(ctx context.Context, raw rawLockFile, workspaces ma
 		}
 		rawLine := scanner.Text()
 		if strings.ContainsRune(rawLine, '\t') {
-			if inImporters || strings.TrimSpace(rawLine) == "importers:" {
-				return nil, nil, fmt.Errorf("pnpm-lock.yaml importers use tab indentation")
+			plain := strings.TrimSpace(rawLine)
+			if section == "importers" || section == "packages" || section == "snapshots" || plain == "importers:" || plain == "packages:" || plain == "snapshots:" {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml uses tab indentation in a correlated section")
 			}
 			continue
 		}
@@ -54,77 +75,173 @@ func parsePNPMLockSelections(ctx context.Context, raw rawLockFile, workspaces ma
 		indent, _ := yamlIndent(rawLine)
 		if indent == 0 {
 			flush()
-			if plain == "importers:" {
-				inImporters = true
-				currentImporter, currentGroup = "", ""
-				continue
+			currentImporter, currentGroup = "", ""
+			key, value, hasValue, err := parseSimpleYAMLMapping(plain)
+			if err != nil {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml top-level metadata: %w", err)
 			}
-			if inImporters {
-				break
+			switch key {
+			case "lockfileVersion", "importers", "packages", "snapshots":
+				if _, duplicate := topSeen[key]; duplicate {
+					return nil, nil, fmt.Errorf("pnpm-lock.yaml repeats top-level key %q", key)
+				}
+				topSeen[key] = struct{}{}
 			}
-			continue
-		}
-		if !inImporters {
+			switch key {
+			case "lockfileVersion":
+				if !hasValue || value == "" {
+					return nil, nil, fmt.Errorf("%w: pnpm-lock.yaml has no scalar lockfileVersion", errUnsupportedPNPMImporterLayout)
+				}
+				lockfileVersion = value
+				section = ""
+			case "importers":
+				if hasValue {
+					return nil, nil, fmt.Errorf("%w: pnpm-lock.yaml importers must be a mapping", errUnsupportedPNPMImporterLayout)
+				}
+				seenImporters = true
+				section = "importers"
+			case "packages":
+				if hasValue {
+					return nil, nil, fmt.Errorf("%w: pnpm-lock.yaml packages must be a mapping", errUnsupportedPNPMImporterLayout)
+				}
+				seenPackages = true
+				section = "packages"
+			case "snapshots":
+				if hasValue {
+					return nil, nil, fmt.Errorf("%w: pnpm-lock.yaml snapshots must be a mapping", errUnsupportedPNPMImporterLayout)
+				}
+				seenSnapshots = true
+				section = "snapshots"
+			default:
+				section = ""
+			}
 			continue
 		}
 
-		key, value, hasValue, err := parseSimpleYAMLMapping(plain)
-		if err != nil {
-			return nil, nil, fmt.Errorf("pnpm-lock.yaml importers: %w", err)
-		}
-		switch indent {
-		case 2:
-			flush()
-			if hasValue {
-				return nil, nil, fmt.Errorf("pnpm-lock.yaml importer %q must be a mapping", key)
+		switch section {
+		case "importers":
+			key, value, hasValue, err := parseSimpleYAMLMapping(plain)
+			if err != nil {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml importers: %w", err)
 			}
-			currentImporter = key
-			currentGroup = ""
-		case 4:
-			flush()
-			if currentImporter == "" {
-				return nil, nil, fmt.Errorf("pnpm-lock.yaml dependency group has no importer")
-			}
-			if hasValue {
+			switch indent {
+			case 2:
+				flush()
+				if hasValue {
+					return nil, nil, fmt.Errorf("pnpm-lock.yaml importer %q must be a mapping", key)
+				}
+				if _, duplicate := importerSeen[key]; duplicate {
+					return nil, nil, fmt.Errorf("pnpm-lock.yaml repeats importer %q", boundedCoverageText(key))
+				}
+				importerSeen[key] = struct{}{}
+				currentImporter = key
 				currentGroup = ""
-				continue
-			}
-			switch key {
-			case "dependencies", "devDependencies", "optionalDependencies":
-				currentGroup = key
+			case 4:
+				flush()
+				if currentImporter == "" {
+					return nil, nil, fmt.Errorf("pnpm-lock.yaml dependency group has no importer")
+				}
+				if hasValue {
+					currentGroup = ""
+					continue
+				}
+				switch key {
+				case "dependencies", "devDependencies", "optionalDependencies":
+					groupKey := currentImporter + "\x00" + key
+					if _, duplicate := groupSeen[groupKey]; duplicate {
+						return nil, nil, fmt.Errorf("pnpm-lock.yaml importer %q repeats dependency group %q", boundedCoverageText(currentImporter), key)
+					}
+					groupSeen[groupKey] = struct{}{}
+					currentGroup = key
+				default:
+					currentGroup = ""
+				}
+			case 6:
+				flush()
+				if currentImporter == "" || currentGroup == "" {
+					continue
+				}
+				dependencyKey := currentImporter + "\x00" + currentGroup + "\x00" + key
+				if _, duplicate := dependencySeen[dependencyKey]; duplicate {
+					return nil, nil, fmt.Errorf("pnpm-lock.yaml importer %q repeats dependency %q in %s", boundedCoverageText(currentImporter), boundedCoverageText(key), currentGroup)
+				}
+				dependencySeen[dependencyKey] = struct{}{}
+				current = &pnpmImporterDependency{importer: currentImporter, name: key}
+				if hasValue {
+					current.version = value
+					current.versionSeen = true
+					flush()
+				}
+			case 8:
+				if current == nil {
+					continue
+				}
+				if !hasValue {
+					return nil, nil, fmt.Errorf("pnpm-lock.yaml dependency field %q must be scalar", key)
+				}
+				switch key {
+				case "specifier":
+					if current.specifierSeen {
+						return nil, nil, fmt.Errorf("pnpm-lock.yaml dependency %q repeats specifier", boundedCoverageText(current.name))
+					}
+					current.specifierSeen = true
+					current.specifier = value
+				case "version":
+					if current.versionSeen {
+						return nil, nil, fmt.Errorf("pnpm-lock.yaml dependency %q repeats version", boundedCoverageText(current.name))
+					}
+					current.versionSeen = true
+					current.version = value
+				}
 			default:
-				currentGroup = ""
+				if indent < 6 {
+					flush()
+				}
 			}
-		case 6:
-			flush()
-			if currentImporter == "" || currentGroup == "" {
+			if len(records) > limits.maxLockBindings {
+				return nil, nil, fmt.Errorf("pnpm importer dependency count exceeds budget (%d)", limits.maxLockBindings)
+			}
+		case "packages":
+			if indent != 2 {
 				continue
 			}
-			current = &pnpmImporterDependency{importer: currentImporter, name: key}
+			key, _, hasValue, err := parseSimpleYAMLMapping(plain)
+			if err != nil {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml packages: %w", err)
+			}
 			if hasValue {
-				current.version = value
-				flush()
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml package %q must be a mapping", boundedCoverageText(key))
 			}
-		case 8:
-			if current == nil {
+			if _, duplicate := packageSeen[key]; duplicate {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml repeats package %q", boundedCoverageText(key))
+			}
+			packageSeen[key] = struct{}{}
+			packageEntries++
+			if packageEntries > limits.maxLockEntries {
+				return nil, nil, fmt.Errorf("pnpm package entry count exceeds budget (%d)", limits.maxLockEntries)
+			}
+			if name, version, ok := pnpmV9PackageIdentity(key); ok {
+				packageIdentities[pnpmPackageIdentityKey(name, version)] = struct{}{}
+			}
+		case "snapshots":
+			if indent != 2 {
 				continue
 			}
-			if !hasValue {
-				return nil, nil, fmt.Errorf("pnpm-lock.yaml dependency field %q must be scalar", key)
+			key, err := parseSimpleYAMLMappingKey(plain)
+			if err != nil {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml snapshots: %w", err)
 			}
-			switch key {
-			case "specifier":
-				current.specifier = value
-			case "version":
-				current.version = value
+			if _, duplicate := snapshotSeen[key]; duplicate {
+				return nil, nil, fmt.Errorf("pnpm-lock.yaml repeats snapshot %q", boundedCoverageText(key))
 			}
-		default:
-			if indent < 6 {
-				flush()
+			snapshotSeen[key] = struct{}{}
+			snapshotEntries++
+			if snapshotEntries > limits.maxLockEntries {
+				return nil, nil, fmt.Errorf("pnpm snapshot entry count exceeds budget (%d)", limits.maxLockEntries)
 			}
-		}
-		if len(records) > limits.maxLockBindings {
-			return nil, nil, fmt.Errorf("pnpm importer dependency count exceeds budget (%d)", limits.maxLockBindings)
+			if name, version, ok := pnpmV9PackageIdentity(key); ok {
+				snapshotIdentities[pnpmPackageIdentityKey(name, version)] = struct{}{}
+			}
 		}
 	}
 	flush()
@@ -134,8 +251,11 @@ func parsePNPMLockSelections(ctx context.Context, raw rawLockFile, workspaces ma
 	if err := scanner.Err(); err != nil {
 		return nil, nil, fmt.Errorf("scan pnpm-lock.yaml: %w", err)
 	}
-	if !inImporters {
+	if !seenImporters {
 		return nil, nil, fmt.Errorf("%w: pnpm-lock.yaml has no importers mapping", errUnsupportedPNPMImporterLayout)
+	}
+	if lockfileVersion != "9.0" {
+		return nil, nil, fmt.Errorf("%w: pnpm-lock.yaml lockfileVersion %q is outside supported wanted-lock format 9.0", errUnsupportedPNPMImporterLayout, boundedCoverageText(lockfileVersion))
 	}
 
 	var selections []lockSelection
@@ -180,12 +300,27 @@ func parsePNPMLockSelections(ctx context.Context, raw rawLockFile, workspaces ma
 			appendUnsupported(importer, name, fmt.Sprintf("pnpm dependency %q uses unsupported resolved selector %q", name, boundedCoverageText(version)))
 			continue
 		}
-		if peer := strings.IndexByte(version, '('); peer >= 0 {
-			version = version[:peer]
+		baseVersion, ok := pnpmV9ResolvedBaseVersion(version)
+		if !ok {
+			appendUnsupported(importer, name, fmt.Sprintf("pnpm dependency %q has malformed or unresolved version %q", name, boundedCoverageText(version)))
+			continue
 		}
-		version = strings.TrimSpace(version)
-		if !sbom.IsResolvedVersion(version) {
-			appendUnsupported(importer, name, fmt.Sprintf("pnpm dependency %q has unresolved version %q", name, boundedCoverageText(version)))
+		version = baseVersion
+		identityKey := pnpmPackageIdentityKey(name, version)
+		if !seenPackages {
+			appendUnsupported(importer, name, fmt.Sprintf("pnpm v9 importer dependency %q has no packages mapping to verify resolved identity", name))
+			continue
+		}
+		if _, ok := packageIdentities[identityKey]; !ok {
+			appendUnsupported(importer, name, fmt.Sprintf("pnpm importer dependency %q resolves to %q but packages has no matching package identity", name, boundedCoverageText(version)))
+			continue
+		}
+		if !seenSnapshots {
+			appendUnsupported(importer, name, fmt.Sprintf("pnpm v9 importer dependency %q has no snapshots mapping to verify resolved instance", name))
+			continue
+		}
+		if _, ok := snapshotIdentities[identityKey]; !ok {
+			appendUnsupported(importer, name, fmt.Sprintf("pnpm importer dependency %q resolves to %q but snapshots has no matching package instance", name, boundedCoverageText(version)))
 			continue
 		}
 		selections = append(selections, lockSelection{kind: lockSelectionExternal, manager: "pnpm", source: raw.source, importer: importer, name: name, version: version})
@@ -194,6 +329,83 @@ func parsePNPMLockSelections(ctx context.Context, raw rawLockFile, workspaces ma
 		return nil, issues.issues, fmt.Errorf("pnpm selection budget exceeded (%d)", limits.maxLockBindings)
 	}
 	return selections, issues.issues, nil
+}
+
+func pnpmV9PackageIdentity(key string) (string, string, bool) {
+	key = strings.TrimSpace(key)
+	baseKey := key
+	if peer := strings.IndexByte(baseKey, '('); peer >= 0 {
+		if !pnpmV9ValidPeerSuffix(baseKey[peer:]) {
+			return "", "", false
+		}
+		baseKey = strings.TrimSpace(baseKey[:peer])
+	} else if strings.ContainsRune(baseKey, ')') {
+		return "", "", false
+	}
+	separator := strings.LastIndexByte(baseKey, '@')
+	if separator <= 0 || separator == len(baseKey)-1 {
+		return "", "", false
+	}
+	name, err := jsresolution.NormalizePackageName(baseKey[:separator])
+	if err != nil {
+		return "", "", false
+	}
+	version, ok := pnpmV9ResolvedBaseVersion(baseKey[separator+1:])
+	if !ok {
+		return "", "", false
+	}
+	return name, version, true
+}
+
+func pnpmV9ResolvedBaseVersion(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	base := value
+	if peer := strings.IndexByte(base, '('); peer >= 0 {
+		if !pnpmV9ValidPeerSuffix(base[peer:]) {
+			return "", false
+		}
+		base = strings.TrimSpace(base[:peer])
+	} else if strings.ContainsRune(base, ')') {
+		return "", false
+	}
+	if !sbom.IsResolvedVersion(base) {
+		return "", false
+	}
+	return base, true
+}
+
+func pnpmV9ValidPeerSuffix(suffix string) bool {
+	if suffix == "" || suffix[0] != '(' {
+		return false
+	}
+	depth := 0
+	groupHasContent := false
+	for _, r := range suffix {
+		switch r {
+		case '(':
+			if depth == 0 {
+				groupHasContent = false
+			}
+			depth++
+		case ')':
+			if depth <= 0 || !groupHasContent {
+				return false
+			}
+			depth--
+		default:
+			if depth == 0 {
+				return false
+			}
+			if !strings.ContainsRune(" \t\r\n", r) {
+				groupHasContent = true
+			}
+		}
+	}
+	return depth == 0
+}
+
+func pnpmPackageIdentityKey(name, version string) string {
+	return name + "\x00" + version
 }
 
 func parseSimpleYAMLMapping(line string) (key, value string, hasValue bool, err error) {
@@ -221,6 +433,22 @@ func parseSimpleYAMLMapping(line string) (key, value string, hasValue bool, err 
 		return "", "", false, fmt.Errorf("invalid YAML scalar value")
 	}
 	return key, value, true, nil
+}
+
+func parseSimpleYAMLMappingKey(line string) (string, error) {
+	colon := yamlMappingColon(line)
+	if colon <= 0 {
+		return "", fmt.Errorf("expected a mapping entry")
+	}
+	rawKey := strings.TrimSpace(line[:colon])
+	if rawKey == "" || hasUnsupportedYAMLScalarSyntax(rawKey) {
+		return "", fmt.Errorf("unsupported YAML mapping key")
+	}
+	key, err := unquoteYAMLScalar(rawKey)
+	if err != nil || key == "" {
+		return "", fmt.Errorf("invalid YAML mapping key")
+	}
+	return key, nil
 }
 
 func yamlMappingColon(line string) int {

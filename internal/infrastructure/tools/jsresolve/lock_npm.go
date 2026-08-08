@@ -30,6 +30,9 @@ func parseNPMLockSelections(ctx context.Context, raw rawLockFile, limits resolve
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
+	if err := validateNoDuplicateJSONKeys(raw.content); err != nil {
+		return nil, nil, fmt.Errorf("parse npm lock %q: %w", raw.source, err)
+	}
 	var lock struct {
 		LockfileVersion int                            `json:"lockfileVersion"`
 		Packages        map[string]npmLockPackage      `json:"packages"`

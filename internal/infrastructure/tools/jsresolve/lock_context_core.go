@@ -82,6 +82,10 @@ func lockManagerForFile(name string) (string, bool) {
 
 func parsePackageRequests(source string, content []byte, limits resolverLimits) packageRequests {
 	out := packageRequests{source: source, dir: path.Dir(source), dependencies: map[string]string{}}
+	if err := validateNoDuplicateJSONKeys(content); err != nil {
+		out.uncertain = true
+		return out
+	}
 	var manifest struct {
 		PackageManager       string            `json:"packageManager"`
 		Dependencies         map[string]string `json:"dependencies"`
@@ -237,11 +241,15 @@ func manifestGuardSources(manifest packageRequests, present bool) []lockSourceCo
 	if !present {
 		return nil
 	}
-	if manifest.uncertain || packageManagerFamily(manifest.packageManager) == "unsupported" {
+	family := packageManagerFamily(manifest.packageManager)
+	if manifest.uncertain || family == "unsupported" {
 		return []lockSourceContext{{source: manifest.source, dir: manifest.dir, manager: manifestGuardPrefix + "*"}}
 	}
 	var names []string
 	for name, request := range manifest.dependencies {
+		if family == "yarn" && yarnRequestIsNPMRegistry(name, request) {
+			continue
+		}
 		if manifestRequestNeedsLockEvidence(name, request) {
 			names = append(names, name)
 		}

@@ -13,8 +13,18 @@ import (
 )
 
 type yarnLockEntry struct {
-	descriptors []string
-	version     string
+	descriptors    []string
+	version        string
+	resolution     string
+	versionSeen    bool
+	resolutionSeen bool
+	malformed      bool
+}
+
+type yarnDescriptorVersionIndex struct {
+	versions map[string][]string
+	invalid  map[string]struct{}
+	coverage []jsresolution.CoverageIssue
 }
 
 func parseYarnLockSelections(ctx context.Context, raw rawLockFile, manifests map[string]packageRequests, workspaces map[string][]jsresolution.PackageIdentity, limits resolverLimits) ([]lockSelection, []jsresolution.CoverageIssue, error) {
@@ -32,6 +42,7 @@ func parseYarnLockSelections(ctx context.Context, raw rawLockFile, manifests map
 	sort.Strings(manifestDirs)
 	var selections []lockSelection
 	issues := resolutionCoverageSink{limit: limits.maxCoverageIssues}
+	issues.addAll(descriptorVersions.coverage)
 	appendUnsupported := func(importer, name, source, detail string) {
 		selections = append(selections, lockSelection{kind: lockSelectionUnsupported, manager: "yarn", source: raw.source, importer: importer, name: name})
 		issues.add(jsresolution.CoverageIssue{Kind: jsresolution.CoverageUnsupportedMetadata, Path: source, Detail: detail})
@@ -68,16 +79,21 @@ func parseYarnLockSelections(ctx context.Context, raw rawLockFile, manifests map
 			}
 
 			if len(local) > 0 {
-				if sbom.IsResolvedVersion(request) {
+				requestVersion := strings.TrimSpace(strings.TrimPrefix(request, "npm:"))
+				if sbom.IsResolvedVersion(requestVersion) {
 					localCanMatch := false
 					for _, candidate := range local {
-						if candidate.Version == request {
+						if candidate.Version == requestVersion {
 							localCanMatch = true
 							break
 						}
 					}
 					if !localCanMatch {
-						versions := yarnResolvedVersions(descriptorVersions, name, request)
+						versions, invalid := yarnResolvedVersions(descriptorVersions, name, request)
+						if invalid {
+							appendUnsupported(importer, name, raw.source, fmt.Sprintf("yarn.lock has inconsistent metadata for %s@%s", name, boundedCoverageText(request)))
+							continue
+						}
 						if len(versions) == 0 {
 							appendUnsupported(importer, name, raw.source, fmt.Sprintf("yarn.lock has no resolved descriptor for %s@%s", name, boundedCoverageText(request)))
 							continue
@@ -93,7 +109,11 @@ func parseYarnLockSelections(ctx context.Context, raw rawLockFile, manifests map
 				continue
 			}
 
-			versions := yarnResolvedVersions(descriptorVersions, name, request)
+			versions, invalid := yarnResolvedVersions(descriptorVersions, name, request)
+			if invalid {
+				appendUnsupported(importer, name, raw.source, fmt.Sprintf("yarn.lock has inconsistent metadata for %s@%s", name, boundedCoverageText(request)))
+				continue
+			}
 			if len(versions) == 0 {
 				appendUnsupported(importer, name, raw.source, fmt.Sprintf("yarn.lock has no resolved descriptor for %s@%s", name, boundedCoverageText(request)))
 				continue
@@ -129,19 +149,26 @@ func yarnManagedImporter(lockDir, importer string, workspaces map[string][]jsres
 }
 
 // yarnRequestIsNPMRegistry accepts only requests whose identity remains the
-// dependency key's npm package name.
+// dependency key's npm package name. Yarn's npm: protocol can directly wrap a
+// resolved version (for example npm:4.17.21); that form is not a package alias.
 func yarnRequestIsNPMRegistry(name, request string) bool {
 	request = strings.TrimSpace(request)
 	if request == "" || strings.HasPrefix(request, "workspace:") {
 		return false
 	}
 	if strings.HasPrefix(request, "npm:") {
-		target := strings.TrimPrefix(request, "npm:")
+		target := strings.TrimSpace(strings.TrimPrefix(request, "npm:"))
+		if target == "" {
+			return false
+		}
+		if sbom.IsResolvedVersion(target) {
+			return true
+		}
 		if targetName := packageAliasTargetName(target); targetName != "" {
 			normalized, err := jsresolution.NormalizePackageName(targetName)
 			return err == nil && normalized == name
 		}
-		return target != ""
+		return true
 	}
 	if strings.Contains(request, ":") || strings.Contains(request, "/") || strings.HasPrefix(request, ".") {
 		return false
@@ -149,15 +176,19 @@ func yarnRequestIsNPMRegistry(name, request string) bool {
 	return true
 }
 
-func parseYarnDescriptorVersions(ctx context.Context, raw rawLockFile, limits resolverLimits) (map[string][]string, error) {
+func parseYarnDescriptorVersions(ctx context.Context, raw rawLockFile, limits resolverLimits) (yarnDescriptorVersionIndex, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(raw.content))
 	scanner.Buffer(make([]byte, 0, 64*1024), limits.maxLockLineBytes)
 	var entries []yarnLockEntry
 	descriptorCount := 0
 	var current *yarnLockEntry
+	metadataSeen := false
+	metadataVersion := ""
+	metadataVersionSeen := false
+	inMetadata := false
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return yarnDescriptorVersionIndex{}, err
 		}
 		rawLine := scanner.Text()
 		line := strings.TrimSpace(rawLine)
@@ -166,7 +197,16 @@ func parseYarnDescriptorVersions(ctx context.Context, raw rawLockFile, limits re
 		}
 		if !yarnIndented(rawLine) {
 			current = nil
-			if !strings.HasSuffix(line, ":") || strings.HasPrefix(line, "__metadata") {
+			inMetadata = false
+			if line == "__metadata:" {
+				if metadataSeen {
+					return yarnDescriptorVersionIndex{}, fmt.Errorf("yarn.lock has duplicate __metadata sections")
+				}
+				metadataSeen = true
+				inMetadata = true
+				continue
+			}
+			if !strings.HasSuffix(line, ":") {
 				continue
 			}
 			descriptors := yarnLockDescriptors(line)
@@ -174,55 +214,157 @@ func parseYarnDescriptorVersions(ctx context.Context, raw rawLockFile, limits re
 				continue
 			}
 			if len(descriptors) > limits.maxLockBindings-descriptorCount {
-				return nil, fmt.Errorf("yarn descriptor count exceeds budget (%d)", limits.maxLockBindings)
+				return yarnDescriptorVersionIndex{}, fmt.Errorf("yarn descriptor count exceeds budget (%d)", limits.maxLockBindings)
 			}
 			descriptorCount += len(descriptors)
 			current = &yarnLockEntry{descriptors: descriptors}
 			entries = append(entries, *current)
 			current = &entries[len(entries)-1]
 			if len(entries) > limits.maxLockEntries {
-				return nil, fmt.Errorf("yarn lock entry count exceeds budget (%d)", limits.maxLockEntries)
+				return yarnDescriptorVersionIndex{}, fmt.Errorf("yarn lock entry count exceeds budget (%d)", limits.maxLockEntries)
 			}
 			continue
 		}
+		indent, _ := yamlIndent(rawLine)
 		if current == nil {
+			if inMetadata && indent == 2 && strings.HasPrefix(line, "version:") {
+				if metadataVersionSeen {
+					return yarnDescriptorVersionIndex{}, fmt.Errorf("yarn.lock __metadata has duplicate version fields")
+				}
+				metadataVersionSeen = true
+				metadataVersion = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version:")), `"' `)
+			}
 			continue
 		}
-		indent, _ := yamlIndent(rawLine)
 		if indent != 2 {
 			continue
 		}
 		switch {
 		case strings.HasPrefix(line, "version "):
+			if current.versionSeen {
+				current.malformed = true
+				continue
+			}
+			current.versionSeen = true
 			current.version = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version")), `:" `)
 		case strings.HasPrefix(line, "version:"):
+			if current.versionSeen {
+				current.malformed = true
+				continue
+			}
+			current.versionSeen = true
 			current.version = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version:")), `" `)
+		case strings.HasPrefix(line, "resolution:"):
+			if current.resolutionSeen {
+				current.malformed = true
+				continue
+			}
+			current.resolutionSeen = true
+			current.resolution = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "resolution:")), `" `)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan yarn.lock: %w", err)
+		return yarnDescriptorVersionIndex{}, fmt.Errorf("scan yarn.lock: %w", err)
 	}
-	out := map[string][]string{}
+	if metadataSeen {
+		if !metadataVersionSeen {
+			return yarnDescriptorVersionIndex{}, fmt.Errorf("yarn.lock __metadata has no version field")
+		}
+		if metadataVersion != "8" && metadataVersion != "10" {
+			return yarnDescriptorVersionIndex{}, fmt.Errorf("%w: yarn.lock metadata version %q is outside supported versions 8 and 10", errUnsupportedYarnLockLayout, boundedCoverageText(metadataVersion))
+		}
+	}
+	invalidCoverage := resolutionCoverageSink{limit: limits.maxCoverageIssues}
+	out := yarnDescriptorVersionIndex{versions: map[string][]string{}, invalid: map[string]struct{}{}}
+	descriptorSeen := map[string]struct{}{}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return yarnDescriptorVersionIndex{}, err
 		}
 		version := strings.TrimSpace(entry.version)
-		if !sbom.IsResolvedVersion(version) {
-			continue
-		}
 		for _, descriptor := range entry.descriptors {
 			if strings.Contains(descriptor, "@workspace:") {
 				continue
 			}
-			out[descriptor] = append(out[descriptor], version)
+			name := yarnLockSpecName(descriptor)
+			if name == "" {
+				continue
+			}
+			request := strings.TrimPrefix(descriptor, name+"@")
+			if !yarnRequestIsNPMRegistry(name, request) {
+				continue
+			}
+			if _, duplicate := descriptorSeen[descriptor]; duplicate {
+				out.invalid[descriptor] = struct{}{}
+				invalidCoverage.add(jsresolution.CoverageIssue{
+					Kind:   jsresolution.CoverageMalformedMetadata,
+					Path:   raw.source,
+					Detail: fmt.Sprintf("yarn.lock repeats descriptor %q in multiple entries", boundedCoverageText(descriptor)),
+				})
+				continue
+			}
+			descriptorSeen[descriptor] = struct{}{}
+			if entry.malformed {
+				out.invalid[descriptor] = struct{}{}
+				invalidCoverage.add(jsresolution.CoverageIssue{
+					Kind:   jsresolution.CoverageMalformedMetadata,
+					Path:   raw.source,
+					Detail: fmt.Sprintf("yarn.lock descriptor %q repeats a correlated field", boundedCoverageText(descriptor)),
+				})
+				continue
+			}
+			if !entry.versionSeen || !sbom.IsResolvedVersion(version) {
+				out.invalid[descriptor] = struct{}{}
+				invalidCoverage.add(jsresolution.CoverageIssue{
+					Kind:   jsresolution.CoverageMalformedMetadata,
+					Path:   raw.source,
+					Detail: fmt.Sprintf("yarn.lock descriptor %q has no resolved version", boundedCoverageText(descriptor)),
+				})
+				continue
+			}
+			if entry.resolution != "" {
+				resolvedName, resolvedVersion, ok := yarnNPMResolutionIdentity(entry.resolution)
+				if !ok || resolvedName != name || resolvedVersion != version {
+					out.invalid[descriptor] = struct{}{}
+					invalidCoverage.add(jsresolution.CoverageIssue{
+						Kind: jsresolution.CoverageUnsupportedMetadata,
+						Path: raw.source,
+						Detail: fmt.Sprintf("yarn.lock descriptor %q has inconsistent resolution locator %q for version %q",
+							boundedCoverageText(descriptor), boundedCoverageText(entry.resolution), boundedCoverageText(version)),
+					})
+					continue
+				}
+			}
+			out.versions[descriptor] = append(out.versions[descriptor], version)
 		}
 	}
-	for descriptor := range out {
-		sort.Strings(out[descriptor])
-		out[descriptor] = deduplicateStrings(out[descriptor])
+	for descriptor := range out.versions {
+		sort.Strings(out.versions[descriptor])
+		out.versions[descriptor] = deduplicateStrings(out.versions[descriptor])
 	}
+	out.coverage = invalidCoverage.issues
 	return out, nil
+}
+
+func yarnNPMResolutionIdentity(value string) (string, string, bool) {
+	value = strings.Trim(strings.TrimSpace(value), `"`)
+	separator := strings.Index(value, "@npm:")
+	if separator <= 0 {
+		return "", "", false
+	}
+	name, err := jsresolution.NormalizePackageName(value[:separator])
+	if err != nil {
+		return "", "", false
+	}
+	version := value[separator+len("@npm:"):]
+	if index := strings.Index(version, "::"); index >= 0 {
+		version = version[:index]
+	}
+	version = strings.TrimSpace(version)
+	if !sbom.IsResolvedVersion(version) {
+		return "", "", false
+	}
+	return name, version, true
 }
 
 func yarnLockDescriptors(keyLine string) []string {
@@ -247,17 +389,21 @@ func yarnLockSpecName(spec string) string {
 	return ""
 }
 
-func yarnResolvedVersions(index map[string][]string, name, request string) []string {
+func yarnResolvedVersions(index yarnDescriptorVersionIndex, name, request string) ([]string, bool) {
 	keys := []string{name + "@" + request}
 	if !strings.HasPrefix(request, "npm:") {
 		keys = append(keys, name+"@npm:"+request)
 	}
 	var out []string
+	invalid := false
 	for _, key := range keys {
-		out = append(out, index[key]...)
+		if _, bad := index.invalid[key]; bad {
+			invalid = true
+		}
+		out = append(out, index.versions[key]...)
 	}
 	sort.Strings(out)
-	return deduplicateStrings(out)
+	return deduplicateStrings(out), invalid
 }
 
 func yarnIndented(raw string) bool {

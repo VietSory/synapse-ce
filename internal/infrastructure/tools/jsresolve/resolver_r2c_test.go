@@ -150,6 +150,11 @@ importers:
       shared:
         specifier: 2.0.0
         version: 2.0.0
+packages:
+  shared@2.0.0:
+    resolution: {integrity: sha512-valid}
+snapshots:
+  shared@2.0.0: {}
 `)
 	doc := &sbom.SBOM{Components: []sbom.Component{
 		{Name: "shared", Version: "1.0.0", PURL: "pkg:npm/shared@1.0.0"},
