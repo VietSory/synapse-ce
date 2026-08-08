@@ -1,0 +1,65 @@
+name: R2C Review-Ready Hard Gates
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Formatting and whitespace
+        run: |
+          test -z "$(gofmt -l internal/domain/jsresolution internal/infrastructure/tools/jsresolve internal/usecase/ports)"
+          git diff --check
+
+      - name: Focused vet
+        run: go vet ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve ./internal/usecase/ports
+
+      - name: Focused tests
+        run: go test ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve ./internal/usecase/ports
+
+      - name: Focused race tests
+        run: go test -race ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve ./internal/usecase/ports
+
+      - name: Repeated shuffled tests
+        run: go test -count=20 -shuffle=on ./internal/domain/jsresolution ./internal/infrastructure/tools/jsresolve ./internal/usecase/ports
+
+      - name: Build
+        run: make build
+
+      - name: CGO-disabled build
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 9
+
+      - name: Install web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Web production build
+        working-directory: web
+        run: pnpm build
