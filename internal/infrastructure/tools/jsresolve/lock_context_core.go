@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/jsresolution"
-	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 )
 
 const manifestGuardPrefix = "manifest-guard:"
@@ -280,7 +279,7 @@ func manifestRequestNeedsLockEvidence(name, request string) bool {
 
 func packageAliasTargetName(target string) string {
 	target = strings.TrimSpace(target)
-	if target == "" || sbom.IsResolvedVersion(target) {
+	if target == "" {
 		return ""
 	}
 	if normalized, err := jsresolution.NormalizePackageName(target); err == nil {

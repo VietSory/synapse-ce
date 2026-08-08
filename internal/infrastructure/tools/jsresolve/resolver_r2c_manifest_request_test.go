@@ -50,6 +50,23 @@ func TestResolverR2CBareNPMAliasNeedsIdentityEvidence(t *testing.T) {
 	}
 }
 
+func TestResolverR2CVersionShapedBareNPMAliasStillChangesIdentity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeJSON(t, r2bJoin(root, "package.json"), map[string]any{
+		"name": "root", "dependencies": map[string]string{"alias": "npm:4.17.21"},
+	})
+	doc := &sbom.SBOM{Components: []sbom.Component{{Name: "alias", Version: "1.0.0", PURL: "pkg:npm/alias@1.0.0"}}}
+
+	got, err := NewResolver().Resolve(context.Background(), root, graphWithExternal("src/index.ts", "alias"), doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Imports[0].Status == jsresolution.StatusComponent || got.Complete {
+		t.Fatalf("version-shaped npm alias target became a definitive component under the alias name: %#v coverage=%#v", got.Imports[0], got.Coverage)
+	}
+}
+
 func TestResolverR2CYarnBareNPMAliasCannotSelectAliasComponent(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
