@@ -83,7 +83,7 @@ func writeNPMResolvedLock(t *testing.T, filename, name, version string) {
 	writeJSON(t, filename, map[string]any{
 		"lockfileVersion": 3,
 		"packages": map[string]any{
-			"": map[string]any{"dependencies": map[string]string{name: "^4"}},
+			"":                     map[string]any{"dependencies": map[string]string{name: "^4"}},
 			"node_modules/" + name: map[string]any{"version": version},
 		},
 	})

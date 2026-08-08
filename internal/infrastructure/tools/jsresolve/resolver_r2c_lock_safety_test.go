@@ -20,7 +20,7 @@ func TestResolverR2CPackageManagerSelectsMatchingLock(t *testing.T) {
 	writeJSON(t, r2bJoin(root, "package-lock.json"), map[string]any{
 		"lockfileVersion": 3,
 		"packages": map[string]any{
-			"": map[string]any{"dependencies": map[string]string{"lodash": "4.17.21"}},
+			"":                    map[string]any{"dependencies": map[string]string{"lodash": "4.17.21"}},
 			"node_modules/lodash": map[string]any{"version": "4.17.21"},
 		},
 	})

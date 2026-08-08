@@ -99,10 +99,10 @@ func TestResolverR2CPackageLockLinkSelectsWorkspace(t *testing.T) {
 	writeJSON(t, r2bJoin(root, "package-lock.json"), map[string]any{
 		"lockfileVersion": 3,
 		"packages": map[string]any{
-			"":                      map[string]any{},
-			"packages/app":          map[string]any{"dependencies": map[string]string{"shared": "*"}},
-			"packages/shared":       map[string]any{"name": "shared", "version": "1.0.0"},
-			"node_modules/shared":   map[string]any{"resolved": "packages/shared", "link": true},
+			"":                    map[string]any{},
+			"packages/app":        map[string]any{"dependencies": map[string]string{"shared": "*"}},
+			"packages/shared":     map[string]any{"name": "shared", "version": "1.0.0"},
+			"node_modules/shared": map[string]any{"resolved": "packages/shared", "link": true},
 		},
 	})
 	doc := &sbom.SBOM{Components: []sbom.Component{{Name: "shared", Version: "9.0.0", PURL: "pkg:npm/shared@9.0.0"}}}
@@ -331,7 +331,7 @@ func TestResolverR2CSBOMAndLockBudgetsAreInjectable(t *testing.T) {
 	limits.maxLockWork = 1
 	resolver = newResolverWithLimits(NewInventoryBuilder(), newAliasInventoryBuilder(), limits)
 	writeJSON(t, r2bJoin(root, "package-lock.json"), map[string]any{"lockfileVersion": 3, "packages": map[string]any{
-		"":                map[string]any{"dependencies": map[string]string{"a": "1.0.0"}},
+		"":               map[string]any{"dependencies": map[string]string{"a": "1.0.0"}},
 		"node_modules/a": map[string]any{"version": "1.0.0"},
 	}})
 	got, err := resolver.Resolve(context.Background(), root, graphWithExternal("deep/src/index.ts", "a"), &sbom.SBOM{Components: []sbom.Component{{Name: "a", Version: "1.0.0", PURL: "pkg:npm/a@1.0.0"}}})

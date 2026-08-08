@@ -128,7 +128,6 @@ func yarnManagedImporter(lockDir, importer string, workspaces map[string][]jsres
 	return false
 }
 
-
 // yarnRequestIsNPMRegistry accepts only requests whose identity remains the
 // dependency key's npm package name.
 func yarnRequestIsNPMRegistry(name, request string) bool {
@@ -187,6 +186,10 @@ func parseYarnDescriptorVersions(ctx context.Context, raw rawLockFile, limits re
 			continue
 		}
 		if current == nil {
+			continue
+		}
+		indent, _ := yamlIndent(rawLine)
+		if indent != 2 {
 			continue
 		}
 		switch {

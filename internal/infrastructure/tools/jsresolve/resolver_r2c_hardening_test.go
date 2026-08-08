@@ -125,6 +125,32 @@ func TestResolverR2CYarnMissingDescriptorCannotBecomeComplete(t *testing.T) {
 	}
 }
 
+func TestResolverR2CYarnNestedVersionFieldCannotBecomeResolvedVersion(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeJSON(t, r2bJoin(root, "package.json"), map[string]any{
+		"name":           "root",
+		"packageManager": "yarn@1.22.22",
+		"dependencies":   map[string]string{"lodash": "^4"},
+	})
+	writeFile(t, r2bJoin(root, "yarn.lock"), `lodash@^4:
+  dependencies:
+    version: "3.10.1"
+`)
+	doc := &sbom.SBOM{Components: []sbom.Component{{Name: "lodash", Version: "3.10.1", PURL: "pkg:npm/lodash@3.10.1"}}}
+
+	got, err := NewResolver().Resolve(context.Background(), root, graphWithExternal("src/index.ts", "lodash"), doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Imports[0].Status == jsresolution.StatusComponent || got.Complete {
+		t.Fatalf("nested yarn version field became a definitive component: %#v coverage=%#v", got.Imports[0], got.Coverage)
+	}
+	if !hasCoverageKind(got.Coverage, jsresolution.CoverageUnsupportedMetadata) {
+		t.Fatalf("nested yarn version field has no fail-closed coverage: %#v", got.Coverage)
+	}
+}
+
 func TestResolverR2CYarnNonRegistryProtocolCannotMasqueradeAsNPMComponent(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
