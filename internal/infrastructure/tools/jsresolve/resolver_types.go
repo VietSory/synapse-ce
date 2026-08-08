@@ -20,6 +20,15 @@ const (
 	defaultMaxResolverCandidateWork      = 1000000
 	defaultMaxResolverCandidates         = 256
 	defaultMaxResolverCoverage           = 4096
+	defaultMaxResolverSBOMComponents     = 200000
+	defaultMaxResolverSBOMFieldBytes     = 32768
+	defaultMaxResolverLockEntries        = 200000
+	defaultMaxResolverLockFiles          = 4096
+	defaultMaxResolverLockFileBytes      = int64(16 << 20)
+	defaultMaxResolverLockTotalBytes     = int64(128 << 20)
+	defaultMaxResolverLockBindings       = 1000000
+	defaultMaxResolverLockWork           = 2000000
+	defaultMaxResolverLockLineBytes      = 1 << 20
 )
 
 type resolverLimits struct {
@@ -35,6 +44,15 @@ type resolverLimits struct {
 	maxCandidateWork      int
 	maxCandidates         int
 	maxCoverageIssues     int
+	maxSBOMComponents     int
+	maxSBOMFieldBytes     int
+	maxLockEntries        int
+	maxLockFiles          int
+	maxLockFileBytes      int64
+	maxLockTotalBytes     int64
+	maxLockBindings       int
+	maxLockWork           int
+	maxLockLineBytes      int
 }
 
 func defaultResolverLimits() resolverLimits {
@@ -51,21 +69,31 @@ func defaultResolverLimits() resolverLimits {
 		maxCandidateWork:      defaultMaxResolverCandidateWork,
 		maxCandidates:         defaultMaxResolverCandidates,
 		maxCoverageIssues:     defaultMaxResolverCoverage,
+		maxSBOMComponents:     defaultMaxResolverSBOMComponents,
+		maxSBOMFieldBytes:     defaultMaxResolverSBOMFieldBytes,
+		maxLockEntries:        defaultMaxResolverLockEntries,
+		maxLockFiles:          defaultMaxResolverLockFiles,
+		maxLockFileBytes:      defaultMaxResolverLockFileBytes,
+		maxLockTotalBytes:     defaultMaxResolverLockTotalBytes,
+		maxLockBindings:       defaultMaxResolverLockBindings,
+		maxLockWork:           defaultMaxResolverLockWork,
+		maxLockLineBytes:      defaultMaxResolverLockLineBytes,
 	}
 }
 
 func (l resolverLimits) validate() error {
 	if l.maxModules <= 0 || l.maxEdges <= 0 || l.maxGraphCoverage <= 0 || l.maxBindingsPerEdge <= 0 ||
 		l.maxTotalBindings <= 0 || l.maxSpecifierBytes <= 0 || l.maxModulePathBytes <= 0 || l.maxModulePathSegments <= 0 ||
-		l.maxAliasWork <= 0 || l.maxCandidateWork <= 0 || l.maxCandidates <= 0 || l.maxCoverageIssues <= 0 {
+		l.maxAliasWork <= 0 || l.maxCandidateWork <= 0 || l.maxCandidates <= 0 || l.maxCoverageIssues <= 0 ||
+		l.maxSBOMComponents <= 0 || l.maxSBOMFieldBytes <= 0 || l.maxLockEntries <= 0 || l.maxLockFiles <= 0 ||
+		l.maxLockFileBytes <= 0 || l.maxLockTotalBytes <= 0 || l.maxLockBindings <= 0 || l.maxLockWork <= 0 || l.maxLockLineBytes <= 0 {
 		return fmt.Errorf("%w: resolver limits must be positive", shared.ErrValidation)
 	}
 	return nil
 }
 
 // Resolver resolves source module specifiers to built-in, local, workspace, or
-// package-root identities. R2B deliberately leaves third-party SBOM component
-// correlation unresolved for R2C.
+// exact npm SBOM component identities without executing project tooling.
 type Resolver struct {
 	inventory *InventoryBuilder
 	aliases   *aliasInventoryBuilder

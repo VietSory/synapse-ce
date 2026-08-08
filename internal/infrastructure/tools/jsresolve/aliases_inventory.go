@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/KKloudTarus/synapse-ce/internal/domain/jsresolution"
-	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"io/fs"
 	"os"
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/KKloudTarus/synapse-ce/internal/domain/jsresolution"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
 func (b *aliasInventoryBuilder) Build(ctx context.Context, root string) (aliasInventory, error) {

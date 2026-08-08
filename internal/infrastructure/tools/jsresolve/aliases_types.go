@@ -2,6 +2,7 @@ package jsresolve
 
 import (
 	"fmt"
+
 	"github.com/KKloudTarus/synapse-ce/internal/domain/jsresolution"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
