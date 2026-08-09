@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
 
 	"github.com/KKloudTarus/synapse-ce/migrations"
@@ -126,16 +125,17 @@ func TestMigration0044(t *testing.T) {
 		t.Fatalf("goose down to 43: %v", err)
 	}
 
-	var scanVal string
-	err = pool.QueryRow(ctx, "SELECT rule_key FROM findings WHERE id=$1", fixtures[0].id).Scan(&scanVal)
-	if err == nil {
+	// Assert the schema contract directly rather than depending on whether pgx reports an undefined
+	// column as PgError or wraps it in a PrepareError.
+	var ruleKeyExists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='findings' AND column_name='rule_key'
+	)`).Scan(&ruleKeyExists); err != nil {
+		t.Fatalf("inspect findings schema after down: %v", err)
+	}
+	if ruleKeyExists {
 		t.Error("rule_key column still exists after Down")
-	} else if pgErr, ok := err.(*pgconn.PgError); ok {
-		if pgErr.Code != "42703" { // undefined_column
-			t.Errorf("expected undefined_column error, got: %v", pgErr.Code)
-		}
-	} else {
-		t.Errorf("expected pgx error, got: %T %v", err, err)
 	}
 
 	if err := goose.UpTo(db, ".", 44); err != nil {
