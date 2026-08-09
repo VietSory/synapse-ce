@@ -2,6 +2,7 @@ package projectuc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -70,6 +71,11 @@ func (s *Service) PublishSource(ctx context.Context, in PublishSourceInput) (pro
 			allowed = append(allowed, node.Path)
 		}
 	}
+	// Image scans, a single JAR/archive, and other package-only targets have no scanner-owned
+	// source-file inventory. Refuse them here, before the artifact adapter can claim a namespace.
+	if len(allowed) == 0 {
+		return projectanalysis.SourceManifest{}, fmt.Errorf("%w: analysis target has no retainable source files", shared.ErrValidation)
+	}
 	now := s.clock.Now().UTC()
 	writer := projectanalysis.SourceWriter{Actor: in.Actor, ToolVersion: strings.TrimSpace(in.ToolVersion), PublishedAt: now}
 	capture, err := publisher.PublishArchive(ctx, in.TenantID, project.ID, analysis.ID, writer, allowed, in.Archive)
@@ -89,7 +95,7 @@ func (s *Service) PublishSource(ctx context.Context, in PublishSourceInput) (pro
 	}
 	if err := mutator.AttachSourceWithAudit(ctx, in.TenantID, project.ID, analysisID, capture, audit); err != nil {
 		if cleanupErr := publisher.DiscardPublished(ctx, in.TenantID, project.ID, analysis.ID); cleanupErr != nil {
-			return projectanalysis.SourceManifest{}, fmt.Errorf("attach source: %v; rollback published artifact: %w", err, cleanupErr)
+			return projectanalysis.SourceManifest{}, errors.Join(err, fmt.Errorf("rollback published artifact: %w", cleanupErr))
 		}
 		return projectanalysis.SourceManifest{}, err
 	}
