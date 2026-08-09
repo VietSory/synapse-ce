@@ -1,0 +1,73 @@
+name: Codex 402 source root patch
+
+on:
+  push:
+    branches:
+      - codex/402-sanctioned-source-publish
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact root hardening edits
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one anchor, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "internal/platform/config/config.go",
+              '\t\tProjectSourceArtifactDir:  getenv("SYNAPSE_PROJECT_SOURCE_ARTIFACT_DIR", "data/project-source-artifacts"),\n',
+              '\t\tProjectSourceArtifactDir:  projectSourceArtifactDir(),\n',
+          )
+          replace_once(
+              "internal/platform/config/config_test.go",
+              '\tif cfg.ProjectSourceArtifactDir != "data/project-source-artifacts" || cfg.ProjectSourceRetention != 90*24*time.Hour || cfg.ProjectSourceMaxFileBytes != 2<<20 || cfg.ProjectSourceMaxFiles != 10_000 || cfg.ProjectSourceMaxBytes != 500<<20 {\n',
+              '\tif !filepath.IsAbs(cfg.ProjectSourceArtifactDir) || cfg.ProjectSourceRetention != 90*24*time.Hour || cfg.ProjectSourceMaxFileBytes != 2<<20 || cfg.ProjectSourceMaxFiles != 10_000 || cfg.ProjectSourceMaxBytes != 500<<20 {\n',
+          )
+          replace_once(
+              "internal/platform/config/config_test.go",
+              'import (\n\t"testing"\n\t"time"\n)\n',
+              'import (\n\t"path/filepath"\n\t"testing"\n\t"time"\n)\n',
+          )
+          replace_once(
+              "internal/infrastructure/sourceartifact/store.go",
+              '\tif err := s.validateAnalysisContext(projectID, analysisID); err != nil || strings.TrimSpace(sourceDir) == "" {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source capture context is required", shared.ErrValidation)\n\t}\n\tif err := ctx.Err(); err != nil {\n',
+              '\tif err := s.validateAnalysisContext(projectID, analysisID); err != nil || strings.TrimSpace(sourceDir) == "" {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source capture context is required", shared.ErrValidation)\n\t}\n\tif err := s.validateWriteRoot(); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), err\n\t}\n\tif err := ctx.Err(); err != nil {\n',
+          )
+          replace_once(
+              "internal/infrastructure/sourceartifact/store.go",
+              '\tif err := s.validateAnalysisContext(projectID, analysisID); err != nil {\n\t\treturn manifest, err\n\t}\n\tif len(files) == 0 {\n',
+              '\tif err := s.validateAnalysisContext(projectID, analysisID); err != nil {\n\t\treturn manifest, err\n\t}\n\tif err := s.validateWriteRoot(); err != nil {\n\t\treturn manifest, err\n\t}\n\tif len(files) == 0 {\n',
+          )
+          replace_once(
+              "internal/infrastructure/sourceartifact/publish.go",
+              '\tif !filepath.IsAbs(s.root) {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source artifact root must be absolute", shared.ErrValidation)\n\t}\n',
+              '\tif err := s.validateWriteRoot(); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), err\n\t}\n',
+          )
+      - name: Format and verify patch
+        run: |
+          gofmt -w internal/platform/config/config.go internal/platform/config/config_test.go internal/infrastructure/sourceartifact/store.go internal/infrastructure/sourceartifact/publish.go
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add internal/platform/config/config.go internal/platform/config/config_test.go internal/infrastructure/sourceartifact/store.go internal/infrastructure/sourceartifact/publish.go
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(appsec): require absolute source artifact roots"
+          git push origin HEAD:codex/402-sanctioned-source-publish
