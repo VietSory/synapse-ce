@@ -12,7 +12,18 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-var _ ports.ProjectAnalysisSourceAttacher = (*ProjectAnalysisStore)(nil)
+var (
+	_ ports.ProjectAnalysisSourceAttacher      = (*ProjectAnalysisStore)(nil)
+	_ ports.ProjectAnalysisSourceAtomicMutator = (*ProjectAnalysisStore)(nil)
+)
+
+func (s *ProjectAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit ports.AuditEntry) error {
+	writer := capture.Manifest.Writer
+	if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) {
+		return fmt.Errorf("%w: source audit provenance does not match manifest writer", shared.ErrValidation)
+	}
+	return s.AttachSource(ctx, tenantID, projectID, analysisID, capture)
+}
 
 func (s *ProjectAnalysisStore) AttachSource(_ context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture) error {
 	if tenantID.IsZero() || projectID.IsZero() || analysisID.IsZero() {
