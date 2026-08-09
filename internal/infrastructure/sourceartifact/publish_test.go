@@ -71,9 +71,12 @@ func TestPublishArchiveIsCreateOnlyAndSealsWriterProvenance(t *testing.T) {
 		t.Fatal("writer provenance is not covered by the manifest digest")
 	}
 
-	_, err = store.PublishArchive(ctx, "tenant", "project", "analysis", testWriter(), []string{"main.go"}, publishTar(t, []tarEntry{{name: "main.go", body: "replacement\n"}}))
+	second, err := store.PublishArchive(ctx, "tenant", "project", "analysis", testWriter(), []string{"main.go"}, publishTar(t, []tarEntry{{name: "main.go", body: "replacement\n"}}))
 	if !errors.Is(err, shared.ErrConflict) {
 		t.Fatalf("second publish error=%v, want conflict", err)
+	}
+	if second.Capabilities.Source.Reason != projectanalysis.UnavailableAlreadyRetained {
+		t.Fatalf("second publish reason=%q, want %q", second.Capabilities.Source.Reason, projectanalysis.UnavailableAlreadyRetained)
 	}
 	data, _, err := store.Load(ctx, "tenant", "project", "analysis", "main.go")
 	if err != nil {
