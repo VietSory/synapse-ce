@@ -144,10 +144,9 @@ func sourcePublishBaseURL(raw string) (*url.URL, error) {
 }
 
 func sourcePublishURL(base *url.URL, projectKey, analysisID string, source bool) string {
-	u := *base
-	u.Path = strings.TrimRight(u.Path, "/") + "/api/v1/projects/" + url.PathEscape(projectKey) + "/analyses/" + url.PathEscape(analysisID)
+	u := base.JoinPath("api", "v1", "projects", projectKey, "analyses", analysisID)
 	if source {
-		u.Path += "/source"
+		u = u.JoinPath("source")
 	}
 	return u.String()
 }
