@@ -261,9 +261,10 @@ func parseYarnDescriptorVersions(
 			continue
 		}
 
-		indent, ok := yamlIndent(rawLine)
-		if !ok {
-			continue
+		indent, tabIndent := yamlIndent(rawLine)
+		if tabIndent {
+			coverage.add(jsresolution.CoverageIssue{Kind: jsresolution.CoverageMalformedMetadata, Path: yarnLockfileName, Detail: "yarn.lock uses tab indentation in correlated metadata"})
+			return yarnDescriptorVersionIndex{}, yarnLockInvalid
 		}
 		if current == nil {
 			if inMetadata && indent == 2 && strings.HasPrefix(line, "version:") {
