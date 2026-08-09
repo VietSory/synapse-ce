@@ -1,0 +1,41 @@
+name: Codex 402 zero-retained guard
+
+on:
+  push:
+    branches:
+      - codex/402-sanctioned-source-publish
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact zero-retained guard
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("internal/infrastructure/sourceartifact/publish.go")
+          text = p.read_text()
+          old = '\tsort.Slice(manifest.Files, func(i, j int) bool { return manifest.Files[i].Path < manifest.Files[j].Path })\n\tmanifest.SetArtifactDigest()\n'
+          new = '\tsort.Slice(manifest.Files, func(i, j int) bool { return manifest.Files[i].Path < manifest.Files[j].Path })\n\tretained := false\n\tfor _, file := range manifest.Files {\n\t\tif file.Available {\n\t\t\tretained = true\n\t\t\tbreak\n\t\t}\n\t}\n\tif !retained {\n\t\treturn unavailable(projectanalysis.UnavailableNotRetained), fmt.Errorf("%w: source archive retained no analysis files", shared.ErrValidation)\n\t}\n\tmanifest.SetArtifactDigest()\n'
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one publish manifest anchor, found {text.count(old)}")
+          p.write_text(text.replace(old, new, 1))
+      - name: Format and verify
+        run: |
+          gofmt -w internal/infrastructure/sourceartifact/publish.go
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add internal/infrastructure/sourceartifact/publish.go
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(appsec): refuse empty retained source publish"
+          git push origin HEAD:codex/402-sanctioned-source-publish
