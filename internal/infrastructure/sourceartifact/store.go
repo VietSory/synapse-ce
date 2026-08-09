@@ -65,6 +65,9 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	if err := s.validateAnalysisContext(projectID, analysisID); err != nil || strings.TrimSpace(sourceDir) == "" {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source capture context is required", shared.ErrValidation)
 	}
+	if err := s.validateSourceIsolation(sourceDir); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), err
+	}
 	if err := s.validateWriteRoot(); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
