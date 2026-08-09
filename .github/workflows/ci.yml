@@ -34,20 +34,8 @@ jobs:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: synapse-ci-${{ github.run_id }}
       POSTGRES_DB: synapse
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: synapse-ci-${{ github.run_id }}
-          POSTGRES_DB: synapse
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d synapse"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # MUTATION: the Postgres service is deliberately removed. The integration suite must fail to
+    # connect rather than skip or report a clean backend run.
     steps:
       - uses: actions/checkout@v7
 
@@ -115,11 +103,6 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          # vite 8 requires ^20.19 || >=22.12, and vitest's forks pool needs
-          # worker_threads.markAsUncloneable. Node 20 resolved to a build without it, so every web test
-          # failed to start its worker — a red suite that said nothing about the code. Pinned to the
-          # 22 LTS line, which satisfies both, and recorded in web/package.json engines so the
-          # requirement lives with the package rather than only in this file.
           node-version: 22
 
       - name: Set up pnpm
