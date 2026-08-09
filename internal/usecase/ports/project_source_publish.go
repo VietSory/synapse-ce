@@ -15,6 +15,9 @@ const ProjectSourcePublishAuditAction = "project.source.publish"
 // callers never trust the contributor to choose the durable source inventory.
 type ProjectSourceArtifactPublisher interface {
 	PublishArchive(ctx context.Context, tenantID, projectID shared.ID, analysisID string, writer projectanalysis.SourceWriter, allowedPaths []string, src io.Reader) (projectanalysis.SourceCapture, error)
+	// DiscardPublished removes only the v2 artifact claimed by PublishArchive. It is a narrow
+	// compensation hook for a failed DB+audit commit and must not delete legacy capture paths.
+	DiscardPublished(ctx context.Context, tenantID, projectID shared.ID, analysisID string) error
 }
 
 // ProjectAnalysisSourceAttacher is the narrow post-analysis mutation allowed for sanctioned
