@@ -22,7 +22,11 @@ type sourceAuditAnalysisStore struct {
 }
 
 func (s *sourceAuditAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit ports.AuditEntry) error {
-	if err := s.ProjectAnalysisStore.AttachSourceWithAudit(ctx, tenantID, projectID, analysisID, capture, audit); err != nil {
+	writer := capture.Manifest.Writer
+	if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) || audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() || audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {
+		return shared.ErrValidation
+	}
+	if err := s.ProjectAnalysisStore.AttachSource(ctx, tenantID, projectID, analysisID, capture); err != nil {
 		return err
 	}
 	s.audits = append(s.audits, audit)
@@ -89,10 +93,10 @@ func TestPublishSourceIsServedThroughReadCodeFileAndExcludesSecrets(t *testing.T
 	manifest, err := svc.PublishSource(ctx, PublishSourceInput{
 		TenantID: p.TenantID, ProjectKey: p.Key, AnalysisID: analysis.ID,
 		Actor: "ci-bot", ToolVersion: "synapse-cli/test", Archive: sourceTar(t, map[string]string{
-			"src/main.go":       "package main\n\nfunc main() {}\n",
-			".env":              "DATABASE_PASSWORD=do-not-retain\n",
+			"src/main.go":        "package main\n\nfunc main() {}\n",
+			".env":               "DATABASE_PASSWORD=do-not-retain\n",
 			"deploy/private.pem": "-----BEGIN PRIVATE KEY-----\nsecret\n",
-			"outside.txt":       "not part of scanner inventory\n",
+			"outside.txt":        "not part of scanner inventory\n",
 		}),
 	})
 	if err != nil {
@@ -104,7 +108,7 @@ func TestPublishSourceIsServedThroughReadCodeFileAndExcludesSecrets(t *testing.T
 	if len(manifest.Files) != 1 || manifest.Files[0].Path != "src/main.go" || !manifest.Files[0].Available {
 		t.Fatalf("unexpected retained files: %+v", manifest.Files)
 	}
-	if len(analyses.audits) != 1 || analyses.audits[0].Actor != "ci-bot" || analyses.audits[0].Action != "project.source.publish" || analyses.audits[0].Metadata["artifact_digest"] != manifest.Digest {
+	if len(analyses.audits) != 1 || analyses.audits[0].Actor != "ci-bot" || analyses.audits[0].Action != ports.ProjectSourcePublishAuditAction || analyses.audits[0].Metadata["artifact_digest"] != manifest.Digest {
 		t.Fatalf("audit=%+v", analyses.audits)
 	}
 
