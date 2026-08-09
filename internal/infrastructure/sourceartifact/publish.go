@@ -99,7 +99,7 @@ func (s *Store) PublishArchive(ctx context.Context, tenantID, projectID shared.I
 		if hdr.Typeflag == tar.TypeDir {
 			continue
 		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+		if hdr.Typeflag != tar.TypeReg {
 			return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source archive contains a non-regular entry", shared.ErrValidation)
 		}
 		canonical, err := measure.CanonicalPath(hdr.Name)
