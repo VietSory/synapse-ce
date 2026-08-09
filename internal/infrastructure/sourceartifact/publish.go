@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
@@ -169,34 +168,6 @@ func (s *Store) PublishArchive(ctx context.Context, tenantID, projectID shared.I
 	if err := os.WriteFile(filepath.Join(captureRoot, "manifest.json"), manifestData, 0o600); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("write source manifest: %w", err)
 	}
-	if err := syncTree(captureRoot); err != nil {
-		return unavailable(projectanalysis.UnavailableCaptureFailed), err
-	}
 	committed = true
 	return projectanalysis.SourceCapture{Capabilities: availableCapabilities(), Manifest: manifest}, nil
-}
-
-// syncTree fsyncs the manifest and containing directory so a successful publish does not
-// acknowledge metadata that only exists in userspace buffers before the DB/audit commit.
-func syncTree(root string) error {
-	manifest, err := os.Open(filepath.Join(root, "manifest.json"))
-	if err != nil {
-		return fmt.Errorf("open source manifest for sync: %w", err)
-	}
-	if err := manifest.Sync(); err != nil {
-		_ = manifest.Close()
-		return fmt.Errorf("sync source manifest: %w", err)
-	}
-	if err := manifest.Close(); err != nil {
-		return fmt.Errorf("close source manifest: %w", err)
-	}
-	dir, err := os.Open(root)
-	if err != nil {
-		return fmt.Errorf("open source artifact directory for sync: %w", err)
-	}
-	defer func() { _ = dir.Close() }()
-	if err := dir.Sync(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "invalid argument") {
-		return fmt.Errorf("sync source artifact directory: %w", err)
-	}
-	return nil
 }
