@@ -24,15 +24,14 @@ func TestAdvisoryRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	// t.Cleanup is LIFO. Register Close first so fixture deletion runs while the pool is still usable.
-	t.Cleanup(pool.Close)
+	// MUTATION: restore the old ordering. defer runs before t.Cleanup, so the delete below uses a
+	// closed pool and silently leaks the fixture. The same-DB second run must catch this.
+	defer pool.Close()
 
 	repo := NewAdvisoryRepository(pool)
 	id := "GHSA-" + randHex(t)
 	t.Cleanup(func() {
-		if _, err := pool.Exec(context.Background(), "DELETE FROM advisories WHERE id=$1", id); err != nil {
-			t.Errorf("cleanup advisory %s: %v", id, err)
-		}
+		_, _ = pool.Exec(context.Background(), "DELETE FROM advisories WHERE id=$1", id)
 	})
 
 	a := advisory.Advisory{
@@ -50,7 +49,6 @@ func TestAdvisoryRepository(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	// round-trip: the full advisory decodes back from the JSONB blob, found via the affect index
 	got, err := repo.ByPackage(ctx, "Go", "github.com/foo/bar")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("ByPackage Go: %+v err=%v", got, err)
@@ -59,17 +57,13 @@ func TestAdvisoryRepository(t *testing.T) {
 		got[0].Affected[0].Ranges[0].Events[1].Fixed != "1.2.0" {
 		t.Fatalf("advisory did not round-trip through JSONB: %+v", got[0])
 	}
-	// indexed under the second affected package too
 	if g, _ := repo.ByPackage(ctx, "npm", "left-pad"); len(g) != 1 || g[0].ID != id {
 		t.Fatalf("npm key: %+v", g)
 	}
-	// an unaffected package returns nothing
 	if g, _ := repo.ByPackage(ctx, "Go", "github.com/safe/pkg"); len(g) != 0 {
 		t.Fatalf("unaffected package: %+v", g)
 	}
 
-	// re-sync with a changed affected set: the Go binding is retracted, only npm remains. The stale index
-	// row must be gone (no phantom hit) and there must be no duplicate npm row.
 	a.Affected = []advisory.AffectedPackage{{Ecosystem: "npm", Package: "left-pad", FixedVersion: "1.3.0"}}
 	if err := repo.Upsert(ctx, a); err != nil {
 		t.Fatalf("re-upsert: %v", err)
@@ -81,7 +75,6 @@ func TestAdvisoryRepository(t *testing.T) {
 		t.Fatalf("npm key must match exactly once after re-sync, got %d", len(g))
 	}
 
-	// empty id is rejected (fail-closed)
 	if err := repo.Upsert(ctx, advisory.Advisory{}); !errors.Is(err, shared.ErrValidation) {
 		t.Fatalf("empty advisory id: want ErrValidation, got %v", err)
 	}
