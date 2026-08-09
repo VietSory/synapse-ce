@@ -68,6 +68,9 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	if err := s.validateSourceIsolation(sourceDir); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
+	if err := s.validateSourceIsolation(sourceDir); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), err
+	}
 	if err := s.validateWriteRoot(); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
