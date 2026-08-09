@@ -102,7 +102,7 @@ func (r *Resolver) Resolve(ctx context.Context, root string, graph modulegraph.G
 			// an internally inconsistent graph rather than silently dropping an
 			// unresolved relative edge with no corresponding coverage limitation.
 			if !relativeEdgeHasCoverage(normalizedGraph.Coverage, edge) {
-				return jsresolution.Result{}, fmt.Errorf("%w: unresolved relative edge from %q has no graph coverage", shared.ErrValidation)
+				return jsresolution.Result{}, fmt.Errorf("%w: unresolved relative edge from %q has no graph coverage", shared.ErrValidation, edge.From)
 			}
 			continue
 		}
