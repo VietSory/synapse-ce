@@ -86,7 +86,7 @@ func (r *Resolver) Resolve(ctx context.Context, root string, graph modulegraph.G
 	}
 	workspaceByName := indexWorkspacesByName(inventory.Packages)
 	components := newComponentIndex(doc, r.limits.maxComponents, r.limits.maxCandidates, &coverage)
-	resolutions := r.readImporterResolutions(ctx, root, &coverage)
+	resolutions := r.readImporterResolutions(ctx, root, inventory.Packages, &coverage)
 
 	result := jsresolution.Result{GraphCoverage: append([]modulegraph.CoverageIssue(nil), normalizedGraph.Coverage...)}
 	for _, edge := range normalizedGraph.Edges {
@@ -102,7 +102,7 @@ func (r *Resolver) Resolve(ctx context.Context, root string, graph modulegraph.G
 			// an internally inconsistent graph rather than silently dropping an
 			// unresolved relative edge with no corresponding coverage limitation.
 			if !relativeEdgeHasCoverage(normalizedGraph.Coverage, edge) {
-				return jsresolution.Result{}, fmt.Errorf("%w: unresolved relative edge from %q has no graph coverage", shared.ErrValidation, edge.From)
+				return jsresolution.Result{}, fmt.Errorf("%w: unresolved relative edge from %q has no graph coverage", shared.ErrValidation)
 			}
 			continue
 		}
