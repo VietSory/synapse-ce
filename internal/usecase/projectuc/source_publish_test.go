@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
@@ -15,6 +16,10 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/sourceartifact"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
+
+func sourcePublishTestClock() fixedClock {
+	return fixedClock{now: time.Date(2026, 8, 10, 2, 0, 0, 0, time.UTC)}
+}
 
 type sourceAuditAnalysisStore struct {
 	*memory.ProjectAnalysisStore
@@ -57,7 +62,7 @@ func TestPublishSourceIsServedThroughReadCodeFileAndExcludesSecrets(t *testing.T
 	projects := memory.NewProjectRepository()
 	analyses := &sourceAuditAnalysisStore{ProjectAnalysisStore: memory.NewProjectAnalysisStore()}
 	artifacts := sourceartifact.New(t.TempDir(), 0, 0, 0)
-	svc := NewService(projects, memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc := NewService(projects, memory.NewEngagementRepository(), sourcePublishTestClock(), fixedIDs{}, &captureAudit{}, true)
 	svc.SetAnalysisStore(analyses)
 	svc.SetSourceArtifactStore(artifacts)
 
@@ -66,10 +71,10 @@ func TestPublishSourceIsServedThroughReadCodeFileAndExcludesSecrets(t *testing.T
 		t.Fatal(err)
 	}
 	analysis := projectanalysis.Analysis{
-		ID:         "analysis",
-		TenantID:   p.TenantID.String(),
-		ProjectID:  p.ID.String(),
-		ProjectKey: p.Key,
+		ID:             "analysis",
+		TenantID:       p.TenantID.String(),
+		ProjectID:      p.ID.String(),
+		ProjectKey:     p.Key,
 		SourceRevision: projectanalysis.SourceRevision{Kind: projectanalysis.ScanKindLocal, Head: "workspace"},
 		Capabilities: projectanalysis.SourceCapabilities{
 			Source:       projectanalysis.Capability{Reason: projectanalysis.UnavailableNotRetained},
@@ -150,7 +155,7 @@ func TestPublishSourceRejectsUnsupportedAnalysisBeforeArtifactCreation(t *testin
 	projects := memory.NewProjectRepository()
 	analyses := &sourceAuditAnalysisStore{ProjectAnalysisStore: memory.NewProjectAnalysisStore()}
 	artifacts := sourceartifact.New(t.TempDir(), 0, 0, 0)
-	svc := NewService(projects, memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc := NewService(projects, memory.NewEngagementRepository(), sourcePublishTestClock(), fixedIDs{}, &captureAudit{}, true)
 	svc.SetAnalysisStore(analyses)
 	svc.SetSourceArtifactStore(artifacts)
 	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})

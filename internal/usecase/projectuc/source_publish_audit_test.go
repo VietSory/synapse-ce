@@ -19,7 +19,7 @@ func TestPublishSourceFailsClosedWithoutTransactionalAuditStore(t *testing.T) {
 	projects := memory.NewProjectRepository()
 	analyses := memory.NewProjectAnalysisStore()
 	artifacts := sourceartifact.New(t.TempDir(), 0, 0, 0)
-	svc := NewService(projects, memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc := NewService(projects, memory.NewEngagementRepository(), sourcePublishTestClock(), fixedIDs{}, &captureAudit{}, true)
 	svc.SetAnalysisStore(analyses)
 	svc.SetSourceArtifactStore(artifacts)
 	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
