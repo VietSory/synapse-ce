@@ -15,30 +15,17 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-var (
-	_ ports.ProjectAnalysisSourceAttacher      = (*ProjectAnalysisStore)(nil)
-	_ ports.ProjectAnalysisSourceAtomicMutator = (*ProjectAnalysisStore)(nil)
-)
-
-func (r *ProjectAnalysisStore) AttachSource(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture) error {
-	return r.attachSource(ctx, tenantID, projectID, analysisID, capture, nil)
-}
+var _ ports.ProjectAnalysisSourceAtomicMutator = (*ProjectAnalysisStore)(nil)
 
 func (r *ProjectAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit ports.AuditEntry) error {
-	return r.attachSource(ctx, tenantID, projectID, analysisID, capture, &audit)
-}
-
-func (r *ProjectAnalysisStore) attachSource(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit *ports.AuditEntry) error {
 	if tenantID.IsZero() || projectID.IsZero() || analysisID.IsZero() {
 		return fmt.Errorf("%w: source attachment scope is required", shared.ErrValidation)
 	}
 	if err := validatePublishedCapture(capture); err != nil {
 		return err
 	}
-	if audit != nil {
-		if err := validateSourcePublishAudit(*audit, analysisID, capture); err != nil {
-			return err
-		}
+	if err := validateSourcePublishAudit(audit, analysisID, capture); err != nil {
+		return err
 	}
 
 	tx, err := r.pool.Begin(ctx)
@@ -74,10 +61,8 @@ func (r *ProjectAnalysisStore) attachSource(ctx context.Context, tenantID, proje
 	if _, err := tx.Exec(ctx, `UPDATE project_analyses SET payload=$4 WHERE tenant_id=$1 AND project_id=$2 AND id=$3`, tenantID.String(), projectID.String(), analysisID.String(), updated); err != nil {
 		return fmt.Errorf("attach project analysis source: %w", err)
 	}
-	if audit != nil {
-		if err := appendAudit(ctx, tx, *audit); err != nil {
-			return err
-		}
+	if err := appendAudit(ctx, tx, audit); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit project analysis source attachment: %w", err)
