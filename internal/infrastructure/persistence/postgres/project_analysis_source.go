@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	_ ports.ProjectAnalysisSourceAttacher     = (*ProjectAnalysisStore)(nil)
+	_ ports.ProjectAnalysisSourceAttacher      = (*ProjectAnalysisStore)(nil)
 	_ ports.ProjectAnalysisSourceAtomicMutator = (*ProjectAnalysisStore)(nil)
 )
 
@@ -36,9 +36,8 @@ func (r *ProjectAnalysisStore) attachSource(ctx context.Context, tenantID, proje
 		return err
 	}
 	if audit != nil {
-		writer := capture.Manifest.Writer
-		if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) {
-			return fmt.Errorf("%w: source audit provenance does not match manifest writer", shared.ErrValidation)
+		if err := validateSourcePublishAudit(*audit, analysisID, capture); err != nil {
+			return err
 		}
 	}
 
@@ -103,6 +102,20 @@ func validatePublishedCapture(capture projectanalysis.SourceCapture) error {
 		if err := file.Validate(); err != nil {
 			return fmt.Errorf("%w: %v", shared.ErrValidation, err)
 		}
+	}
+	return nil
+}
+
+func validateSourcePublishAudit(audit ports.AuditEntry, analysisID shared.ID, capture projectanalysis.SourceCapture) error {
+	writer := capture.Manifest.Writer
+	if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) {
+		return fmt.Errorf("%w: source audit provenance does not match manifest writer", shared.ErrValidation)
+	}
+	if audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() {
+		return fmt.Errorf("%w: source audit action or target is invalid", shared.ErrValidation)
+	}
+	if audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {
+		return fmt.Errorf("%w: source audit metadata does not match manifest", shared.ErrValidation)
 	}
 	return nil
 }
