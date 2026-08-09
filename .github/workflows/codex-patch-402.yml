@@ -1,0 +1,63 @@
+name: Codex 402 narrow patch
+
+on:
+  push:
+    branches:
+      - codex/402-sanctioned-source-publish
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact integration edits
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one anchor, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "cmd/synapse-cli/main.go",
+              '\tcase "scan":\n\t\trunScan()\n',
+              '\tcase "scan":\n\t\trunScan()\n\tcase "publish-source":\n\t\tif err := runPublishSource(os.Args[2:]); err != nil {\n\t\t\tfmt.Fprintln(os.Stderr, "synapse-cli:", err)\n\t\t\tos.Exit(1)\n\t\t}\n',
+          )
+          replace_once(
+              "cmd/synapse-cli/main.go",
+              '\tfmt.Fprintln(os.Stderr, "      --include-test  also fail the gate on findings in test/fixture/example paths (default: reported but exempt)")\n',
+              '\tfmt.Fprintln(os.Stderr, "      --include-test  also fail the gate on findings in test/fixture/example paths (default: reported but exempt)")\n\tfmt.Fprintln(os.Stderr, "  synapse-cli publish-source [path] --server URL --project KEY --analysis ID  # stream server-inventoried source; token from SYNAPSE_API_TOKEN")\n',
+          )
+          replace_once(
+              "internal/adapter/httpapi/router.go",
+              '\t\tmux.HandleFunc("GET /api/v1/projects/{key}/analyses/{id}", rt.authz(userdom.PermView, rt.getProjectAnalysis))\n',
+              '\t\tmux.HandleFunc("GET /api/v1/projects/{key}/analyses/{id}", rt.authz(userdom.PermView, rt.getProjectAnalysis))\n\t\tmux.HandleFunc("POST /api/v1/projects/{key}/analyses/{id}/source", rt.authz(userdom.PermOperate, rt.publishProjectSource))\n',
+          )
+          replace_once(
+              "internal/infrastructure/persistence/memory/project_analysis_store.go",
+              '\tout.SourceManifest.Files = slices.Clone(a.SourceManifest.Files)\n\tout.Comparison.BaseManifest.Files = slices.Clone(a.Comparison.BaseManifest.Files)\n',
+              '\tout.SourceManifest.Files = slices.Clone(a.SourceManifest.Files)\n\tif a.SourceManifest.Writer != nil {\n\t\twriter := *a.SourceManifest.Writer\n\t\tout.SourceManifest.Writer = &writer\n\t}\n\tout.Comparison.BaseManifest.Files = slices.Clone(a.Comparison.BaseManifest.Files)\n\tif a.Comparison.BaseManifest.Writer != nil {\n\t\twriter := *a.Comparison.BaseManifest.Writer\n\t\tout.Comparison.BaseManifest.Writer = &writer\n\t}\n',
+          )
+      - name: Format and verify patch
+        run: |
+          gofmt -w cmd/synapse-cli/main.go internal/adapter/httpapi/router.go internal/infrastructure/persistence/memory/project_analysis_store.go
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add cmd/synapse-cli/main.go internal/adapter/httpapi/router.go internal/infrastructure/persistence/memory/project_analysis_store.go
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(appsec): wire sanctioned source publish"
+          git push origin HEAD:codex/402-sanctioned-source-publish
