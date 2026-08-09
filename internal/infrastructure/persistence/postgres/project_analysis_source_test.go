@@ -169,10 +169,10 @@ func TestProjectAnalysisSourceAttachmentRollsBackWhenAuditAppendFails(t *testing
 		t.Fatal(err)
 	}
 	defer lockConn.Release()
-	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock($1)`, auditChainLockKey); err != nil {
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock($1)`, auditChainLock); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, auditChainLockKey) }()
+	defer func() { _, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, auditChainLock) }()
 
 	capture := sourceAttachmentFixture(now)
 	audit := sourceAttachmentAudit(analysisID, capture)
