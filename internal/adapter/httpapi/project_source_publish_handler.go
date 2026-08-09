@@ -15,10 +15,9 @@ import (
 const (
 	projectSourcePublishMediaType   = "application/x-tar"
 	projectSourceToolVersionHeader = "X-Synapse-Tool-Version"
-	// The artifact store has lower retained-content caps. This transport ceiling is deliberately
-	// independent and slightly generous so tar headers/padding fit while malicious streams cannot
-	// make the server read an unbounded body made entirely of ignored paths.
-	projectSourcePublishMaxBody = int64(160 << 20)
+	// The retained source default is 500 MiB. Keep an independent transport ceiling above that
+	// budget so tar headers/padding fit, while ignored-path streams still cannot be unbounded.
+	projectSourcePublishMaxBody = int64(600 << 20)
 )
 
 type projectSourcePublisher interface {
