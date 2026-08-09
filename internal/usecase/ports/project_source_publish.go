@@ -20,15 +20,9 @@ type ProjectSourceArtifactPublisher interface {
 	DiscardPublished(ctx context.Context, tenantID, projectID shared.ID, analysisID string) error
 }
 
-// ProjectAnalysisSourceAttacher is the narrow post-analysis mutation allowed for sanctioned
-// source contribution. Implementations must attach source at most once.
-type ProjectAnalysisSourceAttacher interface {
-	AttachSource(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture) error
-}
-
 // ProjectAnalysisSourceAtomicMutator combines source attachment and its audit entry in one durable
-// transaction. Production stores should implement this; the use case requires this interface so
-// durable publication can never acknowledge source metadata without its matching audit record.
+// transaction. The sanctioned path requires this interface so durable source metadata can never be
+// acknowledged without its matching audit record.
 type ProjectAnalysisSourceAtomicMutator interface {
 	AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit AuditEntry) error
 }
