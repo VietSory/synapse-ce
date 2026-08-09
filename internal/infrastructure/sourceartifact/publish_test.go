@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func publishTar(t *testing.T, entries []tarEntry) *bytes.Reader {
 		}
 		data := []byte(entry.body)
 		hdr := &tar.Header{Name: entry.name, Mode: 0o600, Size: int64(len(data)), Typeflag: typeflag, Linkname: entry.linkname}
-		if typeflag != tar.TypeReg && typeflag != tar.TypeRegA {
+		if typeflag != tar.TypeReg {
 			hdr.Size = 0
 			data = nil
 		}
@@ -84,6 +85,59 @@ func TestPublishArchiveIsCreateOnlyAndSealsWriterProvenance(t *testing.T) {
 	}
 	if string(data) != "first\n" {
 		t.Fatalf("existing artifact was clobbered: %q", data)
+	}
+}
+
+func TestPublishArchiveConcurrentPublishersHaveExactlyOneWinner(t *testing.T) {
+	ctx := context.Background()
+	store := New(t.TempDir(), 0, 0, 0)
+	const contenders = 8
+	type result struct {
+		body string
+		err  error
+	}
+	archives := make([]*bytes.Reader, contenders)
+	bodies := make([]string, contenders)
+	for i := range contenders {
+		bodies[i] = fmt.Sprintf("winner-%d\n", i)
+		archives[i] = publishTar(t, []tarEntry{{name: "main.go", body: bodies[i]}})
+	}
+	start := make(chan struct{})
+	results := make(chan result, contenders)
+	for i := range contenders {
+		go func(i int) {
+			<-start
+			_, err := store.PublishArchive(ctx, "tenant", "project", "concurrent-analysis", testWriter(), []string{"main.go"}, archives[i])
+			results <- result{body: bodies[i], err: err}
+		}(i)
+	}
+	close(start)
+
+	winner := ""
+	conflicts := 0
+	for range contenders {
+		got := <-results
+		switch {
+		case got.err == nil:
+			if winner != "" {
+				t.Fatalf("more than one publisher succeeded: %q and %q", winner, got.body)
+			}
+			winner = got.body
+		case errors.Is(got.err, shared.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected concurrent publish error: %v", got.err)
+		}
+	}
+	if winner == "" || conflicts != contenders-1 {
+		t.Fatalf("winner=%q conflicts=%d, want one winner and %d conflicts", winner, conflicts, contenders-1)
+	}
+	data, _, err := store.Load(ctx, "tenant", "project", "concurrent-analysis", "main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != winner {
+		t.Fatalf("retained bytes=%q, winning publisher sent %q", data, winner)
 	}
 }
 
