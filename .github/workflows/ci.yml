@@ -57,9 +57,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Configure Postgres integration database
-        run: echo "SYNAPSE_TEST_DB_DSN=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable" >> "$GITHUB_ENV"
-
+      # MUTATION: the configure step is deliberately removed. The next guard must fail before tests
+      # can silently skip the Postgres integration suite.
       - name: Require Postgres integration database
         run: |
           if [ -z "${SYNAPSE_TEST_DB_DSN:-}" ]; then
@@ -115,11 +114,6 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          # vite 8 requires ^20.19 || >=22.12, and vitest's forks pool needs
-          # worker_threads.markAsUncloneable. Node 20 resolved to a build without it, so every web test
-          # failed to start its worker — a red suite that said nothing about the code. Pinned to the
-          # 22 LTS line, which satisfies both, and recorded in web/package.json engines so the
-          # requirement lives with the package rather than only in this file.
           node-version: 22
 
       - name: Set up pnpm
