@@ -65,6 +65,9 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	if err := s.validateAnalysisContext(projectID, analysisID); err != nil || strings.TrimSpace(sourceDir) == "" {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source capture context is required", shared.ErrValidation)
 	}
+	if err := s.validateWriteRoot(); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), err
+	}
 	if err := ctx.Err(); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
@@ -181,6 +184,9 @@ func (s *Store) Load(ctx context.Context, tenantID, projectID shared.ID, analysi
 func (s *Store) CaptureBase(ctx context.Context, tenantID, projectID shared.ID, analysisID string, files map[string][]byte) (projectanalysis.SourceManifest, error) {
 	manifest := projectanalysis.SourceManifest{}
 	if err := s.validateAnalysisContext(projectID, analysisID); err != nil {
+		return manifest, err
+	}
+	if err := s.validateWriteRoot(); err != nil {
 		return manifest, err
 	}
 	if len(files) == 0 {
