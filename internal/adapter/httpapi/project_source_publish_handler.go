@@ -26,6 +26,10 @@ type projectSourcePublisher interface {
 }
 
 func (rt *Router) publishProjectSource(w http.ResponseWriter, r *http.Request) {
+	rt.publishProjectSourceWithLimit(w, r, projectSourcePublishMaxBody)
+}
+
+func (rt *Router) publishProjectSourceWithLimit(w http.ResponseWriter, r *http.Request, maxBody int64) {
 	publisher, ok := rt.projects.(projectSourcePublisher)
 	if !ok {
 		writeJSON(w, http.StatusNotImplemented, errorBody{Error: "source publication is not configured"})
@@ -41,7 +45,7 @@ func (rt *Router) publishProjectSource(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: projectSourceToolVersionHeader + " is required"})
 		return
 	}
-	body := http.MaxBytesReader(w, r.Body, projectSourcePublishMaxBody)
+	body := http.MaxBytesReader(w, r.Body, maxBody)
 	defer func() { _ = body.Close() }()
 	manifest, err := publisher.PublishSource(r.Context(), projectuc.PublishSourceInput{
 		TenantID:    shared.ID(TenantFrom(r.Context())),
