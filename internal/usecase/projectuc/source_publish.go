@@ -77,8 +77,8 @@ func (s *Service) PublishSource(ctx context.Context, in PublishSourceInput) (pro
 		return projectanalysis.SourceManifest{}, err
 	}
 	audit := ports.AuditEntry{
-		Actor: in.Actor,
-		Action: "project.source.publish",
+		Actor:  in.Actor,
+		Action: ports.ProjectSourcePublishAuditAction,
 		Target: analysis.ID,
 		Metadata: map[string]string{
 			"project":         project.Key,
@@ -88,8 +88,8 @@ func (s *Service) PublishSource(ctx context.Context, in PublishSourceInput) (pro
 		At: now,
 	}
 	if err := mutator.AttachSourceWithAudit(ctx, in.TenantID, project.ID, analysisID, capture, audit); err != nil {
-		if cleanupErr := s.sourceArtifacts.DeleteAnalysis(ctx, in.TenantID, project.ID, analysis.ID); cleanupErr != nil {
-			return projectanalysis.SourceManifest{}, fmt.Errorf("attach source: %v; rollback artifact: %w", err, cleanupErr)
+		if cleanupErr := publisher.DiscardPublished(ctx, in.TenantID, project.ID, analysis.ID); cleanupErr != nil {
+			return projectanalysis.SourceManifest{}, fmt.Errorf("attach source: %v; rollback published artifact: %w", err, cleanupErr)
 		}
 		return projectanalysis.SourceManifest{}, err
 	}
