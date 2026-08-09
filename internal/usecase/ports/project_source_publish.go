@@ -8,6 +8,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
+const ProjectSourcePublishAuditAction = "project.source.publish"
+
 // ProjectSourceArtifactPublisher consumes a tar stream supplied by a contributor and publishes
 // a server-owned, immutable artifact. allowedPaths comes from the persisted analysis snapshot;
 // callers never trust the contributor to choose the durable source inventory.
@@ -22,8 +24,8 @@ type ProjectAnalysisSourceAttacher interface {
 }
 
 // ProjectAnalysisSourceAtomicMutator combines source attachment and its audit entry in one durable
-// transaction. Production stores should implement this; the use case falls back to Attacher plus
-// AuditLogger only for stores that cannot provide transactional durability (for example memory tests).
+// transaction. Production stores should implement this; the use case requires this interface so
+// durable publication can never acknowledge source metadata without its matching audit record.
 type ProjectAnalysisSourceAtomicMutator interface {
 	AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit AuditEntry) error
 }
