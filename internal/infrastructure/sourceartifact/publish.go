@@ -160,6 +160,16 @@ func (s *Store) PublishArchive(ctx context.Context, tenantID, projectID shared.I
 		manifest.Files = append(manifest.Files, unavailableFile(candidate, 0, projectanalysis.UnavailableNotRetained))
 	}
 	sort.Slice(manifest.Files, func(i, j int) bool { return manifest.Files[i].Path < manifest.Files[j].Path })
+	retained := false
+	for _, file := range manifest.Files {
+		if file.Available {
+			retained = true
+			break
+		}
+	}
+	if !retained {
+		return unavailable(projectanalysis.UnavailableNotRetained), fmt.Errorf("%w: source archive retained no analysis files", shared.ErrValidation)
+	}
 	manifest.SetArtifactDigest()
 	manifestData, err := json.Marshal(manifest)
 	if err != nil {
