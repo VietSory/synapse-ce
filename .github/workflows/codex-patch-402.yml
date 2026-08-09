@@ -46,8 +46,8 @@ jobs:
           )
           replace_once(
               "internal/infrastructure/persistence/memory/project_analysis_store.go",
-              '\tout.SourceManifest.Files = slices.Clone(a.SourceManifest.Files)\n\tout.Comparison.BaseManifest.Files = slices.Clone(a.Comparison.BaseManifest.Files)\n',
-              '\tout.SourceManifest.Files = slices.Clone(a.SourceManifest.Files)\n\tif a.SourceManifest.Writer != nil {\n\t\twriter := *a.SourceManifest.Writer\n\t\tout.SourceManifest.Writer = &writer\n\t}\n\tout.Comparison.BaseManifest.Files = slices.Clone(a.Comparison.BaseManifest.Files)\n\tif a.Comparison.BaseManifest.Writer != nil {\n\t\twriter := *a.Comparison.BaseManifest.Writer\n\t\tout.Comparison.BaseManifest.Writer = &writer\n\t}\n',
+              '\tout.SourceManifest.Files = slices.Clone(in.SourceManifest.Files)\n',
+              '\tout.SourceManifest.Files = slices.Clone(in.SourceManifest.Files)\n\tif in.SourceManifest.Writer != nil {\n\t\twriter := *in.SourceManifest.Writer\n\t\tout.SourceManifest.Writer = &writer\n\t}\n\tout.Comparison.BaseManifest.Files = slices.Clone(in.Comparison.BaseManifest.Files)\n\tif in.Comparison.BaseManifest.Writer != nil {\n\t\twriter := *in.Comparison.BaseManifest.Writer\n\t\tout.Comparison.BaseManifest.Writer = &writer\n\t}\n',
           )
       - name: Format and verify patch
         run: |
