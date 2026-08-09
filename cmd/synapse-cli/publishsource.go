@@ -22,8 +22,6 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/platform/buildinfo"
 )
 
-const sourcePublishTokenEnv = "SYNAPSE_API_TOKEN"
-
 func runPublishSource(args []string) error {
 	fs := flag.NewFlagSet("publish-source", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -40,9 +38,9 @@ func runPublishSource(args []string) error {
 	if fs.NArg() == 1 {
 		root = fs.Arg(0)
 	}
-	token := strings.TrimSpace(os.Getenv(sourcePublishTokenEnv))
+	token := strings.TrimSpace(os.Getenv("SYNAPSE_API_TOKEN"))
 	if strings.TrimSpace(*server) == "" || strings.TrimSpace(*projectKey) == "" || strings.TrimSpace(*analysisID) == "" || token == "" {
-		return fmt.Errorf("publish-source requires --server, --project, --analysis and %s", sourcePublishTokenEnv)
+		return fmt.Errorf("publish-source requires --server, --project, --analysis and SYNAPSE_API_TOKEN")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -178,9 +176,9 @@ func sourcePublishHTTPError(resp *http.Response) error {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal(body, &payload) == nil && strings.TrimSpace(payload.Error) != "" {
-		return fmt.Errorf("Synapse API returned %s: %s", resp.Status, strings.TrimSpace(payload.Error))
+		return fmt.Errorf("synapse API returned %s: %s", resp.Status, strings.TrimSpace(payload.Error))
 	}
-	return fmt.Errorf("Synapse API returned %s", resp.Status)
+	return fmt.Errorf("synapse API returned %s", resp.Status)
 }
 
 func retainableAnalysisPaths(analysis projectanalysis.Analysis) []string {
