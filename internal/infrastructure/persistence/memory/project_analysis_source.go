@@ -22,6 +22,12 @@ func (s *ProjectAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenant
 	if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) {
 		return fmt.Errorf("%w: source audit provenance does not match manifest writer", shared.ErrValidation)
 	}
+	if audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() {
+		return fmt.Errorf("%w: source audit action or target is invalid", shared.ErrValidation)
+	}
+	if audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {
+		return fmt.Errorf("%w: source audit metadata does not match manifest", shared.ErrValidation)
+	}
 	return s.AttachSource(ctx, tenantID, projectID, analysisID, capture)
 }
 
