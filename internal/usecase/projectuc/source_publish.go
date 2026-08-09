@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
@@ -13,6 +14,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sourcepolicy"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
+
+const sourcePublishCompensationTimeout = 5 * time.Second
 
 // PublishSourceInput contains only contributor-controlled facts that are safe to accept.
 // Tenant and project identity are resolved by the authenticated server path, never from the archive.
@@ -94,7 +97,12 @@ func (s *Service) PublishSource(ctx context.Context, in PublishSourceInput) (pro
 		At: now,
 	}
 	if err := mutator.AttachSourceWithAudit(ctx, in.TenantID, project.ID, analysisID, capture, audit); err != nil {
-		if cleanupErr := publisher.DiscardPublished(ctx, in.TenantID, project.ID, analysis.ID); cleanupErr != nil {
+		// The mutator may fail because the request context itself expired. Compensation must still
+		// get a short bounded opportunity to remove the artifact that this call just published.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sourcePublishCompensationTimeout)
+		cleanupErr := publisher.DiscardPublished(cleanupCtx, in.TenantID, project.ID, analysis.ID)
+		cancel()
+		if cleanupErr != nil {
 			return projectanalysis.SourceManifest{}, errors.Join(err, fmt.Errorf("rollback published artifact: %w", cleanupErr))
 		}
 		return projectanalysis.SourceManifest{}, err
