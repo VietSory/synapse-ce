@@ -9,14 +9,11 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sourcepolicy"
-	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-// The in-memory store deliberately does NOT implement ProjectAnalysisSourceAtomicMutator: it has no
-// durable audit transaction. A server without Postgres must fail closed rather than acknowledge a
-// sanctioned source contribution that cannot satisfy the audit contract.
-var _ ports.ProjectAnalysisSourceAttacher = (*ProjectAnalysisStore)(nil)
-
+// AttachSource supports in-process tests and ephemeral stores, but the in-memory store deliberately
+// does not satisfy the sanctioned publish mutator contract because it cannot append a durable audit
+// record in the same transaction. Production PublishSource therefore fails closed without Postgres.
 func (s *ProjectAnalysisStore) AttachSource(_ context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture) error {
 	if tenantID.IsZero() || projectID.IsZero() || analysisID.IsZero() {
 		return fmt.Errorf("%w: source attachment scope is required", shared.ErrValidation)
