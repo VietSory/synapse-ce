@@ -171,3 +171,19 @@ func (s *Store) PublishArchive(ctx context.Context, tenantID, projectID shared.I
 	committed = true
 	return projectanalysis.SourceCapture{Capabilities: availableCapabilities(), Manifest: manifest}, nil
 }
+
+// DiscardPublished removes only the v2 directory claimed by PublishArchive. It is used as a
+// compensation action when the subsequent analysis+audit transaction fails; legacy capture
+// locations are deliberately untouched.
+func (s *Store) DiscardPublished(ctx context.Context, tenantID, projectID shared.ID, analysisID string) error {
+	if err := s.validateAnalysisContext(projectID, analysisID); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(s.analysisDir(tenantID, projectID, analysisID)); err != nil {
+		return fmt.Errorf("discard published source artifact: %w", err)
+	}
+	return nil
+}
