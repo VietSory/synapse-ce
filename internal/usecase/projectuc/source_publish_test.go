@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +24,13 @@ func sourcePublishTestClock() fixedClock {
 
 type sourceAuditAnalysisStore struct {
 	*memory.ProjectAnalysisStore
-	audits []ports.AuditEntry
+	mu      sync.Mutex
+	sources map[string]projectanalysis.SourceCapture
+	audits  []ports.AuditEntry
+}
+
+func sourceAttachmentKey(tenantID, projectID, analysisID shared.ID) string {
+	return tenantID.String() + "\x00" + projectID.String() + "\x00" + analysisID.String()
 }
 
 func (s *sourceAuditAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit ports.AuditEntry) error {
@@ -31,11 +38,42 @@ func (s *sourceAuditAnalysisStore) AttachSourceWithAudit(ctx context.Context, te
 	if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) || audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() || audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {
 		return shared.ErrValidation
 	}
-	if err := s.AttachSource(ctx, tenantID, projectID, analysisID, capture); err != nil {
+	analysis, err := s.ProjectAnalysisStore.Get(ctx, tenantID, projectID, analysisID)
+	if err != nil {
 		return err
 	}
+	if analysis.Capabilities.Source.Available || analysis.SourceManifest.Digest != "" {
+		return shared.ErrConflict
+	}
+	key := sourceAttachmentKey(tenantID, projectID, analysisID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sources == nil {
+		s.sources = make(map[string]projectanalysis.SourceCapture)
+	}
+	if _, exists := s.sources[key]; exists {
+		return shared.ErrConflict
+	}
+	s.sources[key] = capture
 	s.audits = append(s.audits, audit)
 	return nil
+}
+
+func (s *sourceAuditAnalysisStore) Get(ctx context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error) {
+	analysis, err := s.ProjectAnalysisStore.Get(ctx, tenantID, projectID, analysisID)
+	if err != nil {
+		return projectanalysis.Analysis{}, err
+	}
+	key := sourceAttachmentKey(tenantID, projectID, analysisID)
+	s.mu.Lock()
+	capture, ok := s.sources[key]
+	s.mu.Unlock()
+	if ok {
+		analysis.SourceManifest = capture.Manifest
+		analysis.Capabilities.Source = projectanalysis.Capability{Available: true}
+		analysis.Capabilities.Highlighting = projectanalysis.Capability{Available: true}
+	}
+	return analysis, nil
 }
 
 func sourceTar(t *testing.T, files map[string]string) *bytes.Reader {
