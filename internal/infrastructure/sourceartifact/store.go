@@ -42,6 +42,7 @@ type Store struct {
 	maxFileBytes int64
 	maxFiles     int
 	maxBytes     int64
+	retention    time.Duration
 }
 
 func New(root string, maxFileBytes int64, maxFiles int, maxBytes int64) *Store {
@@ -57,6 +58,29 @@ func New(root string, maxFileBytes int64, maxFiles int, maxBytes int64) *Store {
 	return &Store{root: root, maxFileBytes: maxFileBytes, maxFiles: maxFiles, maxBytes: maxBytes}
 }
 
+// SetRetention makes retention a write-path invariant, not merely a startup task.
+// A non-positive duration disables age-based cleanup.
+func (s *Store) SetRetention(retention time.Duration) {
+	if retention > 0 {
+		s.retention = retention
+		return
+	}
+	s.retention = 0
+}
+
+func (s *Store) cleanupBeforeWrite(ctx context.Context) error {
+	if s.retention <= 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.CleanupExpired(ctx, time.Now().Add(-s.retention)); err != nil {
+		return fmt.Errorf("clean expired source artifacts: %w", err)
+	}
+	return nil
+}
+
 var _ ports.ProjectSourceArtifactStore = (*Store)(nil)
 
 func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, analysisID, sourceDir string) (projectanalysis.SourceCapture, error) {
@@ -70,6 +94,9 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
 	if err := s.validateWriteRoot(); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), err
+	}
+	if err := s.cleanupBeforeWrite(ctx); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
 	if err := ctx.Err(); err != nil {
@@ -207,6 +234,9 @@ func (s *Store) CaptureBase(ctx context.Context, tenantID, projectID shared.ID, 
 		return manifest, err
 	}
 	if err := s.validateWriteRoot(); err != nil {
+		return manifest, err
+	}
+	if err := s.cleanupBeforeWrite(ctx); err != nil {
 		return manifest, err
 	}
 	if len(files) == 0 {
@@ -444,15 +474,16 @@ func (s *Store) cleanupExpiredAt(root string, before time.Time) error {
 					continue
 				}
 				analysisDir := filepath.Join(analysisRoot, analysis.Name())
-				if _, err := os.Stat(filepath.Join(analysisDir, "manifest.json")); os.IsNotExist(err) {
-					continue
-				} else if err != nil {
-					return fmt.Errorf("stat source artifact manifest: %w", err)
-				}
 				info, err := analysis.Info()
 				if err != nil {
 					return err
 				}
+				if _, err := os.Stat(filepath.Join(analysisDir, "manifest.json")); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("stat source artifact manifest: %w", err)
+				}
+				// A process may die after atomically claiming the analysis directory but before
+				// writing manifest.json. Treat an old manifest-less claim as managed stale state
+				// so it cannot block publication forever.
 				if info.ModTime().Before(before) {
 					if err := os.RemoveAll(analysisDir); err != nil {
 						return fmt.Errorf("remove expired source artifacts: %w", err)

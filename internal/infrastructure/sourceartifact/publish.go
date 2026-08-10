@@ -38,6 +38,9 @@ func (s *Store) PublishArchive(ctx context.Context, tenantID, projectID shared.I
 	if err := s.validateWriteRoot(); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
+	if err := s.cleanupBeforeWrite(ctx); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), err
+	}
 	if err := writer.Validate(); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: %v", shared.ErrValidation, err)
 	}
