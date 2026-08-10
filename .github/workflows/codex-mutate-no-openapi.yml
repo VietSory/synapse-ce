@@ -1,0 +1,30 @@
+name: codex-mutate-no-openapi
+on:
+  push:
+    branches: [codex/402-mutation-no-openapi]
+permissions:
+  contents: write
+jobs:
+  mutate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: codex/402-mutation-no-openapi}
+      - name: Remove source publish OpenAPI path
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('api/openapi.yaml')
+          s=p.read_text()
+          start=s.index('  /api/v1/projects/{key}/analyses/{id}/source:\n')
+          end=s.index('  /api/v1/projects/{key}/analyses/{id}/code/files:\n', start)
+          p.write_text(s[:start]+s[end:])
+      - name: Commit mutation and remove helper
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/codex-mutate-no-openapi.yml
+          git add api/openapi.yaml
+          git commit -m 'MUTATION: remove sanctioned source OpenAPI path'
+          git push origin HEAD:codex/402-mutation-no-openapi
