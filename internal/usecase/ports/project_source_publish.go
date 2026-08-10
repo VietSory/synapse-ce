@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
@@ -9,6 +10,12 @@ import (
 )
 
 const ProjectSourcePublishAuditAction = "project.source.publish"
+
+// ErrProjectSourceCommitUncertain marks a commit-phase failure whose durable outcome cannot be
+// proven by the caller. The filesystem artifact must be preserved in this case: deleting it could
+// corrupt an analysis+audit transaction that actually committed. Retention can safely reclaim an
+// orphan later if the transaction did roll back.
+var ErrProjectSourceCommitUncertain = errors.New("project source commit outcome is uncertain")
 
 // ProjectSourceArtifactPublisher consumes a tar stream supplied by a contributor and publishes
 // a server-owned, immutable artifact. allowedPaths comes from the persisted analysis snapshot;
