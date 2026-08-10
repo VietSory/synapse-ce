@@ -57,6 +57,7 @@ func publishSourceFromAnalysis(ctx context.Context, client *http.Client, server,
 	if client == nil {
 		return projectanalysis.SourceManifest{}, fmt.Errorf("http client is required")
 	}
+	client = sourcePublishNoRedirectClient(client)
 	base, err := sourcePublishBaseURL(server)
 	if err != nil {
 		return projectanalysis.SourceManifest{}, err
@@ -130,6 +131,14 @@ func publishSourceFromAnalysis(ctx context.Context, client *http.Client, server,
 		return projectanalysis.SourceManifest{}, fmt.Errorf("server returned an invalid source manifest")
 	}
 	return manifest, nil
+}
+
+func sourcePublishNoRedirectClient(client *http.Client) *http.Client {
+	clone := *client
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &clone
 }
 
 func sourcePublishBaseURL(raw string) (*url.URL, error) {
