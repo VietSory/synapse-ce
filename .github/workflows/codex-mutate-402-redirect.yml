@@ -1,0 +1,35 @@
+name: Codex 402 mutate redirect refusal
+
+on:
+  push:
+    branches:
+      - codex/402-mutation-allow-redirect
+
+permissions:
+  contents: write
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/402-mutation-allow-redirect
+      - name: Remove redirect refusal
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("cmd/synapse-cli/publishsource.go")
+          text = path.read_text()
+          old = '\tclient = sourcePublishNoRedirectClient(client)\n'
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one redirect guard call, found {text.count(old)}")
+          path.write_text(text.replace(old, ""))
+      - name: Commit mutation and remove helper
+        run: |
+          rm .github/workflows/codex-mutate-402-redirect.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cmd/synapse-cli/publishsource.go .github/workflows/codex-mutate-402-redirect.yml
+          git commit -m "test(mutation): allow source publish redirects"
+          git push
