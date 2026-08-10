@@ -1,0 +1,53 @@
+name: Codex 402 fix integrity fixtures
+
+on:
+  push:
+    branches:
+      - codex/402-sanctioned-source-publish
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/402-sanctioned-source-publish
+      - name: Patch exact source integrity fixtures
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("internal/usecase/projectuc/code_viewer_test.go")
+          text = path.read_text()
+          replacements = {
+              'SourceManifest: projectanalysis.SourceManifest{Files: []projectanalysis.SourceFile{{Path: "main.go", Digest: "digest", Lines: 3, Available: true}}},':
+              'SourceManifest: projectanalysis.SourceManifest{Files: []projectanalysis.SourceFile{{Path: "main.go", Digest: "digest", Bytes: int64(len(artifacts.data)), Lines: 3, Available: true}}},',
+              'Comparison:   projectanalysis.Comparison{Available: true, BaseCommit: "base", MergeBase: "base", BaseManifest: projectanalysis.SourceManifest{Files: []projectanalysis.SourceFile{{Path: "deleted.go", Digest: "base-digest", Lines: 1, Available: true}}}},':
+              'Comparison:   projectanalysis.Comparison{Available: true, BaseCommit: "base", MergeBase: "base", BaseManifest: projectanalysis.SourceManifest{Files: []projectanalysis.SourceFile{{Path: "deleted.go", Digest: "base-digest", Bytes: int64(len(artifacts.baseData)), Lines: 1, Available: true}}}},',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one fixture anchor, found {text.count(old)}: {old}")
+              text = text.replace(old, new)
+          path.write_text(text)
+
+          path = Path("internal/usecase/projectuc/source_publish_test.go")
+          text = path.read_text()
+          old = 's.ProjectAnalysisStore.AttachSource(ctx, tenantID, projectID, analysisID, capture)'
+          new = 's.AttachSource(ctx, tenantID, projectID, analysisID, capture)'
+          if text.count(old) != 1:
+              raise SystemExit(f"expected exactly one embedded selector, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
+      - name: Format, verify, commit, and remove helper
+        run: |
+          gofmt -w internal/usecase/projectuc/code_viewer_test.go internal/usecase/projectuc/source_publish_test.go
+          go test ./internal/usecase/projectuc
+          rm .github/workflows/codex-fix-402-integrity-fixtures.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/usecase/projectuc/code_viewer_test.go internal/usecase/projectuc/source_publish_test.go .github/workflows/codex-fix-402-integrity-fixtures.yml
+          git commit -m "test(appsec): align source integrity fixtures"
+          git push
