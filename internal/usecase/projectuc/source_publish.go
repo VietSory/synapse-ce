@@ -97,6 +97,11 @@ func (s *Service) PublishSource(ctx context.Context, in PublishSourceInput) (pro
 		At: now,
 	}
 	if err := mutator.AttachSourceWithAudit(ctx, in.TenantID, project.ID, analysisID, capture, audit); err != nil {
+		if errors.Is(err, ports.ErrProjectSourceCommitUncertain) {
+			// COMMIT may already be durable. Never destroy bytes that a committed analysis+audit can
+			// reference; if the transaction actually rolled back, retention can reap the orphan later.
+			return projectanalysis.SourceManifest{}, err
+		}
 		// The mutator may fail because the request context itself expired. Compensation must still
 		// get a short bounded opportunity to remove the artifact that this call just published.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sourcePublishCompensationTimeout)
