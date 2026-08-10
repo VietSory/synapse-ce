@@ -92,9 +92,6 @@ func validatePublishedCapture(capture projectanalysis.SourceCapture) error {
 			available++
 		}
 	}
-	if available == 0 {
-		return fmt.Errorf("%w: published source manifest contains no retained source bytes", shared.ErrValidation)
-	}
 	return nil
 }
 
