@@ -1,0 +1,35 @@
+name: Codex 402 mutate zero retained persistence
+
+on:
+  push:
+    branches:
+      - codex/402-mutation-zero-retained-persistence
+
+permissions:
+  contents: write
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/402-mutation-zero-retained-persistence
+      - name: Remove persistence retained-byte guard
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("internal/infrastructure/persistence/postgres/project_analysis_source.go")
+          text = path.read_text()
+          old = '''\tif available == 0 {\n\t\treturn fmt.Errorf("%w: published source manifest contains no retained source bytes", shared.ErrValidation)\n\t}\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one retained-byte guard, found {text.count(old)}")
+          path.write_text(text.replace(old, ""))
+      - name: Commit mutation and remove helper
+        run: |
+          rm .github/workflows/codex-mutate-402-zero-retained.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/infrastructure/persistence/postgres/project_analysis_source.go .github/workflows/codex-mutate-402-zero-retained.yml
+          git commit -m "test(mutation): allow zero-retained source attachment"
+          git push
