@@ -31,7 +31,7 @@ func (s *sourceAuditAnalysisStore) AttachSourceWithAudit(ctx context.Context, te
 	if writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) || audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() || audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {
 		return shared.ErrValidation
 	}
-	if err := s.ProjectAnalysisStore.AttachSource(ctx, tenantID, projectID, analysisID, capture); err != nil {
+	if err := s.AttachSource(ctx, tenantID, projectID, analysisID, capture); err != nil {
 		return err
 	}
 	s.audits = append(s.audits, audit)
