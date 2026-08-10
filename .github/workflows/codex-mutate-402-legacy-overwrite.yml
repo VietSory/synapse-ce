@@ -1,0 +1,37 @@
+name: Codex 402 mutate legacy overwrite
+
+on:
+  push:
+    branches:
+      - codex/402-mutation-legacy-overwrite
+
+permissions:
+  contents: write
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/402-mutation-legacy-overwrite
+      - name: Restore destructive legacy capture replacement
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("internal/infrastructure/sourceartifact/store.go")
+          text = p.read_text()
+          old = '''\tif err := os.Mkdir(captureRoot, 0o700); err != nil {\n\t\tif errors.Is(err, fs.ErrExist) {\n\t\t\treturn unavailable(projectanalysis.UnavailableAlreadyRetained), shared.ErrConflict\n\t\t}\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("claim source artifact: %w", err)\n\t}\n\tpublished := false\n\tdefer func() {\n\t\tif !published {\n\t\t\t_ = os.RemoveAll(captureRoot)\n\t\t}\n\t}()\n\tif err := os.Rename(filepath.Join(tmp, "blobs"), filepath.Join(captureRoot, "blobs")); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source blobs: %w", err)\n\t}\n\tif err := os.Rename(filepath.Join(tmp, "manifest.json"), filepath.Join(captureRoot, "manifest.json")); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source manifest: %w", err)\n\t}\n\tpublished = true\n'''
+          new = '''\tif err := os.RemoveAll(captureRoot); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("replace source artifact: %w", err)\n\t}\n\tif err := os.Rename(tmp, captureRoot); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source artifact: %w", err)\n\t}\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one legacy create-only block, found {text.count(old)}")
+          p.write_text(text.replace(old, new))
+      - name: Commit mutation and remove helper
+        run: |
+          gofmt -w internal/infrastructure/sourceartifact/store.go
+          rm .github/workflows/codex-mutate-402-legacy-overwrite.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/infrastructure/sourceartifact/store.go .github/workflows/codex-mutate-402-legacy-overwrite.yml
+          git commit -m "test(mutation): restore destructive legacy source overwrite"
+          git push
