@@ -65,7 +65,10 @@ func (r *ProjectAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenant
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit project analysis source attachment: %w", err)
+		// Once COMMIT has been sent, a transport failure can make its durable outcome unknowable.
+		// The caller must not compensate by deleting the artifact: the DB row and audit may already
+		// be committed. An orphan is safe to retain and later reap; missing committed bytes are not.
+		return fmt.Errorf("%w: commit project analysis source attachment: %v", ports.ErrProjectSourceCommitUncertain, err)
 	}
 	return nil
 }
