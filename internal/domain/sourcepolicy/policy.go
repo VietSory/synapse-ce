@@ -1,23 +1,10 @@
 // Package sourcepolicy defines the server-authoritative policy for durable Code source snapshots.
 package sourcepolicy
 
-import (
-	"path"
-	"strings"
+import "github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 
-	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
-)
-
-var ignoredSegments = map[string]struct{}{
-	".git": {}, ".hg": {}, ".svn": {}, ".idea": {}, ".vscode": {}, ".tox": {},
-	".venv": {}, "venv": {}, "__pycache__": {}, "node_modules": {}, "vendor": {},
-	"dist": {}, "build": {}, "target": {},
-}
-
-// RetainPath reports whether a canonical, scanner-owned source path is safe to retain durably.
-// The analysis snapshot remains the primary allowlist. This policy mirrors the inventory's heavy
-// state/vendor exclusions and adds credential-shaped files that must never become source artifacts,
-// even if a producer's inventory drifts.
+// RetainPath intentionally keeps only canonical-path validation for this mutation branch. The
+// credential and state exclusions are removed so the real tests must prove they are load-bearing.
 func RetainPath(p string) bool {
 	canonical, err := measure.CanonicalPath(p)
 	return err == nil && canonical != "" && canonical == p
