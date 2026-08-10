@@ -68,18 +68,7 @@ func (s *Store) SetRetention(retention time.Duration) {
 	s.retention = 0
 }
 
-func (s *Store) cleanupBeforeWrite(ctx context.Context) error {
-	if s.retention <= 0 {
-		return nil
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := s.CleanupExpired(ctx, time.Now().Add(-s.retention)); err != nil {
-		return fmt.Errorf("clean expired source artifacts: %w", err)
-	}
-	return nil
-}
+func (s *Store) cleanupBeforeWrite(context.Context) error { return nil }
 
 var _ ports.ProjectSourceArtifactStore = (*Store)(nil)
 
