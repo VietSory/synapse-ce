@@ -22,6 +22,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/sourcepolicy"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
@@ -64,9 +65,6 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	}
 	if err := s.validateAnalysisContext(projectID, analysisID); err != nil || strings.TrimSpace(sourceDir) == "" {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source capture context is required", shared.ErrValidation)
-	}
-	if err := s.validateSourceIsolation(sourceDir); err != nil {
-		return unavailable(projectanalysis.UnavailableCaptureFailed), err
 	}
 	if err := s.validateSourceIsolation(sourceDir); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), err
@@ -123,6 +121,9 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 		if err != nil || path == "" {
 			return fmt.Errorf("invalid source path: %w", err)
 		}
+		if !sourcepolicy.RetainPath(path) {
+			return nil
+		}
 		if len(manifest.Files) >= s.maxFiles {
 			manifest.Truncated = true
 			return nil
@@ -172,12 +173,25 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	if err := os.WriteFile(filepath.Join(tmp, "manifest.json"), manifestData, 0o600); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("write source manifest: %w", err)
 	}
-	if err := os.RemoveAll(captureRoot); err != nil {
-		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("replace source artifact: %w", err)
+	if err := os.Mkdir(captureRoot, 0o700); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return unavailable(projectanalysis.UnavailableAlreadyRetained), shared.ErrConflict
+		}
+		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("claim source artifact: %w", err)
 	}
-	if err := os.Rename(tmp, captureRoot); err != nil {
-		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source artifact: %w", err)
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(captureRoot)
+		}
+	}()
+	if err := os.Rename(filepath.Join(tmp, "blobs"), filepath.Join(captureRoot, "blobs")); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source blobs: %w", err)
 	}
+	if err := os.Rename(filepath.Join(tmp, "manifest.json"), filepath.Join(captureRoot, "manifest.json")); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source manifest: %w", err)
+	}
+	published = true
 	return projectanalysis.SourceCapture{Capabilities: availableCapabilities(), Manifest: manifest}, nil
 }
 
@@ -217,7 +231,14 @@ func (s *Store) CaptureBase(ctx context.Context, tenantID, projectID shared.ID, 
 		if err != nil || canonical == "" || canonical != path {
 			return projectanalysis.SourceManifest{}, fmt.Errorf("%w: base source path is invalid", shared.ErrValidation)
 		}
+		if !sourcepolicy.RetainPath(path) {
+			continue
+		}
 		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		manifest.SetArtifactDigest()
+		return manifest, nil
 	}
 	sort.Strings(paths)
 	var total int64
@@ -255,12 +276,25 @@ func (s *Store) CaptureBase(ctx context.Context, tenantID, projectID shared.ID, 
 	if err := os.WriteFile(filepath.Join(tmp, "manifest.json"), data, 0o600); err != nil {
 		return projectanalysis.SourceManifest{}, fmt.Errorf("write base source manifest: %w", err)
 	}
-	if err := os.RemoveAll(root); err != nil {
-		return projectanalysis.SourceManifest{}, fmt.Errorf("replace base source artifact: %w", err)
+	if err := os.Mkdir(root, 0o700); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return projectanalysis.SourceManifest{}, shared.ErrConflict
+		}
+		return projectanalysis.SourceManifest{}, fmt.Errorf("claim base source artifact: %w", err)
 	}
-	if err := os.Rename(tmp, root); err != nil {
-		return projectanalysis.SourceManifest{}, fmt.Errorf("publish base source artifact: %w", err)
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(root)
+		}
+	}()
+	if err := os.Rename(filepath.Join(tmp, "blobs"), filepath.Join(root, "blobs")); err != nil {
+		return projectanalysis.SourceManifest{}, fmt.Errorf("publish base source blobs: %w", err)
 	}
+	if err := os.Rename(filepath.Join(tmp, "manifest.json"), filepath.Join(root, "manifest.json")); err != nil {
+		return projectanalysis.SourceManifest{}, fmt.Errorf("publish base source manifest: %w", err)
+	}
+	published = true
 	return manifest, nil
 }
 
