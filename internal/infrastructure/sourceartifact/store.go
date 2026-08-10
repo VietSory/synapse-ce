@@ -173,25 +173,12 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	if err := os.WriteFile(filepath.Join(tmp, "manifest.json"), manifestData, 0o600); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("write source manifest: %w", err)
 	}
-	if err := os.Mkdir(captureRoot, 0o700); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return unavailable(projectanalysis.UnavailableAlreadyRetained), shared.ErrConflict
-		}
-		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("claim source artifact: %w", err)
+	if err := os.RemoveAll(captureRoot); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("replace source artifact: %w", err)
 	}
-	published := false
-	defer func() {
-		if !published {
-			_ = os.RemoveAll(captureRoot)
-		}
-	}()
-	if err := os.Rename(filepath.Join(tmp, "blobs"), filepath.Join(captureRoot, "blobs")); err != nil {
-		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source blobs: %w", err)
+	if err := os.Rename(tmp, captureRoot); err != nil {
+		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source artifact: %w", err)
 	}
-	if err := os.Rename(filepath.Join(tmp, "manifest.json"), filepath.Join(captureRoot, "manifest.json")); err != nil {
-		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source manifest: %w", err)
-	}
-	published = true
 	return projectanalysis.SourceCapture{Capabilities: availableCapabilities(), Manifest: manifest}, nil
 }
 
