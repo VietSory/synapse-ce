@@ -83,10 +83,17 @@ func validatePublishedCapture(capture projectanalysis.SourceCapture) error {
 	if capture.Manifest.Digest == "" || capture.Manifest.Digest != capture.Manifest.ArtifactDigest() {
 		return fmt.Errorf("%w: source manifest digest is invalid", shared.ErrValidation)
 	}
+	available := 0
 	for _, file := range capture.Manifest.Files {
 		if err := file.Validate(); err != nil {
 			return fmt.Errorf("%w: %v", shared.ErrValidation, err)
 		}
+		if file.Available {
+			available++
+		}
+	}
+	if available == 0 {
+		return fmt.Errorf("%w: published source manifest contains no retained source bytes", shared.ErrValidation)
 	}
 	return nil
 }
