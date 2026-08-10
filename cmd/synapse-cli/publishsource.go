@@ -57,7 +57,6 @@ func publishSourceFromAnalysis(ctx context.Context, client *http.Client, server,
 	if client == nil {
 		return projectanalysis.SourceManifest{}, fmt.Errorf("http client is required")
 	}
-	client = sourcePublishNoRedirectClient(client)
 	base, err := sourcePublishBaseURL(server)
 	if err != nil {
 		return projectanalysis.SourceManifest{}, err
