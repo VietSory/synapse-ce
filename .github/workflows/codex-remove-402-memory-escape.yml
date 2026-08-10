@@ -1,0 +1,40 @@
+name: Codex 402 remove memory source escape
+
+on:
+  push:
+    branches:
+      - codex/402-sanctioned-source-publish
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/402-sanctioned-source-publish
+      - name: Move source attachment behavior into test fake
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("internal/usecase/projectuc/source_publish_test.go")
+          text = path.read_text()
+          text = text.replace('"errors"\n\t"testing"', '"errors"\n\t"sync"\n\t"testing"', 1)
+          old = '''type sourceAuditAnalysisStore struct {\n\t*memory.ProjectAnalysisStore\n\taudits []ports.AuditEntry\n}\n\nfunc (s *sourceAuditAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit ports.AuditEntry) error {\n\twriter := capture.Manifest.Writer\n\tif writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) || audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() || audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {\n\t\treturn shared.ErrValidation\n\t}\n\tif err := s.AttachSource(ctx, tenantID, projectID, analysisID, capture); err != nil {\n\t\treturn err\n\t}\n\ts.audits = append(s.audits, audit)\n\treturn nil\n}\n'''
+          new = '''type sourceAuditAnalysisStore struct {\n\t*memory.ProjectAnalysisStore\n\tmu      sync.Mutex\n\tsources map[string]projectanalysis.SourceCapture\n\taudits  []ports.AuditEntry\n}\n\nfunc sourceAttachmentKey(tenantID, projectID, analysisID shared.ID) string {\n\treturn tenantID.String() + "\\x00" + projectID.String() + "\\x00" + analysisID.String()\n}\n\nfunc (s *sourceAuditAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenantID, projectID, analysisID shared.ID, capture projectanalysis.SourceCapture, audit ports.AuditEntry) error {\n\twriter := capture.Manifest.Writer\n\tif writer == nil || audit.Actor != writer.Actor || !audit.At.Equal(writer.PublishedAt) || audit.Action != ports.ProjectSourcePublishAuditAction || audit.Target != analysisID.String() || audit.Metadata["artifact_digest"] != capture.Manifest.Digest || audit.Metadata["tool_version"] != writer.ToolVersion {\n\t\treturn shared.ErrValidation\n\t}\n\tanalysis, err := s.ProjectAnalysisStore.Get(ctx, tenantID, projectID, analysisID)\n\tif err != nil {\n\t\treturn err\n\t}\n\tif analysis.Capabilities.Source.Available || analysis.SourceManifest.Digest != "" {\n\t\treturn shared.ErrConflict\n\t}\n\tkey := sourceAttachmentKey(tenantID, projectID, analysisID)\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tif s.sources == nil {\n\t\ts.sources = make(map[string]projectanalysis.SourceCapture)\n\t}\n\tif _, exists := s.sources[key]; exists {\n\t\treturn shared.ErrConflict\n\t}\n\ts.sources[key] = capture\n\ts.audits = append(s.audits, audit)\n\treturn nil\n}\n\nfunc (s *sourceAuditAnalysisStore) Get(ctx context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error) {\n\tanalysis, err := s.ProjectAnalysisStore.Get(ctx, tenantID, projectID, analysisID)\n\tif err != nil {\n\t\treturn projectanalysis.Analysis{}, err\n\t}\n\tkey := sourceAttachmentKey(tenantID, projectID, analysisID)\n\ts.mu.Lock()\n\tcapture, ok := s.sources[key]\n\ts.mu.Unlock()\n\tif ok {\n\t\tanalysis.SourceManifest = capture.Manifest\n\t\tanalysis.Capabilities.Source = projectanalysis.Capability{Available: true}\n\t\tanalysis.Capabilities.Highlighting = projectanalysis.Capability{Available: true}\n\t}\n\treturn analysis, nil\n}\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one source test fake block, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
+      - name: Remove memory mutation escape and verify
+        run: |
+          rm internal/infrastructure/persistence/memory/project_analysis_source.go
+          gofmt -w internal/usecase/projectuc/source_publish_test.go
+          go test ./internal/usecase/projectuc ./internal/infrastructure/persistence/memory
+          rm .github/workflows/codex-remove-402-memory-escape.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A internal/usecase/projectuc/source_publish_test.go internal/infrastructure/persistence/memory/project_analysis_source.go .github/workflows/codex-remove-402-memory-escape.yml
+          git commit -m "test(appsec): remove memory source attachment escape"
+          git push
