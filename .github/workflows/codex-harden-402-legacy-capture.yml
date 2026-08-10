@@ -1,0 +1,77 @@
+name: Codex 402 harden legacy source capture
+
+on:
+  push:
+    branches:
+      - codex/402-sanctioned-source-publish
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/402-sanctioned-source-publish
+      - name: Harden source artifact capture
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("internal/infrastructure/sourceartifact/store.go")
+          text = p.read_text()
+
+          old = '"github.com/KKloudTarus/synapse-ce/internal/domain/shared"\n\t"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"'
+          new = '"github.com/KKloudTarus/synapse-ce/internal/domain/shared"\n\t"github.com/KKloudTarus/synapse-ce/internal/domain/sourcepolicy"\n\t"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"'
+          if text.count(old) != 1:
+              raise SystemExit(f"sourcepolicy import anchor count={text.count(old)}")
+          text = text.replace(old, new)
+
+          duplicate = '''\tif err := s.validateSourceIsolation(sourceDir); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), err\n\t}\n\tif err := s.validateSourceIsolation(sourceDir); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), err\n\t}\n'''
+          single = '''\tif err := s.validateSourceIsolation(sourceDir); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), err\n\t}\n'''
+          if text.count(duplicate) != 1:
+              raise SystemExit(f"duplicate isolation anchor count={text.count(duplicate)}")
+          text = text.replace(duplicate, single)
+
+          canonical = '''\t\tpath, err := measure.CanonicalPath(filepath.ToSlash(rel))\n\t\tif err != nil || path == "" {\n\t\t\treturn fmt.Errorf("invalid source path: %w", err)\n\t\t}\n\t\tif len(manifest.Files) >= s.maxFiles {\n'''
+          canonical_new = '''\t\tpath, err := measure.CanonicalPath(filepath.ToSlash(rel))\n\t\tif err != nil || path == "" {\n\t\t\treturn fmt.Errorf("invalid source path: %w", err)\n\t\t}\n\t\tif !sourcepolicy.RetainPath(path) {\n\t\t\treturn nil\n\t\t}\n\t\tif len(manifest.Files) >= s.maxFiles {\n'''
+          if text.count(canonical) != 1:
+              raise SystemExit(f"head policy anchor count={text.count(canonical)}")
+          text = text.replace(canonical, canonical_new)
+
+          publish = '''\tif err := os.RemoveAll(captureRoot); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("replace source artifact: %w", err)\n\t}\n\tif err := os.Rename(tmp, captureRoot); err != nil {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source artifact: %w", err)\n\t}\n'''
+          publish_new = '''\tif _, err := os.Stat(captureRoot); err == nil {\n\t\treturn unavailable(projectanalysis.UnavailableAlreadyRetained), shared.ErrConflict\n\t} else if !os.IsNotExist(err) {\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("inspect existing source artifact: %w", err)\n\t}\n\tif err := os.Rename(tmp, captureRoot); err != nil {\n\t\tif _, statErr := os.Stat(captureRoot); statErr == nil {\n\t\t\treturn unavailable(projectanalysis.UnavailableAlreadyRetained), shared.ErrConflict\n\t\t}\n\t\treturn unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("publish source artifact: %w", err)\n\t}\n'''
+          if text.count(publish) != 1:
+              raise SystemExit(f"create-only publish anchor count={text.count(publish)}")
+          text = text.replace(publish, publish_new)
+
+          base = '''\tfor path := range files {\n\t\tcanonical, err := measure.CanonicalPath(path)\n\t\tif err != nil || canonical == "" || canonical != path {\n\t\t\treturn projectanalysis.SourceManifest{}, fmt.Errorf("%w: base source path is invalid", shared.ErrValidation)\n\t\t}\n\t\tpaths = append(paths, path)\n\t}\n\tsort.Strings(paths)\n'''
+          base_new = '''\tfor path := range files {\n\t\tcanonical, err := measure.CanonicalPath(path)\n\t\tif err != nil || canonical == "" || canonical != path {\n\t\t\treturn projectanalysis.SourceManifest{}, fmt.Errorf("%w: base source path is invalid", shared.ErrValidation)\n\t\t}\n\t\tif !sourcepolicy.RetainPath(path) {\n\t\t\tcontinue\n\t\t}\n\t\tpaths = append(paths, path)\n\t}\n\tif len(paths) == 0 {\n\t\tmanifest.SetArtifactDigest()\n\t\treturn manifest, nil\n\t}\n\tsort.Strings(paths)\n'''
+          if text.count(base) != 1:
+              raise SystemExit(f"base policy anchor count={text.count(base)}")
+          text = text.replace(base, base_new)
+          p.write_text(text)
+
+          p = Path("internal/usecase/sca/service.go")
+          text = p.read_text()
+          old = '''func (s *Service) captureProjectComparison(ctx context.Context, engagementID shared.ID, analysisID, sourceDir, head string, result *ScanResult) {\n\tif result == nil || !result.Comparison.Available || s.sourceArtifacts == nil {\n\t\treturn\n\t}\n'''
+          new = '''func (s *Service) captureProjectComparison(ctx context.Context, engagementID shared.ID, analysisID, sourceDir, head string, result *ScanResult) {\n\tif result == nil || !result.Comparison.Available || s.sourceArtifacts == nil || result.SourceCapture == nil || !result.SourceCapture.Capabilities.Source.Available {\n\t\treturn\n\t}\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f"comparison guard anchor count={text.count(old)}")
+          p.write_text(text.replace(old, new))
+      - name: Format and test hardened capture
+        run: |
+          gofmt -w internal/infrastructure/sourceartifact/store.go internal/usecase/sca/service.go
+          git diff --check
+          go test ./internal/infrastructure/sourceartifact ./internal/usecase/sca
+      - name: Commit and remove helper
+        run: |
+          rm .github/workflows/codex-harden-402-legacy-capture.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A internal/infrastructure/sourceartifact/store.go internal/usecase/sca/service.go .github/workflows/codex-harden-402-legacy-capture.yml
+          git commit -m "fix(appsec): harden server-side source capture"
+          git push
