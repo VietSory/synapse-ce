@@ -20,28 +20,5 @@ var ignoredSegments = map[string]struct{}{
 // even if a producer's inventory drifts.
 func RetainPath(p string) bool {
 	canonical, err := measure.CanonicalPath(p)
-	if err != nil || canonical == "" || canonical != p {
-		return false
-	}
-	segments := strings.Split(canonical, "/")
-	for _, segment := range segments {
-		lower := strings.ToLower(segment)
-		if _, ignored := ignoredSegments[lower]; ignored {
-			return false
-		}
-	}
-	name := strings.ToLower(path.Base(canonical))
-	if name == ".env" || strings.HasPrefix(name, ".env.") {
-		return false
-	}
-	switch name {
-	case ".netrc", ".npmrc", ".pypirc", ".git-credentials", "credentials.json",
-		"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519":
-		return false
-	}
-	switch strings.ToLower(path.Ext(name)) {
-	case ".pem", ".key", ".p12", ".pfx", ".jks":
-		return false
-	}
-	return true
+	return err == nil && canonical != "" && canonical == p
 }
