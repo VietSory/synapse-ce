@@ -65,10 +65,7 @@ func (s *Store) PublishArchive(ctx context.Context, tenantID, projectID shared.I
 	if err := os.MkdirAll(filepath.Dir(captureRoot), 0o700); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("create source artifact parent: %w", err)
 	}
-	if err := os.Mkdir(captureRoot, 0o700); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return unavailable(projectanalysis.UnavailableAlreadyRetained), shared.ErrConflict
-		}
+	if err := os.MkdirAll(captureRoot, 0o700); err != nil {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("claim source artifact: %w", err)
 	}
 	committed := false
