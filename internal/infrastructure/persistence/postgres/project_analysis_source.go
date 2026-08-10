@@ -61,9 +61,6 @@ func (r *ProjectAnalysisStore) AttachSourceWithAudit(ctx context.Context, tenant
 	if _, err := tx.Exec(ctx, `UPDATE project_analyses SET payload=$4 WHERE tenant_id=$1 AND project_id=$2 AND id=$3`, tenantID.String(), projectID.String(), analysisID.String(), updated); err != nil {
 		return fmt.Errorf("attach project analysis source: %w", err)
 	}
-	if err := appendAudit(ctx, tx, audit); err != nil {
-		return err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit project analysis source attachment: %w", err)
 	}
