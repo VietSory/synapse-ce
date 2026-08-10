@@ -478,12 +478,11 @@ func (s *Store) cleanupExpiredAt(root string, before time.Time) error {
 				if err != nil {
 					return err
 				}
-				if _, err := os.Stat(filepath.Join(analysisDir, "manifest.json")); err != nil && !os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(analysisDir, "manifest.json")); os.IsNotExist(err) {
+					continue
+				} else if err != nil {
 					return fmt.Errorf("stat source artifact manifest: %w", err)
 				}
-				// A process may die after atomically claiming the analysis directory but before
-				// writing manifest.json. Treat an old manifest-less claim as managed stale state
-				// so it cannot block publication forever.
 				if info.ModTime().Before(before) {
 					if err := os.RemoveAll(analysisDir); err != nil {
 						return fmt.Errorf("remove expired source artifacts: %w", err)
