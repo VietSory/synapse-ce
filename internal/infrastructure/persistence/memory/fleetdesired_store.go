@@ -49,8 +49,9 @@ func (s *FleetDesiredStore) Get(_ context.Context, tenantID, assetID shared.ID) 
 	return &state, nil
 }
 
-// Put atomically replaces one asset's current desired state. The original creation timestamp is
-// preserved on replacement, matching the PostgreSQL upsert contract.
+// Put stores one CAS version. Version 1 creates an absent row; later versions must be exactly one
+// greater than the stored version. A stale concurrent writer therefore fails with ErrConflict instead
+// of silently replacing a newer operator decision.
 func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) error {
 	if state == nil {
 		return fmt.Errorf("%w: nil fleet desired state", shared.ErrValidation)
@@ -60,26 +61,50 @@ func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) er
 	}
 	stored := cloneDesired(*state)
 	key := fleetDesiredStoreKey{tenantID: state.TenantID, assetID: state.AssetID}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, ok := s.states[key]; ok {
-		stored.Audit.CreatedAt = current.Audit.CreatedAt
-		if err := stored.Validate(); err != nil {
-			return err
+	current, exists := s.states[key]
+	if !exists {
+		if stored.Version != 1 {
+			return fmt.Errorf("%w: desired state for asset %s is absent; create requires version 1", shared.ErrConflict, state.AssetID)
 		}
+		s.states[key] = stored
+		return nil
+	}
+	if current.Version == 1<<63-1 {
+		return fmt.Errorf("%w: desired state version exhausted for asset %s", shared.ErrConflict, state.AssetID)
+	}
+	if stored.Version != current.Version+1 {
+		return fmt.Errorf("%w: desired state version %d does not follow stored version %d for asset %s",
+			shared.ErrConflict, stored.Version, current.Version, state.AssetID)
+	}
+	stored.Audit.CreatedAt = current.Audit.CreatedAt
+	if err := stored.Validate(); err != nil {
+		return err
 	}
 	s.states[key] = stored
 	return nil
 }
 
-// Delete clears one asset's desired policy. It is deliberately idempotent.
-func (s *FleetDesiredStore) Delete(_ context.Context, tenantID, assetID shared.ID) error {
-	if tenantID.IsZero() || assetID.IsZero() {
-		return fmt.Errorf("%w: desired-state delete needs tenant and asset", shared.ErrValidation)
+// Delete clears one asset's desired policy only if expectedVersion is still current. Absence is an
+// idempotent success; a newer concurrent policy returns ErrConflict and is never erased.
+func (s *FleetDesiredStore) Delete(_ context.Context, tenantID, assetID shared.ID, expectedVersion int64) error {
+	if tenantID.IsZero() || assetID.IsZero() || expectedVersion < 1 {
+		return fmt.Errorf("%w: desired-state delete needs tenant, asset and positive expected version", shared.ErrValidation)
 	}
+	key := fleetDesiredStoreKey{tenantID: tenantID, assetID: assetID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.states, fleetDesiredStoreKey{tenantID: tenantID, assetID: assetID})
+	current, exists := s.states[key]
+	if !exists {
+		return nil
+	}
+	if current.Version != expectedVersion {
+		return fmt.Errorf("%w: desired state version changed from %d to %d for asset %s",
+			shared.ErrConflict, expectedVersion, current.Version, assetID)
+	}
+	delete(s.states, key)
 	return nil
 }
 
