@@ -82,12 +82,9 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 	if err := s.store.Put(ctx, state); err != nil {
 		return nil, fmt.Errorf("store desired state: %w", err)
 	}
-	// The desired document is already durable at this point, so an audit-backend failure must not
-	// roll it back and create a split-brain between policy and the fleet. Audit implementations surface
-	// their own write failures; this mirrors the existing rollout lifecycle semantics.
 	_ = s.audit.Record(ctx, ports.AuditEntry{
 		Actor: in.Actor.String(), Action: "fleet.desired_capabilities.set",
-		Target: in.TenantID.String() + "/" + in.AgentID.String(),
+		Target:   in.TenantID.String() + "/" + in.AgentID.String(),
 		Metadata: map[string]string{"capabilities": strings.Join(caps, ",")}, At: now,
 	})
 	return state, nil
@@ -112,10 +109,26 @@ type ReconciliationRow struct {
 	LastSeen   time.Time                 `json:"last_seen,omitempty"`
 }
 
+type observedAgent struct {
+	agent  *fleetagent.Agent
+	health fleetcoverage.AgentHealth
+	caps   map[string]struct{}
+}
+
 // Reconcile returns one row for every desired capability, deterministically sorted by agent then
-// capability. It performs two tenant-scoped reads and O(agents + desired capabilities) in-memory work;
-// it does no persistence, so polling the fleet view cannot amplify writes.
+// capability. It performs two tenant-scoped reads and O(A + C + D log D + R) in-memory work, where D
+// is desired agents and R is returned rows. It does no persistence, so polling cannot amplify writes.
 func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
+	return s.reconcile(ctx, tenantID, false)
+}
+
+// Gaps returns only uncovered desired rows from the same reconciliation path as Reconcile. Passing the
+// projection filter into the shared path avoids allocating the full covered fleet just to discard it.
+func (s *Service) Gaps(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
+	return s.reconcile(ctx, tenantID, true)
+}
+
+func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bool) ([]ReconciliationRow, error) {
 	if tenantID.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state reconciliation needs a tenant", shared.ErrValidation)
 	}
@@ -123,30 +136,78 @@ func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]Reconcil
 	if err != nil {
 		return nil, fmt.Errorf("list desired states: %w", err)
 	}
+
+	ordered := append([]*desireddom.State(nil), states...)
+	desiredIDs := make(map[shared.ID]struct{}, len(ordered))
+	rowCount := 0
+	for i, desired := range ordered {
+		if desired == nil {
+			return nil, fmt.Errorf("%w: desired-state snapshot contains nil row at index %d", shared.ErrValidation, i)
+		}
+		if err := desired.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid desired-state snapshot for agent %s: %w", desired.AgentID, err)
+		}
+		if desired.TenantID != tenantID {
+			return nil, fmt.Errorf("%w: desired-state snapshot for agent %s belongs to tenant %s, want %s", shared.ErrValidation, desired.AgentID, desired.TenantID, tenantID)
+		}
+		if _, duplicate := desiredIDs[desired.AgentID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate desired-state row for agent %s", shared.ErrValidation, desired.AgentID)
+		}
+		desiredIDs[desired.AgentID] = struct{}{}
+		rowCount += len(desired.Capabilities)
+	}
+	// Sort only the desired documents, not every expanded capability row. Each State already validates
+	// that its capabilities are sorted, so this keeps deterministic output at D log D rather than R log R.
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].AgentID < ordered[j].AgentID })
+
 	agents, err := s.agents.ListAgents(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list fleet agents: %w", err)
 	}
 	now := s.clock.Now()
-	type observed struct {
-		agent *fleetagent.Agent
-		caps  map[string]struct{}
+	seenAgents := make(map[shared.ID]struct{}, len(agents))
+	observedCap := len(agents)
+	if len(ordered) < observedCap {
+		observedCap = len(ordered)
 	}
-	byID := make(map[shared.ID]observed, len(agents))
-	for _, agent := range agents {
+	byID := make(map[shared.ID]observedAgent, observedCap)
+	for i, agent := range agents {
+		if agent == nil {
+			return nil, fmt.Errorf("%w: observed-agent snapshot contains nil row at index %d", shared.ErrValidation, i)
+		}
+		if agent.ID.IsZero() {
+			return nil, fmt.Errorf("%w: observed-agent snapshot contains an empty agent id at index %d", shared.ErrValidation, i)
+		}
+		if agent.TenantID != tenantID {
+			return nil, fmt.Errorf("%w: observed agent %s belongs to tenant %s, want %s", shared.ErrValidation, agent.ID, agent.TenantID, tenantID)
+		}
+		if _, duplicate := seenAgents[agent.ID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate observed-agent row for agent %s", shared.ErrValidation, agent.ID)
+		}
+		seenAgents[agent.ID] = struct{}{}
+		if _, wanted := desiredIDs[agent.ID]; !wanted {
+			continue
+		}
 		caps := make(map[string]struct{}, len(agent.Capabilities))
 		for _, capability := range agent.Capabilities {
-			caps[capability] = struct{}{}
+			capability = strings.TrimSpace(capability)
+			if capability != "" {
+				caps[capability] = struct{}{}
+			}
 		}
-		byID[agent.ID] = observed{agent: agent, caps: caps}
+		byID[agent.ID] = observedAgent{
+			agent:  agent,
+			health: fleetcoverage.AgentStateFrom(agent.LastSeenAt, now, s.staleAfter, agent.Revoked(), agent.Decommissioned()),
+			caps:   caps,
+		}
 	}
 
-	rowCount := 0
-	for _, desired := range states {
-		rowCount += len(desired.Capabilities)
+	outCap := rowCount
+	if gapsOnly {
+		outCap = 0 // a healthy fleet should not allocate memory proportional to all covered rows
 	}
-	rows := make([]ReconciliationRow, 0, rowCount)
-	for _, desired := range states {
+	rows := make([]ReconciliationRow, 0, outCap)
+	for _, desired := range ordered {
 		obs, exists := byID[desired.AgentID]
 		for _, capability := range desired.Capabilities {
 			row := ReconciliationRow{AgentID: desired.AgentID.String(), Capability: capability}
@@ -157,8 +218,8 @@ func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]Reconcil
 				continue
 			}
 			row.LastSeen = obs.agent.LastSeenAt
-			row.Health = fleetcoverage.AgentStateFrom(obs.agent.LastSeenAt, now, s.staleAfter, obs.agent.Revoked(), obs.agent.Decommissioned())
-			switch row.Health {
+			row.Health = obs.health
+			switch obs.health {
 			case fleetcoverage.AgentRevoked:
 				row.GapReason = desireddom.GapAgentRevoked
 				row.Detail = "the desired agent was revoked and cannot provide coverage"
@@ -176,30 +237,11 @@ func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]Reconcil
 					row.Detail = "the healthy agent does not advertise the desired capability"
 				}
 			}
+			if gapsOnly && row.Covered {
+				continue
+			}
 			rows = append(rows, row)
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].AgentID != rows[j].AgentID {
-			return rows[i].AgentID < rows[j].AgentID
-		}
-		return rows[i].Capability < rows[j].Capability
-	})
 	return rows, nil
-}
-
-// Gaps returns only uncovered desired rows. It is derived from Reconcile rather than independently
-// queried so the full view and the gap-only view can never disagree for the same snapshot.
-func (s *Service) Gaps(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
-	rows, err := s.Reconcile(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	gaps := make([]ReconciliationRow, 0, len(rows))
-	for _, row := range rows {
-		if !row.Covered {
-			gaps = append(gaps, row)
-		}
-	}
-	return gaps, nil
 }

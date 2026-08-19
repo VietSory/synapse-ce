@@ -47,3 +47,33 @@ func TestFleetDesiredStoreTenantIsolationAndCopies(t *testing.T) {
 		t.Fatalf("cross-tenant lookup = %v, want ErrNotFound", err)
 	}
 }
+
+func TestFleetDesiredStorePreservedCreatedAtCannotBreakTimeOrder(t *testing.T) {
+	ctx := context.Background()
+	store := NewFleetDesiredStore()
+	created := time.Date(2026, 8, 19, 2, 0, 0, 0, time.UTC)
+	initial := &fleetdesired.State{
+		TenantID: "tenant", AgentID: "agent", Capabilities: []string{"process"}, UpdatedBy: "operator",
+		Audit: shared.Audit{CreatedAt: created, UpdatedAt: created},
+	}
+	if err := store.Put(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+	// This document is internally valid before Put, but preserving the existing created_at would make
+	// its updated_at older than created_at. Memory must reject it just as the Postgres CHECK does.
+	older := created.Add(-time.Minute)
+	update := &fleetdesired.State{
+		TenantID: "tenant", AgentID: "agent", Capabilities: []string{"network"}, UpdatedBy: "operator",
+		Audit: shared.Audit{CreatedAt: older, UpdatedAt: older},
+	}
+	if err := store.Put(ctx, update); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("Put error=%v, want validation error", err)
+	}
+	got, err := store.Get(ctx, "tenant", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Capabilities) != 1 || got.Capabilities[0] != "process" {
+		t.Fatalf("invalid update changed stored state: %+v", got)
+	}
+}

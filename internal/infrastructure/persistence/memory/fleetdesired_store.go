@@ -59,6 +59,12 @@ func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) er
 	defer s.mu.Unlock()
 	if current, ok := s.states[key]; ok {
 		stored.Audit.CreatedAt = current.Audit.CreatedAt
+		// The Postgres store preserves created_at on conflict and lets its DB time-order constraint
+		// reject an older updated_at. Revalidate after preserving it here so memory mode has the same
+		// invariant instead of accepting a state Postgres would refuse.
+		if err := stored.Validate(); err != nil {
+			return err
+		}
 	}
 	s.states[key] = stored
 	return nil

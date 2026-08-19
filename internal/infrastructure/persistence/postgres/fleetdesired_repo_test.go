@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -34,8 +36,15 @@ func TestFleetDesiredRepository(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		bg := context.Background()
-		_, _ = pool.Exec(bg, `DELETE FROM fleet_desired_state WHERE tenant_id IN ('fd-a','fd-b')`)
-		_, _ = pool.Exec(bg, `DELETE FROM fleet_agents WHERE tenant_id IN ('fd-a','fd-b')`)
+		for _, tenant := range []string{"fd-a", "fd-b"} {
+			_ = WithTenant(bg, pool, tenant, func(tx pgx.Tx) error {
+				if _, err := tx.Exec(bg, `DELETE FROM fleet_desired_state WHERE tenant_id=$1`, tenant); err != nil {
+					return err
+				}
+				_, err := tx.Exec(bg, `DELETE FROM fleet_agents WHERE tenant_id=$1`, tenant)
+				return err
+			})
+		}
 		_, _ = pool.Exec(bg, `DELETE FROM tenants WHERE id IN ('fd-a','fd-b')`)
 	})
 
@@ -100,9 +109,23 @@ func TestFleetDesiredRepository(t *testing.T) {
 
 	// Critical #633 invariant: desired state is operator intent, not an owned child of the observed
 	// agent row. Purging an observed identity must retain the expectation so reconciliation can surface
-	// agent_missing instead of silently going green/empty.
-	if _, err := pool.Exec(ctx, `DELETE FROM fleet_agents WHERE tenant_id='fd-a' AND id='agent-a'`); err != nil {
+	// agent_missing instead of silently going green/empty. The delete must run under tenant RLS and we
+	// assert the row count; otherwise a denied zero-row DELETE would make this test vacuously pass.
+	var deleted int64
+	if err := WithTenant(ctx, pool, "fd-a", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM fleet_agents WHERE tenant_id=$1 AND id=$2`, "fd-a", "agent-a")
+		if err == nil {
+			deleted = tag.RowsAffected()
+		}
+		return err
+	}); err != nil {
 		t.Fatalf("purge observed agent: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("purge observed agent deleted %d rows, want 1", deleted)
+	}
+	if _, err := agents.GetAgent(ctx, "fd-a", "agent-a"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("observed agent still exists after purge: %v", err)
 	}
 	if _, err := repo.Get(ctx, shared.ID("fd-a"), shared.ID("agent-a")); err != nil {
 		t.Fatalf("desired intent must survive observed-agent purge: %v", err)
