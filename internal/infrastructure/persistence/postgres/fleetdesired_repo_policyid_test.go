@@ -27,7 +27,7 @@ func TestFleetDesiredRepositoryRejectsDuplicatePolicyIDWithinTenant(t *testing.T
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(func() { pool.Close() })
 
 	const tenant = "fd-policy-id"
 	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ($1,$1) ON CONFLICT (id) DO NOTHING`, tenant); err != nil {
@@ -76,5 +76,12 @@ func TestFleetDesiredRepositoryRejectsDuplicatePolicyIDWithinTenant(t *testing.T
 	}
 	if _, err := repo.Get(ctx, tenant, "fd-policy-asset-b"); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("conflicting policy persisted: %v", err)
+	}
+	got, err := repo.Get(ctx, tenant, "fd-policy-asset-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PolicyID != "policy-shared" || got.Capabilities[0] != "process" {
+		t.Fatalf("existing policy changed after duplicate PolicyID conflict: %+v", got)
 	}
 }
