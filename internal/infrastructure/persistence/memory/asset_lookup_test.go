@@ -52,3 +52,21 @@ func TestAssetStoreGetAssetByIDTenantIsolationAndCopy(t *testing.T) {
 		}
 	}
 }
+
+func TestAssetStoreGetAssetByIDRejectsDuplicateCanonicalID(t *testing.T) {
+	ctx := context.Background()
+	store := NewAssetStore()
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	for _, key := range []string{"machine-id/a", "machine-id/b"} {
+		a, err := asset.New("asset-duplicate", "tenant-a", asset.KindHost, key, key, nil, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertAsset(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.GetAssetByID(ctx, "tenant-a", "asset-duplicate"); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("duplicate canonical id lookup=%v, want ErrValidation", err)
+	}
+}
