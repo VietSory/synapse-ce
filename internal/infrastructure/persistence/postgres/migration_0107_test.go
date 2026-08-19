@@ -47,7 +47,7 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 	}
 	defer pool.Close()
 
-	var table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, policyIDColumn, policyUnique, versionColumn, versionCheck bool
+	var table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, policyIDColumn, policyUnique, versionColumn, versionCheck, actorCheck bool
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			to_regclass('fleet_desired_state') IS NOT NULL,
@@ -83,12 +83,17 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 				SELECT 1 FROM pg_constraint
 				WHERE conrelid=to_regclass('fleet_desired_state') AND contype='c'
 				  AND pg_get_constraintdef(oid) LIKE '%version >= 1%'
+			),
+			EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid=to_regclass('fleet_desired_state') AND contype='c'
+				  AND pg_get_constraintdef(oid) LIKE '%btrim(updated_by)%'
 			)
-	`).Scan(&table, &validator, &rlsEnabled, &rlsForced, &assetFK, &canonicalCheck, &policyIDColumn, &policyUnique, &versionColumn, &versionCheck); err != nil {
+	`).Scan(&table, &validator, &rlsEnabled, &rlsForced, &assetFK, &canonicalCheck, &policyIDColumn, &policyUnique, &versionColumn, &versionCheck, &actorCheck); err != nil {
 		t.Fatalf("inspect migration 0107: %v", err)
 	}
-	if !table || !validator || !rlsEnabled || !rlsForced || !assetFK || !canonicalCheck || !policyIDColumn || !policyUnique || !versionColumn || !versionCheck {
-		t.Fatalf("0107 objects incomplete: table=%v validator=%v rls=%v force=%v asset_fk=%v canonical_check=%v policy_id=%v policy_unique=%v version_column=%v version_check=%v",
-			table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, policyIDColumn, policyUnique, versionColumn, versionCheck)
+	if !table || !validator || !rlsEnabled || !rlsForced || !assetFK || !canonicalCheck || !policyIDColumn || !policyUnique || !versionColumn || !versionCheck || !actorCheck {
+		t.Fatalf("0107 objects incomplete: table=%v validator=%v rls=%v force=%v asset_fk=%v canonical_check=%v policy_id=%v policy_unique=%v version_column=%v version_check=%v actor_check=%v",
+			table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, policyIDColumn, policyUnique, versionColumn, versionCheck, actorCheck)
 	}
 }
