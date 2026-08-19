@@ -40,4 +40,15 @@ func TestAssetStoreGetAssetByIDTenantIsolationAndCopy(t *testing.T) {
 	if _, err := store.GetAssetByID(ctx, "tenant-b", "asset-a"); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("cross-tenant lookup=%v, want ErrNotFound", err)
 	}
+	for _, tc := range []struct {
+		tenant shared.ID
+		id     shared.ID
+	}{
+		{id: "asset-a"},
+		{tenant: "tenant-a"},
+	} {
+		if _, err := store.GetAssetByID(ctx, tc.tenant, tc.id); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("invalid lookup tenant=%q id=%q error=%v, want ErrValidation", tc.tenant, tc.id, err)
+		}
+	}
 }
