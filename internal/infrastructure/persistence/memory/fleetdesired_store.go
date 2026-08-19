@@ -48,7 +48,8 @@ func (s *FleetDesiredStore) Get(_ context.Context, tenantID, assetID shared.ID) 
 }
 
 // Put applies a lifecycle-aware CAS. A new PolicyID may only create an absent row at version 1;
-// updates must retain the stored PolicyID and advance version by exactly one.
+// updates must retain the stored PolicyID and advance version by exactly one. PolicyID is unique
+// within a tenant so a lifecycle identifier can never alias another asset's policy.
 func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) error {
 	if state == nil {
 		return fmt.Errorf("%w: nil fleet desired state", shared.ErrValidation)
@@ -65,6 +66,12 @@ func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) er
 	if !exists {
 		if stored.Version != 1 {
 			return fmt.Errorf("%w: desired state for asset %s is absent; create requires version 1", shared.ErrConflict, state.AssetID)
+		}
+		for existingKey, existing := range s.states {
+			if existingKey.tenantID == stored.TenantID && existing.PolicyID == stored.PolicyID {
+				return fmt.Errorf("%w: desired policy id %s already belongs to asset %s in tenant %s",
+					shared.ErrConflict, stored.PolicyID, existing.AssetID, stored.TenantID)
+			}
 		}
 		s.states[key] = stored
 		return nil
