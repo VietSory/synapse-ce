@@ -29,7 +29,7 @@ func (s reconcileDesiredStore) Get(context.Context, shared.ID, shared.ID) (*desi
 	return nil, shared.ErrNotFound
 }
 func (s reconcileDesiredStore) Put(context.Context, *desireddom.State) error { return nil }
-func (s reconcileDesiredStore) Delete(context.Context, shared.ID, shared.ID) error { return nil }
+func (s reconcileDesiredStore) Delete(context.Context, shared.ID, shared.ID, int64) error { return nil }
 func (s reconcileDesiredStore) List(context.Context, shared.ID) ([]*desireddom.State, error) {
 	return s.rows, nil
 }
@@ -55,7 +55,7 @@ func (s reconcileAgentReader) ListAgents(context.Context, shared.ID) ([]*fleetag
 
 func desiredFixture(id string, caps []string, now time.Time) *desireddom.State {
 	return &desireddom.State{
-		TenantID: "tenant", AssetID: shared.ID(id), Capabilities: caps, UpdatedBy: "operator",
+		TenantID: "tenant", AssetID: shared.ID(id), Capabilities: caps, UpdatedBy: "operator", Version: 1,
 		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
@@ -127,7 +127,7 @@ func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 	}{
 		{name: "nil desired", desired: []*desireddom.State{nil}},
 		{name: "cross-tenant desired", desired: []*desireddom.State{{
-			TenantID: "other", AssetID: "asset", Capabilities: []string{"process"}, UpdatedBy: "operator",
+			TenantID: "other", AssetID: "asset", Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
 			Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}}},
 		{name: "duplicate desired", desired: []*desireddom.State{valid, valid}},
