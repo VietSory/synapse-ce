@@ -47,7 +47,7 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 	}
 	defer pool.Close()
 
-	var table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, versionColumn, versionCheck bool
+	var table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, policyIDColumn, policyUnique, versionColumn, versionCheck bool
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			to_regclass('fleet_desired_state') IS NOT NULL,
@@ -67,6 +67,16 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 			EXISTS (
 				SELECT 1 FROM information_schema.columns
 				WHERE table_schema='public' AND table_name='fleet_desired_state'
+				  AND column_name='policy_id' AND data_type='text' AND is_nullable='NO'
+			),
+			EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid=to_regclass('fleet_desired_state') AND contype='u'
+				  AND pg_get_constraintdef(oid) = 'UNIQUE (tenant_id, policy_id)'
+			),
+			EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema='public' AND table_name='fleet_desired_state'
 				  AND column_name='version' AND data_type='bigint' AND is_nullable='NO'
 			),
 			EXISTS (
@@ -74,11 +84,11 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 				WHERE conrelid=to_regclass('fleet_desired_state') AND contype='c'
 				  AND pg_get_constraintdef(oid) LIKE '%version >= 1%'
 			)
-	`).Scan(&table, &validator, &rlsEnabled, &rlsForced, &assetFK, &canonicalCheck, &versionColumn, &versionCheck); err != nil {
+	`).Scan(&table, &validator, &rlsEnabled, &rlsForced, &assetFK, &canonicalCheck, &policyIDColumn, &policyUnique, &versionColumn, &versionCheck); err != nil {
 		t.Fatalf("inspect migration 0107: %v", err)
 	}
-	if !table || !validator || !rlsEnabled || !rlsForced || !assetFK || !canonicalCheck || !versionColumn || !versionCheck {
-		t.Fatalf("0107 objects incomplete: table=%v validator=%v rls=%v force=%v asset_fk=%v canonical_check=%v version_column=%v version_check=%v",
-			table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, versionColumn, versionCheck)
+	if !table || !validator || !rlsEnabled || !rlsForced || !assetFK || !canonicalCheck || !policyIDColumn || !policyUnique || !versionColumn || !versionCheck {
+		t.Fatalf("0107 objects incomplete: table=%v validator=%v rls=%v force=%v asset_fk=%v canonical_check=%v policy_id=%v policy_unique=%v version_column=%v version_check=%v",
+			table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, policyIDColumn, policyUnique, versionColumn, versionCheck)
 	}
 }
