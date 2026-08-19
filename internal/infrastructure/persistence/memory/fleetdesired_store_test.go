@@ -10,10 +10,10 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
-func desiredStoreState(tenant, assetID string, caps []string, now time.Time) *fleetdesired.State {
+func desiredStoreState(tenant, assetID string, caps []string, version int64, now time.Time) *fleetdesired.State {
 	return &fleetdesired.State{
 		TenantID: shared.ID(tenant), AssetID: shared.ID(assetID), Capabilities: caps,
-		UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		UpdatedBy: "operator", Version: version, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
 
@@ -22,9 +22,9 @@ func TestFleetDesiredStoreTenantIsolationCopiesOrderingAndDelete(t *testing.T) {
 	store := NewFleetDesiredStore()
 	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
 	for _, state := range []*fleetdesired.State{
-		desiredStoreState("tenant-a", "asset-b", []string{"b"}, now),
-		desiredStoreState("tenant-a", "asset-a", []string{"a"}, now),
-		desiredStoreState("tenant-b", "asset-x", []string{"x"}, now),
+		desiredStoreState("tenant-a", "asset-b", []string{"b"}, 1, now),
+		desiredStoreState("tenant-a", "asset-a", []string{"a"}, 1, now),
+		desiredStoreState("tenant-b", "asset-x", []string{"x"}, 1, now),
 	} {
 		if err := store.Put(ctx, state); err != nil {
 			t.Fatal(err)
@@ -49,10 +49,10 @@ func TestFleetDesiredStoreTenantIsolationCopiesOrderingAndDelete(t *testing.T) {
 	if _, err := store.Get(ctx, "tenant-a", "asset-x"); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("cross-tenant lookup = %v, want ErrNotFound", err)
 	}
-	if err := store.Delete(ctx, "tenant-a", "asset-a"); err != nil {
+	if err := store.Delete(ctx, "tenant-a", "asset-a", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Delete(ctx, "tenant-a", "asset-a"); err != nil {
+	if err := store.Delete(ctx, "tenant-a", "asset-a", 1); err != nil {
 		t.Fatalf("idempotent delete failed: %v", err)
 	}
 	if _, err := store.Get(ctx, "tenant-a", "asset-a"); !errors.Is(err, shared.ErrNotFound) {
@@ -64,8 +64,8 @@ func TestFleetDesiredStoreUsesStructuredKeyNotDelimiterComposition(t *testing.T)
 	ctx := context.Background()
 	store := NewFleetDesiredStore()
 	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
-	first := desiredStoreState("a\x00b", "c", []string{"first"}, now)
-	second := desiredStoreState("a", "b\x00c", []string{"second"}, now)
+	first := desiredStoreState("a\x00b", "c", []string{"first"}, 1, now)
+	second := desiredStoreState("a", "b\x00c", []string{"second"}, 1, now)
 	if err := store.Put(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -89,12 +89,12 @@ func TestFleetDesiredStorePreservedCreatedAtCannotBreakTimeOrder(t *testing.T) {
 	ctx := context.Background()
 	store := NewFleetDesiredStore()
 	created := time.Date(2026, 8, 19, 2, 0, 0, 0, time.UTC)
-	initial := desiredStoreState("tenant", "asset", []string{"process"}, created)
+	initial := desiredStoreState("tenant", "asset", []string{"process"}, 1, created)
 	if err := store.Put(ctx, initial); err != nil {
 		t.Fatal(err)
 	}
 	older := created.Add(-time.Minute)
-	update := desiredStoreState("tenant", "asset", []string{"network"}, older)
+	update := desiredStoreState("tenant", "asset", []string{"network"}, 2, older)
 	if err := store.Put(ctx, update); !errors.Is(err, shared.ErrValidation) {
 		t.Fatalf("Put error=%v, want validation error", err)
 	}
@@ -102,7 +102,39 @@ func TestFleetDesiredStorePreservedCreatedAtCannotBreakTimeOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Capabilities) != 1 || got.Capabilities[0] != "process" {
+	if got.Version != 1 || len(got.Capabilities) != 1 || got.Capabilities[0] != "process" {
 		t.Fatalf("invalid update changed stored state: %+v", got)
+	}
+}
+
+func TestFleetDesiredStoreCASRejectsStaleWritersAndDeletes(t *testing.T) {
+	ctx := context.Background()
+	store := NewFleetDesiredStore()
+	now := time.Date(2026, 8, 19, 3, 0, 0, 0, time.UTC)
+	v1 := desiredStoreState("tenant", "asset", []string{"process"}, 1, now)
+	if err := store.Put(ctx, v1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, desiredStoreState("tenant", "asset", []string{"network"}, 1, now)); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("duplicate create error=%v, want ErrConflict", err)
+	}
+
+	v2 := desiredStoreState("tenant", "asset", []string{"network"}, 2, now.Add(time.Minute))
+	v2.Audit.CreatedAt = now
+	if err := store.Put(ctx, v2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, desiredStoreState("tenant", "asset", []string{"file"}, 2, now.Add(2*time.Minute))); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("stale update error=%v, want ErrConflict", err)
+	}
+	if err := store.Delete(ctx, "tenant", "asset", 1); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("stale delete error=%v, want ErrConflict", err)
+	}
+	got, err := store.Get(ctx, "tenant", "asset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 2 || len(got.Capabilities) != 1 || got.Capabilities[0] != "network" {
+		t.Fatalf("stale operation changed newer policy: %+v", got)
 	}
 }
