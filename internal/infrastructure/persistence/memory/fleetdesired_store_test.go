@@ -6,15 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
 func desiredStoreState(tenant, assetID string, caps []string, now time.Time) *fleetdesired.State {
 	return &fleetdesired.State{
-		TenantID: shared.ID(tenant), AssetID: shared.ID(assetID), AssetKind: asset.KindHost,
-		Capabilities: caps, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		TenantID: shared.ID(tenant), AssetID: shared.ID(assetID), Capabilities: caps,
+		UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
 
