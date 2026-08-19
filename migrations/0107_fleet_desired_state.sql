@@ -2,10 +2,10 @@
 -- Durable desired-vs-observed fleet intent (#633).
 --
 -- `fleet_agents.capabilities` is agent-reported observation and must never double as policy. Durable
--- intent is attached to the canonical host/cluster technical asset instead of the enrolment-scoped
+-- intent is attached to the canonical host/cluster technical AssetID instead of the enrolment-scoped
 -- AgentID: reinstalling or replacing an agent must not orphan the policy for the host/cluster it serves.
--- The A0.1/A3/A4 server-authoritative AssetBinding selects the CURRENT agent for that AssetID; #633
--- only consumes that binding when reconciling desired intent against observations.
+-- Asset kind remains authoritative in fleet_assets and is intentionally not duplicated here. The
+-- mutation use case admits only host/cluster assets; the FK keeps every durable subject canonical.
 
 -- Keep storage canonical even if a future writer bypasses the Go use case. The C collation matches
 -- Go's bytewise sort.Strings ordering for capability identifiers.
@@ -30,22 +30,15 @@ AS $$
         AND caps = ARRAY(SELECT c FROM unnest(caps) AS c ORDER BY c COLLATE "C")
 $$;
 
--- fleet_assets already has UNIQUE (tenant_id,id); the redundant kind-bearing key exists solely so the
--- desired-state FK can prove that its cached AssetKind agrees with the canonical asset row as well as
--- proving tenant/id existence. This prevents a bypass writer from storing `cluster` policy for a host.
-ALTER TABLE fleet_assets
-    ADD CONSTRAINT fleet_assets_tenant_id_kind_unique UNIQUE (tenant_id, id, kind);
-
 CREATE TABLE fleet_desired_state (
     tenant_id    TEXT NOT NULL REFERENCES tenants(id),
     asset_id     TEXT NOT NULL CHECK (asset_id <> ''),
-    asset_kind   TEXT NOT NULL CHECK (asset_kind IN ('host', 'cluster')),
     capabilities TEXT[] NOT NULL,
     updated_by   TEXT NOT NULL CHECK (updated_by <> ''),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, asset_id),
-    FOREIGN KEY (tenant_id, asset_id, asset_kind) REFERENCES fleet_assets(tenant_id, id, kind),
+    FOREIGN KEY (tenant_id, asset_id) REFERENCES fleet_assets(tenant_id, id),
     CONSTRAINT fleet_desired_state_capabilities_canonical CHECK (synapse_fleet_desired_capabilities_valid(capabilities)),
     CONSTRAINT fleet_desired_state_time_order CHECK (updated_at >= created_at)
 );
@@ -54,5 +47,4 @@ CALL synapse_enable_tenant_rls('fleet_desired_state');
 
 -- +goose Down
 DROP TABLE fleet_desired_state;
-ALTER TABLE fleet_assets DROP CONSTRAINT fleet_assets_tenant_id_kind_unique;
 DROP FUNCTION synapse_fleet_desired_capabilities_valid(TEXT[]);
