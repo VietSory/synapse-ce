@@ -1,9 +1,10 @@
-// Package fleetdesired defines the control-plane-owned desired state for fleet agents.
+// Package fleetdesired defines control-plane-owned fleet intent for canonical technical assets.
 //
 // Desired state is deliberately separate from fleetagent.Agent.Capabilities. Capabilities are an
 // OBSERVATION reported by an untrusted agent; desired capabilities are an operator decision. Folding
-// the two together would let an agent make a missing sensor disappear simply by ceasing to advertise
-// it, which is the exact silent-coverage failure this package exists to prevent.
+// the two together would let an agent erase a missing sensor by ceasing to advertise it. The durable
+// subject is the canonical host/cluster AssetID, not an enrolment-scoped AgentID, so replacing or
+// re-enrolling an agent does not orphan the policy it is expected to satisfy.
 package fleetdesired
 
 import (
@@ -12,23 +13,26 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
 const (
-	// MaxCapabilities bounds one desired-state document. A fleet profile is a small set of sensor /
-	// inventory classes; an unbounded list would turn an operator mutation into unbounded work on
-	// every reconciliation read.
+	// MaxCapabilities bounds the canonical desired set for one host/cluster.
 	MaxCapabilities = 64
+	// MaxCapabilityInputs separately bounds raw mutation input. This allows benign duplicates while
+	// preventing an attacker or broken client from making normalization unbounded.
+	MaxCapabilityInputs = 256
 	// MaxCapabilityLen bounds one capability identifier while leaving room for namespaced values.
 	MaxCapabilityLen = 128
 )
 
-// State is the operator-owned desired capability set for one canonical AgentID. It is current state,
-// not history: the append-only audit log records who changed it and when.
+// State is the operator-owned desired capability set for one canonical host/cluster asset. It is
+// current state, not history: the append-only audit log records who changed it and when.
 type State struct {
 	TenantID     shared.ID
-	AgentID      shared.ID
+	AssetID      shared.ID
+	AssetKind    asset.Kind
 	Capabilities []string
 	UpdatedBy    shared.ID
 	Audit        shared.Audit
@@ -55,15 +59,22 @@ func (r GapReason) Valid() bool {
 	}
 }
 
-// NormalizeCapabilities returns the canonical representation used for persistence and comparison:
-// trimmed, de-duplicated, sorted, and bounded. Empty entries are ignored so JSON arrays produced by
-// forms can safely contain an unset slot; non-empty values containing control characters are refused.
+// SupportedAssetKind reports whether desired fleet policy may target this technical asset kind. #633
+// governs one VM host or one Kubernetes cluster; workload/image policy belongs to other controllers.
+func SupportedAssetKind(kind asset.Kind) bool {
+	return kind == asset.KindHost || kind == asset.KindCluster
+}
+
+// NormalizeCapabilities returns the canonical persistence/comparison representation: trimmed,
+// de-duplicated, sorted, and bounded. Empty raw slots are ignored; an empty canonical result is handled
+// by the mutation API (which requires an explicit Clear rather than persisting a meaningless empty row).
 func NormalizeCapabilities(in []string) ([]string, error) {
-	if len(in) > MaxCapabilities {
-		return nil, fmt.Errorf("%w: desired state names %d capabilities, over the %d bound", shared.ErrValidation, len(in), MaxCapabilities)
+	if len(in) > MaxCapabilityInputs {
+		return nil, fmt.Errorf("%w: desired state received %d capability inputs, over the %d input bound",
+			shared.ErrValidation, len(in), MaxCapabilityInputs)
 	}
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, min(len(in), MaxCapabilities))
+	out := make([]string, 0, min(len(in), MaxCapabilities))
 	for _, raw := range in {
 		capability := strings.TrimSpace(raw)
 		if capability == "" {
@@ -78,6 +89,9 @@ func NormalizeCapabilities(in []string) ([]string, error) {
 		if _, exists := seen[capability]; exists {
 			continue
 		}
+		if len(out) == MaxCapabilities {
+			return nil, fmt.Errorf("%w: desired state names more than %d distinct capabilities", shared.ErrValidation, MaxCapabilities)
+		}
 		seen[capability] = struct{}{}
 		out = append(out, capability)
 	}
@@ -86,13 +100,17 @@ func NormalizeCapabilities(in []string) ([]string, error) {
 }
 
 // Validate reports whether state is safe and canonical to persist. Repositories call this too, so a
-// future writer cannot bypass the use case and put a non-deterministic desired document in storage.
+// future writer cannot bypass the use case and store ambiguous desired state.
 func (s State) Validate() error {
 	if s.TenantID.IsZero() {
 		return fmt.Errorf("%w: desired state needs a tenant", shared.ErrValidation)
 	}
-	if s.AgentID.IsZero() {
-		return fmt.Errorf("%w: desired state needs an agent", shared.ErrValidation)
+	if s.AssetID.IsZero() {
+		return fmt.Errorf("%w: desired state needs a canonical asset", shared.ErrValidation)
+	}
+	if !SupportedAssetKind(s.AssetKind) {
+		return fmt.Errorf("%w: desired state asset %s has unsupported kind %q; want host or cluster",
+			shared.ErrValidation, s.AssetID, s.AssetKind)
 	}
 	if s.UpdatedBy.IsZero() {
 		return fmt.Errorf("%w: desired state change needs an actor", shared.ErrValidation)
@@ -106,6 +124,9 @@ func (s State) Validate() error {
 	canonical, err := NormalizeCapabilities(s.Capabilities)
 	if err != nil {
 		return err
+	}
+	if len(canonical) == 0 {
+		return fmt.Errorf("%w: desired state must contain at least one capability; clear the intent instead", shared.ErrValidation)
 	}
 	if len(canonical) != len(s.Capabilities) {
 		return fmt.Errorf("%w: desired capabilities must be canonical (trimmed, unique, sorted)", shared.ErrValidation)
