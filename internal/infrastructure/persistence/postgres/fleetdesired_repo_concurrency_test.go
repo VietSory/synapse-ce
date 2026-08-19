@@ -47,7 +47,7 @@ func TestFleetDesiredRepositoryConcurrentCASAllowsExactlyOneWinner(t *testing.T)
 
 	now := time.Date(2026, 8, 19, 6, 0, 0, 0, time.UTC)
 	assets := NewAssetRepository(pool)
-	for _, id := range []shared.ID{"fd-concurrent-create", "fd-concurrent-update"} {
+	for _, id := range []shared.ID{"fd-concurrent-create", "fd-concurrent-update", "fd-concurrent-clear"} {
 		a, err := asset.New(id, tenant, asset.KindHost, "key/"+id.String(), id.String(), nil, now)
 		if err != nil {
 			t.Fatal(err)
@@ -58,7 +58,7 @@ func TestFleetDesiredRepositoryConcurrentCASAllowsExactlyOneWinner(t *testing.T)
 	}
 
 	repo := NewFleetDesiredRepository(pool)
-	runRace := func(t *testing.T, left, right *fleetdesired.State) {
+	runPutRace := func(t *testing.T, left, right *fleetdesired.State) {
 		t.Helper()
 		start := make(chan struct{})
 		results := make(chan error, 2)
@@ -89,7 +89,7 @@ func TestFleetDesiredRepositoryConcurrentCASAllowsExactlyOneWinner(t *testing.T)
 	}
 
 	t.Run("create", func(t *testing.T) {
-		runRace(t,
+		runPutRace(t,
 			&fleetdesired.State{
 				TenantID: tenant, AssetID: "fd-concurrent-create", PolicyID: "policy-create-a",
 				Capabilities: []string{"process"}, UpdatedBy: "operator-a", Version: 1,
@@ -120,7 +120,7 @@ func TestFleetDesiredRepositoryConcurrentCASAllowsExactlyOneWinner(t *testing.T)
 			t.Fatal(err)
 		}
 		at := now.Add(time.Minute)
-		runRace(t,
+		runPutRace(t,
 			&fleetdesired.State{
 				TenantID: tenant, AssetID: "fd-concurrent-update", PolicyID: "policy-update",
 				Capabilities: []string{"file"}, UpdatedBy: "operator-a", Version: 2,
@@ -139,6 +139,64 @@ func TestFleetDesiredRepositoryConcurrentCASAllowsExactlyOneWinner(t *testing.T)
 		if got.Version != 2 || got.PolicyID != "policy-update" || len(got.Capabilities) != 1 ||
 			(got.Capabilities[0] != "file" && got.Capabilities[0] != "network") {
 			t.Fatalf("unexpected concurrent-update winner: %+v", got)
+		}
+	})
+
+	t.Run("update versus clear", func(t *testing.T) {
+		base := &fleetdesired.State{
+			TenantID: tenant, AssetID: "fd-concurrent-clear", PolicyID: "policy-clear-race",
+			Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
+			Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		}
+		if err := repo.Put(ctx, base); err != nil {
+			t.Fatal(err)
+		}
+		update := &fleetdesired.State{
+			TenantID: tenant, AssetID: "fd-concurrent-clear", PolicyID: "policy-clear-race",
+			Capabilities: []string{"network"}, UpdatedBy: "operator-update", Version: 2,
+			Audit: shared.Audit{CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+		}
+		type result struct {
+			op  string
+			err error
+		}
+		start := make(chan struct{})
+		results := make(chan result, 2)
+		go func() {
+			<-start
+			results <- result{op: "update", err: repo.Put(context.Background(), update)}
+		}()
+		go func() {
+			<-start
+			results <- result{op: "clear", err: repo.Delete(context.Background(), tenant, "fd-concurrent-clear", "policy-clear-race", 1)}
+		}()
+		close(start)
+		first, second := <-results, <-results
+		outcomes := map[string]error{first.op: first.err, second.op: second.err}
+		wins := 0
+		conflicts := 0
+		for _, result := range []result{first, second} {
+			switch {
+			case result.err == nil:
+				wins++
+			case errors.Is(result.err, shared.ErrConflict):
+				conflicts++
+			default:
+				t.Fatalf("%s returned unexpected error: %v", result.op, result.err)
+			}
+		}
+		if wins != 1 || conflicts != 1 {
+			t.Fatalf("update/clear race wins=%d conflicts=%d, want one each: %+v", wins, conflicts, outcomes)
+		}
+		got, err := repo.Get(ctx, tenant, "fd-concurrent-clear")
+		if outcomes["update"] == nil {
+			if err != nil || got.Version != 2 || got.Capabilities[0] != "network" {
+				t.Fatalf("winning update not preserved: got=%+v err=%v outcomes=%+v", got, err, outcomes)
+			}
+			return
+		}
+		if !errors.Is(err, shared.ErrNotFound) {
+			t.Fatalf("winning clear left policy behind: got=%+v err=%v outcomes=%+v", got, err, outcomes)
 		}
 	})
 }
