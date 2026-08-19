@@ -298,18 +298,20 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 		}
 	}
 	for assetID := range bindingsByAsset {
-		sort.Slice(bindingsByAsset[assetID], func(i, j int) bool {
-			return bindingsByAsset[assetID][i].AgentID < bindingsByAsset[assetID][j].AgentID
-		})
+		if len(bindingsByAsset[assetID]) > 1 {
+			sort.Slice(bindingsByAsset[assetID], func(i, j int) bool {
+				return bindingsByAsset[assetID][i].AgentID < bindingsByAsset[assetID][j].AgentID
+			})
+		}
 	}
 
 	wantedByAgent := make(map[shared.ID]map[string]struct{}, len(bindings))
 	for _, desired := range ordered {
+		wanted := make(map[string]struct{}, len(desired.Capabilities))
+		for _, capability := range desired.Capabilities {
+			wanted[capability] = struct{}{}
+		}
 		for _, binding := range bindingsByAsset[desired.AssetID] {
-			wanted := make(map[string]struct{}, len(desired.Capabilities))
-			for _, capability := range desired.Capabilities {
-				wanted[capability] = struct{}{}
-			}
 			wantedByAgent[binding.AgentID] = wanted
 		}
 	}
@@ -332,6 +334,10 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 			if agent.TenantID != tenantID {
 				return nil, fmt.Errorf("%w: observed agent %s belongs to tenant %s, want %s",
 					shared.ErrValidation, agent.ID, agent.TenantID, tenantID)
+			}
+			if !agent.State.Valid() {
+				return nil, fmt.Errorf("%w: observed agent %s has invalid lifecycle state %q",
+					shared.ErrValidation, agent.ID, agent.State)
 			}
 			if _, duplicate := seenAgents[agent.ID]; duplicate {
 				return nil, fmt.Errorf("%w: duplicate observed-agent row for agent %s", shared.ErrValidation, agent.ID)
