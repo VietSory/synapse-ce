@@ -55,8 +55,8 @@ func (s reconcileAgentReader) ListAgents(context.Context, shared.ID) ([]*fleetag
 
 func desiredFixture(id string, caps []string, now time.Time) *desireddom.State {
 	return &desireddom.State{
-		TenantID: "tenant", AssetID: shared.ID(id), AssetKind: asset.KindHost,
-		Capabilities: caps, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		TenantID: "tenant", AssetID: shared.ID(id), Capabilities: caps, UpdatedBy: "operator",
+		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
 
@@ -127,13 +127,16 @@ func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 	}{
 		{name: "nil desired", desired: []*desireddom.State{nil}},
 		{name: "cross-tenant desired", desired: []*desireddom.State{{
-			TenantID: "other", AssetID: "asset", AssetKind: asset.KindHost, Capabilities: []string{"process"}, UpdatedBy: "operator",
+			TenantID: "other", AssetID: "asset", Capabilities: []string{"process"}, UpdatedBy: "operator",
 			Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}}},
 		{name: "duplicate desired", desired: []*desireddom.State{valid, valid}},
 		{name: "empty binding identity", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{{TenantID: "tenant", AssetID: "asset"}}},
 		{name: "cross-tenant binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{{TenantID: "other", AssetID: "asset", AgentID: "agent"}}},
-		{name: "duplicate asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding, validBinding}},
+		{name: "duplicate desired-asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding, validBinding}},
+		{name: "duplicate unrelated-asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{
+			bindingFixture("other-asset", "agent-1"), bindingFixture("other-asset", "agent-2"),
+		}},
 		{name: "agent bound to two assets", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{
 			validBinding, bindingFixture("other-asset", "agent"),
 		}},
