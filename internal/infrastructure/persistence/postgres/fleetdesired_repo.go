@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -53,7 +54,9 @@ func (r *FleetDesiredRepository) Get(ctx context.Context, tenantID, assetID shar
 }
 
 // Put atomically replaces one asset's desired capability array. created_at is deliberately preserved
-// on conflict; updated_at and attribution move with the operator's latest decision.
+// on conflict; updated_at and attribution move with the operator's latest decision. The repository
+// independently re-checks that the canonical asset is a host/cluster, so callers cannot bypass the
+// use-case admission rule merely by obtaining this adapter directly.
 func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.State) error {
 	if state == nil {
 		return fmt.Errorf("%w: nil fleet desired state", shared.ErrValidation)
@@ -62,6 +65,19 @@ func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.St
 		return err
 	}
 	err := WithTenant(ctx, r.pool, state.TenantID.String(), func(tx pgx.Tx) error {
+		var kind string
+		if err := tx.QueryRow(ctx,
+			`SELECT kind FROM fleet_assets WHERE tenant_id=$1 AND id=$2`,
+			state.TenantID.String(), state.AssetID.String()).Scan(&kind); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("desired-state asset %s: %w", state.AssetID, shared.ErrNotFound)
+			}
+			return err
+		}
+		if !fleetdesired.SupportedAssetKind(asset.Kind(kind)) {
+			return fmt.Errorf("%w: desired state may target only host/cluster assets, got %s kind %q",
+				shared.ErrValidation, state.AssetID, kind)
+		}
 		_, execErr := tx.Exec(ctx, `
 			INSERT INTO fleet_desired_state (`+fleetDesiredCols+`)
 			VALUES ($1,$2,$3,$4,$5,$6)
@@ -130,7 +146,7 @@ func (r *FleetDesiredRepository) List(ctx context.Context, tenantID shared.ID) (
 
 func scanFleetDesired(row rowScanner) (*fleetdesired.State, error) {
 	var (
-		state                    fleetdesired.State
+		state                      fleetdesired.State
 		tenant, assetID, updatedBy string
 	)
 	if err := row.Scan(&tenant, &assetID, &state.Capabilities, &updatedBy,
