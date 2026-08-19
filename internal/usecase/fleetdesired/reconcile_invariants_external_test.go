@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -22,34 +23,45 @@ type reconcileAudit struct{}
 
 func (reconcileAudit) Record(context.Context, ports.AuditEntry) error { return nil }
 
-type reconcileDesiredStore struct {
-	rows []*desireddom.State
-}
+type reconcileDesiredStore struct{ rows []*desireddom.State }
 
 func (s reconcileDesiredStore) Get(context.Context, shared.ID, shared.ID) (*desireddom.State, error) {
 	return nil, shared.ErrNotFound
 }
 func (s reconcileDesiredStore) Put(context.Context, *desireddom.State) error { return nil }
+func (s reconcileDesiredStore) Delete(context.Context, shared.ID, shared.ID) error { return nil }
 func (s reconcileDesiredStore) List(context.Context, shared.ID) ([]*desireddom.State, error) {
 	return s.rows, nil
 }
 
-type reconcileAgentReader struct {
-	rows []*fleetagent.Agent
+type reconcileAssets struct{ calls int }
+
+func (r *reconcileAssets) GetAssetByID(context.Context, shared.ID, shared.ID) (*asset.Asset, error) {
+	r.calls++
+	return nil, errors.New("reconciliation must not read asset catalog")
 }
 
-func (s reconcileAgentReader) GetAgent(context.Context, shared.ID, shared.ID) (*fleetagent.Agent, error) {
-	return nil, shared.ErrNotFound
+type reconcileBindings struct{ rows []desireduc.CurrentBinding }
+
+func (s reconcileBindings) ListCurrentBindings(context.Context, shared.ID) ([]desireduc.CurrentBinding, error) {
+	return s.rows, nil
 }
+
+type reconcileAgentReader struct{ rows []*fleetagent.Agent }
+
 func (s reconcileAgentReader) ListAgents(context.Context, shared.ID) ([]*fleetagent.Agent, error) {
 	return s.rows, nil
 }
 
 func desiredFixture(id string, caps []string, now time.Time) *desireddom.State {
 	return &desireddom.State{
-		TenantID: "tenant", AgentID: shared.ID(id), Capabilities: caps, UpdatedBy: "operator",
-		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		TenantID: "tenant", AssetID: shared.ID(id), AssetKind: asset.KindHost,
+		Capabilities: caps, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
+}
+
+func bindingFixture(assetID, agentID string) desireduc.CurrentBinding {
+	return desireduc.CurrentBinding{TenantID: "tenant", AssetID: shared.ID(assetID), AgentID: shared.ID(agentID)}
 }
 
 func agentFixture(id string, caps []string, lastSeen time.Time) *fleetagent.Agent {
@@ -59,32 +71,41 @@ func agentFixture(id string, caps []string, lastSeen time.Time) *fleetagent.Agen
 	}
 }
 
-func TestReconcileCanonicalizesObservedCapabilitiesAndDoesNotMutateDesiredOrder(t *testing.T) {
-	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
-	z := desiredFixture("z-agent", []string{"process"}, now)
-	a := desiredFixture("a-agent", []string{"network", "process"}, now)
-	desired := []*desireddom.State{z, a} // deliberately not store order: reconciler must stay deterministic
-	agents := []*fleetagent.Agent{
-		agentFixture("a-agent", []string{" process ", "network"}, now),
-	}
-	svc, err := desireduc.NewService(reconcileDesiredStore{rows: desired}, reconcileAgentReader{rows: agents}, reconcileAudit{}, reconcileClock{now}, 5*time.Minute)
+func reconcileService(t testing.TB, desired []*desireddom.State, bindings []desireduc.CurrentBinding, agents []*fleetagent.Agent, now time.Time) *desireduc.Service {
+	t.Helper()
+	svc, err := desireduc.NewService(
+		reconcileDesiredStore{rows: desired}, &reconcileAssets{}, reconcileBindings{rows: bindings},
+		reconcileAgentReader{rows: agents}, reconcileAudit{}, reconcileClock{now}, 5*time.Minute,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return svc
+}
+
+func TestReconcileCanonicalizesObservedCapabilitiesAndDoesNotMutateDesiredOrder(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	z := desiredFixture("z-asset", []string{"process"}, now)
+	a := desiredFixture("a-asset", []string{"network", "process"}, now)
+	desired := []*desireddom.State{z, a}
+	bindings := []desireduc.CurrentBinding{bindingFixture("a-asset", "agent-a")}
+	agents := []*fleetagent.Agent{agentFixture("agent-a", []string{" process ", "network", "irrelevant"}, now)}
+	svc := reconcileService(t, desired, bindings, agents, now)
+
 	rows, err := svc.Reconcile(context.Background(), "tenant")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		"a-agent/network/true/",
-		"a-agent/process/true/",
-		"z-agent/process/false/agent_missing",
+		"a-asset/agent-a/network/true/",
+		"a-asset/agent-a/process/true/",
+		"z-asset//process/false/agent_missing",
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("got %d rows: %#v", len(rows), rows)
 	}
 	for i, row := range rows {
-		got := fmt.Sprintf("%s/%s/%t/%s", row.AgentID, row.Capability, row.Covered, row.GapReason)
+		got := fmt.Sprintf("%s/%s/%s/%t/%s", row.AssetID, row.AgentID, row.Capability, row.Covered, row.GapReason)
 		if got != want[i] {
 			t.Fatalf("row[%d]=%q want %q", i, got, want[i])
 		}
@@ -96,33 +117,38 @@ func TestReconcileCanonicalizesObservedCapabilitiesAndDoesNotMutateDesiredOrder(
 
 func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
-	valid := desiredFixture("agent", []string{"process"}, now)
+	valid := desiredFixture("asset", []string{"process"}, now)
+	validBinding := bindingFixture("asset", "agent")
 	cases := []struct {
-		name    string
-		desired []*desireddom.State
-		agents  []*fleetagent.Agent
+		name     string
+		desired  []*desireddom.State
+		bindings []desireduc.CurrentBinding
+		agents   []*fleetagent.Agent
 	}{
 		{name: "nil desired", desired: []*desireddom.State{nil}},
 		{name: "cross-tenant desired", desired: []*desireddom.State{{
-			TenantID: "other", AgentID: "agent", Capabilities: []string{"process"}, UpdatedBy: "operator",
+			TenantID: "other", AssetID: "asset", AssetKind: asset.KindHost, Capabilities: []string{"process"}, UpdatedBy: "operator",
 			Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}}},
 		{name: "duplicate desired", desired: []*desireddom.State{valid, valid}},
-		{name: "nil observed", desired: []*desireddom.State{valid}, agents: []*fleetagent.Agent{nil}},
-		{name: "cross-tenant observed", desired: []*desireddom.State{valid}, agents: []*fleetagent.Agent{{
+		{name: "empty binding identity", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{{TenantID: "tenant", AssetID: "asset"}}},
+		{name: "cross-tenant binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{{TenantID: "other", AssetID: "asset", AgentID: "agent"}}},
+		{name: "duplicate asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding, validBinding}},
+		{name: "agent bound to two assets", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{
+			validBinding, bindingFixture("other-asset", "agent"),
+		}},
+		{name: "nil observed", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding}, agents: []*fleetagent.Agent{nil}},
+		{name: "cross-tenant observed", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding}, agents: []*fleetagent.Agent{{
 			ID: "agent", TenantID: "other", LastSeenAt: now, State: fleetagent.StateActive,
 		}}},
-		{name: "duplicate observed", desired: []*desireddom.State{valid}, agents: []*fleetagent.Agent{
+		{name: "duplicate observed", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding}, agents: []*fleetagent.Agent{
 			agentFixture("agent", nil, now), agentFixture("agent", nil, now),
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := desireduc.NewService(reconcileDesiredStore{rows: tc.desired}, reconcileAgentReader{rows: tc.agents}, reconcileAudit{}, reconcileClock{now}, time.Minute)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = svc.Reconcile(context.Background(), "tenant")
+			svc := reconcileService(t, tc.desired, tc.bindings, tc.agents, now)
+			_, err := svc.Reconcile(context.Background(), "tenant")
 			if !errors.Is(err, shared.ErrValidation) {
 				t.Fatalf("Reconcile error=%v, want validation error", err)
 			}
@@ -130,20 +156,20 @@ func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 	}
 }
 
-func BenchmarkReconcileTenThousandAgents(b *testing.B) {
+func BenchmarkReconcileTenThousandAssets(b *testing.B) {
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	caps := []string{"file", "network", "privilege", "process"}
 	desired := make([]*desireddom.State, 0, 10_000)
+	bindings := make([]desireduc.CurrentBinding, 0, 10_000)
 	agents := make([]*fleetagent.Agent, 0, 10_000)
 	for i := 0; i < 10_000; i++ {
-		id := fmt.Sprintf("agent-%05d", i)
-		desired = append(desired, desiredFixture(id, caps, now))
-		agents = append(agents, agentFixture(id, caps, now))
+		assetID := fmt.Sprintf("asset-%05d", i)
+		agentID := fmt.Sprintf("agent-%05d", i)
+		desired = append(desired, desiredFixture(assetID, caps, now))
+		bindings = append(bindings, bindingFixture(assetID, agentID))
+		agents = append(agents, agentFixture(agentID, caps, now))
 	}
-	svc, err := desireduc.NewService(reconcileDesiredStore{rows: desired}, reconcileAgentReader{rows: agents}, reconcileAudit{}, reconcileClock{now}, time.Minute)
-	if err != nil {
-		b.Fatal(err)
-	}
+	svc := reconcileService(b, desired, bindings, agents, now)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -154,20 +180,20 @@ func BenchmarkReconcileTenThousandAgents(b *testing.B) {
 	}
 }
 
-func BenchmarkGapsHealthyTenThousandAgents(b *testing.B) {
+func BenchmarkGapsHealthyTenThousandAssets(b *testing.B) {
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	caps := []string{"file", "network", "privilege", "process"}
 	desired := make([]*desireddom.State, 0, 10_000)
+	bindings := make([]desireduc.CurrentBinding, 0, 10_000)
 	agents := make([]*fleetagent.Agent, 0, 10_000)
 	for i := 0; i < 10_000; i++ {
-		id := fmt.Sprintf("agent-%05d", i)
-		desired = append(desired, desiredFixture(id, caps, now))
-		agents = append(agents, agentFixture(id, caps, now))
+		assetID := fmt.Sprintf("asset-%05d", i)
+		agentID := fmt.Sprintf("agent-%05d", i)
+		desired = append(desired, desiredFixture(assetID, caps, now))
+		bindings = append(bindings, bindingFixture(assetID, agentID))
+		agents = append(agents, agentFixture(agentID, caps, now))
 	}
-	svc, err := desireduc.NewService(reconcileDesiredStore{rows: desired}, reconcileAgentReader{rows: agents}, reconcileAudit{}, reconcileClock{now}, time.Minute)
-	if err != nil {
-		b.Fatal(err)
-	}
+	svc := reconcileService(b, desired, bindings, agents, now)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
