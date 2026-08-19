@@ -70,6 +70,7 @@ func TestFleetDesiredRepository(t *testing.T) {
 	}
 	createAsset("fd-a", "fd-asset-a", asset.KindHost)
 	createAsset("fd-a", "fd-asset-c", asset.KindHost)
+	createAsset("fd-a", "fd-asset-workload", asset.KindWorkload)
 	createAsset("fd-b", "fd-asset-b", asset.KindCluster)
 
 	// The narrow ID lookup must preserve the same tenant boundary as natural-key asset reads.
@@ -85,7 +86,6 @@ func TestFleetDesiredRepository(t *testing.T) {
 	state := &fleetdesired.State{
 		TenantID:     "fd-a",
 		AssetID:      "fd-asset-a",
-		AssetKind:    asset.KindHost,
 		Capabilities: []string{"inventory.host", "telemetry.process"},
 		UpdatedBy:    "operator-a",
 		Audit:        shared.Audit{CreatedAt: now, UpdatedAt: now},
@@ -98,7 +98,7 @@ func TestFleetDesiredRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get desired state: %v", err)
 	}
-	if got.AssetKind != asset.KindHost || len(got.Capabilities) != 2 || got.Capabilities[0] != "inventory.host" || got.Capabilities[1] != "telemetry.process" {
+	if len(got.Capabilities) != 2 || got.Capabilities[0] != "inventory.host" || got.Capabilities[1] != "telemetry.process" {
 		t.Fatalf("desired state did not round-trip: %+v", got)
 	}
 	if got.UpdatedBy != "operator-a" || !got.Audit.CreatedAt.Equal(now) {
@@ -107,7 +107,7 @@ func TestFleetDesiredRepository(t *testing.T) {
 
 	updatedAt := now.Add(time.Minute)
 	update := &fleetdesired.State{
-		TenantID: "fd-a", AssetID: "fd-asset-a", AssetKind: asset.KindHost,
+		TenantID: "fd-a", AssetID: "fd-asset-a",
 		Capabilities: []string{"telemetry.network"}, UpdatedBy: "operator-b",
 		// The repository owns creation history and preserves the original value on conflict.
 		Audit: shared.Audit{CreatedAt: now.Add(-time.Hour), UpdatedAt: updatedAt},
@@ -156,21 +156,21 @@ func TestFleetDesiredRepository(t *testing.T) {
 		t.Fatalf("RLS permitted %d cross-tenant updates", crossTenantUpdated)
 	}
 
-	// The database must independently enforce canonical asset existence and kind. These documents pass
-	// domain validation, so failure here proves the FK rather than the Go validator.
+	// The adapter independently enforces canonical subject existence and host/cluster kind even when a
+	// caller bypasses the use case.
 	missingAsset := &fleetdesired.State{
-		TenantID: "fd-a", AssetID: "fd-asset-missing", AssetKind: asset.KindHost,
-		Capabilities: []string{"process"}, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		TenantID: "fd-a", AssetID: "fd-asset-missing", Capabilities: []string{"process"},
+		UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
-	if err := repo.Put(ctx, missingAsset); err == nil {
-		t.Fatal("desired state for a missing canonical asset unexpectedly persisted")
+	if err := repo.Put(ctx, missingAsset); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("missing asset Put=%v, want ErrNotFound", err)
 	}
-	wrongKind := &fleetdesired.State{
-		TenantID: "fd-a", AssetID: "fd-asset-a", AssetKind: asset.KindCluster,
-		Capabilities: []string{"process"}, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+	unsupported := &fleetdesired.State{
+		TenantID: "fd-a", AssetID: "fd-asset-workload", Capabilities: []string{"process"},
+		UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
-	if err := repo.Put(ctx, wrongKind); err == nil {
-		t.Fatal("asset-kind mismatch unexpectedly bypassed composite FK")
+	if err := repo.Put(ctx, unsupported); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("workload desired Put=%v, want validation error", err)
 	}
 
 	// Bypass the repository validator and prove the SQL CHECK rejects a non-canonical capability array.
@@ -178,8 +178,8 @@ func TestFleetDesiredRepository(t *testing.T) {
 	if err := WithTenant(ctx, pool, "fd-a", func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO fleet_desired_state
-			  (tenant_id,asset_id,asset_kind,capabilities,updated_by,created_at,updated_at)
-			VALUES ('fd-a','fd-asset-c','host',ARRAY['z','a'],'operator',now(),now())`)
+			  (tenant_id,asset_id,capabilities,updated_by,created_at,updated_at)
+			VALUES ('fd-a','fd-asset-c',ARRAY['z','a'],'operator',now(),now())`)
 		if err == nil {
 			invalidInserted = tag.RowsAffected()
 		}
