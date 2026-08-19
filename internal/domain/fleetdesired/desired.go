@@ -27,12 +27,12 @@ const (
 	MaxCapabilityLen = 128
 )
 
-// State is the operator-owned desired capability set for one canonical host/cluster asset. It is
-// current state, not history: the append-only audit log records who changed it and when.
+// State is the operator-owned desired capability set for one canonical host/cluster AssetID. Asset
+// kind is deliberately not duplicated here: fleet_assets is authoritative for that immutable
+// identity property, while this aggregate stores only policy-owned data.
 type State struct {
 	TenantID     shared.ID
 	AssetID      shared.ID
-	AssetKind    asset.Kind
 	Capabilities []string
 	UpdatedBy    shared.ID
 	Audit        shared.Audit
@@ -99,18 +99,15 @@ func NormalizeCapabilities(in []string) ([]string, error) {
 	return out, nil
 }
 
-// Validate reports whether state is safe and canonical to persist. Repositories call this too, so a
-// future writer cannot bypass the use case and store ambiguous desired state.
+// Validate reports whether state is safe and canonical to persist. Subject existence/type is an
+// admission invariant checked against the canonical asset store by the use case; this aggregate only
+// validates fields it owns.
 func (s State) Validate() error {
 	if s.TenantID.IsZero() {
 		return fmt.Errorf("%w: desired state needs a tenant", shared.ErrValidation)
 	}
 	if s.AssetID.IsZero() {
 		return fmt.Errorf("%w: desired state needs a canonical asset", shared.ErrValidation)
-	}
-	if !SupportedAssetKind(s.AssetKind) {
-		return fmt.Errorf("%w: desired state asset %s has unsupported kind %q; want host or cluster",
-			shared.ErrValidation, s.AssetID, s.AssetKind)
 	}
 	if s.UpdatedBy.IsZero() {
 		return fmt.Errorf("%w: desired state change needs an actor", shared.ErrValidation)
