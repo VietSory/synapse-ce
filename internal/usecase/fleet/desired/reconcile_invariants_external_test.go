@@ -177,6 +177,9 @@ func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 		{name: "cross-tenant observed", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding}, agents: []*fleetagent.Agent{{
 			ID: "agent", TenantID: "other", LastSeenAt: now, State: fleetagent.StateActive,
 		}}},
+		{name: "invalid observed lifecycle", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding}, agents: []*fleetagent.Agent{{
+			ID: "agent", TenantID: "tenant", LastSeenAt: now, State: fleetagent.State("corrupt"),
+		}}},
 		{name: "duplicate observed", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding}, agents: []*fleetagent.Agent{
 			agentFixture("agent", nil, now), agentFixture("agent", nil, now),
 		}},
