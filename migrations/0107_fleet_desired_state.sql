@@ -7,8 +7,6 @@
 -- Asset kind remains authoritative in fleet_assets and is intentionally not duplicated here. The
 -- mutation use case admits only host/cluster assets; the FK keeps every durable subject canonical.
 
--- Keep storage canonical even if a future writer bypasses the Go use case. The C collation matches
--- Go's bytewise sort.Strings ordering for capability identifiers.
 CREATE FUNCTION synapse_fleet_desired_capabilities_valid(caps TEXT[])
 RETURNS BOOLEAN
 LANGUAGE SQL
@@ -33,12 +31,14 @@ $$;
 CREATE TABLE fleet_desired_state (
     tenant_id    TEXT NOT NULL REFERENCES tenants(id),
     asset_id     TEXT NOT NULL CHECK (asset_id <> ''),
+    policy_id    TEXT NOT NULL CHECK (policy_id <> ''),
     capabilities TEXT[] NOT NULL,
     updated_by   TEXT NOT NULL CHECK (updated_by <> ''),
     version      BIGINT NOT NULL CHECK (version >= 1),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, asset_id),
+    UNIQUE (tenant_id, policy_id),
     FOREIGN KEY (tenant_id, asset_id) REFERENCES fleet_assets(tenant_id, id),
     CONSTRAINT fleet_desired_state_capabilities_canonical CHECK (synapse_fleet_desired_capabilities_valid(capabilities)),
     CONSTRAINT fleet_desired_state_time_order CHECK (updated_at >= created_at)
