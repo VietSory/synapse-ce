@@ -78,7 +78,7 @@ func observedAgent(id string, caps []string, at time.Time, state fleetagent.Stat
 
 func newTestService(t *testing.T, store ports.FleetDesiredStore, assets desireduc.AssetReader, bindings desireduc.BindingReader, agents desireduc.AgentReader, audit ports.AuditLogger, clock ports.Clock, stale time.Duration) *desireduc.Service {
 	t.Helper()
-	svc, err := desireduc.NewService(store, assets, bindings, agents, audit, clock, stale)
+	svc, err := desireduc.NewService(store, assets, bindings, agents, audit, clock, &testIDGenerator{}, stale)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestSetDesiredCapabilitiesNormalizesAuditsPreservesCreatedAtAndIncrementsVe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Version != 1 || len(first.Capabilities) != 2 || first.Capabilities[0] != "inventory.host" || first.Capabilities[1] != "telemetry.process" {
+	if first.PolicyID.IsZero() || first.Version != 1 || len(first.Capabilities) != 2 || first.Capabilities[0] != "inventory.host" || first.Capabilities[1] != "telemetry.process" {
 		t.Fatalf("state not canonical/versioned: %+v", first)
 	}
 	clock.now = now.Add(time.Minute)
@@ -111,13 +111,13 @@ func TestSetDesiredCapabilitiesNormalizesAuditsPreservesCreatedAtAndIncrementsVe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Version != 2 {
-		t.Fatalf("second version=%d want 2", second.Version)
+	if second.Version != 2 || second.PolicyID != first.PolicyID {
+		t.Fatalf("second lifecycle=%s@%d want %s@2", second.PolicyID, second.Version, first.PolicyID)
 	}
 	if !second.Audit.CreatedAt.Equal(first.Audit.CreatedAt) || !second.Audit.UpdatedAt.Equal(clock.now) {
 		t.Fatalf("audit timestamps not preserved/moved: first=%v second=%v", first.Audit, second.Audit)
 	}
-	if len(audit.entries) != 2 || audit.entries[1].Action != "fleet.desired_capabilities.set" || audit.entries[1].Actor != "operator-2" || audit.entries[1].Metadata["policy_version"] != "2" {
+	if len(audit.entries) != 2 || audit.entries[1].Action != "fleet.desired_capabilities.set" || audit.entries[1].Actor != "operator-2" || audit.entries[1].Metadata["policy_version"] != "2" || audit.entries[1].Metadata["policy_id"] != first.PolicyID.String() {
 		t.Fatalf("unexpected audit entries: %#v", audit.entries)
 	}
 	if assets.calls != 2 {
@@ -165,7 +165,7 @@ func TestClearDesiredCapabilitiesIsExplicitAndIdempotent(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
 	store := memory.NewFleetDesiredStore()
 	if err := store.Put(ctx, &desireddom.State{
-		TenantID: "tenant-1", AssetID: "asset-1", Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
+		TenantID: "tenant-1", AssetID: "asset-1", PolicyID: "policy-clear", Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
 		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}); err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestClearDesiredCapabilitiesIsExplicitAndIdempotent(t *testing.T) {
 	if _, err := store.Get(ctx, "tenant-1", "asset-1"); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("cleared policy still exists: %v", err)
 	}
-	if assets.calls != 0 || len(audit.entries) != 1 || clock.calls != 1 || audit.entries[0].Metadata["policy_version"] != "1" {
+	if assets.calls != 0 || len(audit.entries) != 1 || clock.calls != 1 || audit.entries[0].Metadata["policy_version"] != "1" || audit.entries[0].Metadata["policy_id"] != "policy-clear" {
 		t.Fatalf("clear side effects: asset_reads=%d audits=%#v clock=%d", assets.calls, audit.entries, clock.calls)
 	}
 	if err := svc.ClearDesiredCapabilities(ctx, desireduc.ClearInput{TenantID: "tenant-1", AssetID: "asset-1", Actor: "operator-2"}); err != nil {
@@ -197,7 +197,7 @@ func TestReenrolledReplacementAgentSatisfiesExistingAssetPolicy(t *testing.T) {
 	now := time.Date(2026, 8, 19, 2, 0, 0, 0, time.UTC)
 	store := memory.NewFleetDesiredStore()
 	if err := store.Put(ctx, &desireddom.State{
-		TenantID: "tenant-1", AssetID: "host-asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator", Version: 1,
+		TenantID: "tenant-1", AssetID: "host-asset", PolicyID: "policy-host", Capabilities: []string{"network", "process"}, UpdatedBy: "operator", Version: 1,
 		Audit: shared.Audit{CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
 	}); err != nil {
 		t.Fatal(err)
@@ -210,7 +210,7 @@ func TestReenrolledReplacementAgentSatisfiesExistingAssetPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || !rows[0].Covered || !rows[1].Covered || rows[0].AgentID != "agent-new" || rows[1].AgentID != "agent-new" {
+	if len(rows) != 2 || !rows[0].Covered || !rows[1].Covered || rows[0].AgentID != "agent-new" || rows[1].AgentID != "agent-new" || rows[0].PolicyID != "policy-host" || rows[1].PolicyID != "policy-host" {
 		t.Fatalf("replacement agent did not satisfy existing asset policy: %#v", rows)
 	}
 }
@@ -222,7 +222,7 @@ func TestReconcileSurfacesHealthCapabilityAndBindingGaps(t *testing.T) {
 	put := func(assetID string, caps ...string) {
 		t.Helper()
 		if err := store.Put(ctx, &desireddom.State{
-			TenantID: "tenant-1", AssetID: shared.ID(assetID), Capabilities: caps,
+			TenantID: "tenant-1", AssetID: shared.ID(assetID), PolicyID: shared.ID("policy-" + assetID), Capabilities: caps,
 			UpdatedBy: "operator", Version: 1, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}); err != nil {
 			t.Fatal(err)
@@ -265,6 +265,9 @@ func TestReconcileSurfacesHealthCapabilityAndBindingGaps(t *testing.T) {
 	covered := 0
 	for _, row := range rows {
 		key := row.AssetID + "/" + row.Capability
+		if row.PolicyID == "" || row.PolicyVersion != 1 {
+			t.Fatalf("row %s lost desired policy identity: %+v", key, row)
+		}
 		if row.Covered {
 			covered++
 			if row.GapReason != "" {
