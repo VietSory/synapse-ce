@@ -11,20 +11,30 @@ import (
 // GetAssetByID returns one canonical technical asset by server-issued ID. It is intentionally a
 // narrow extension used by desired-state admission; the broad AssetRepository contract remains keyed
 // by natural identity for normal observation/upsert flows. Invalid identifiers are validation errors;
-// a valid but absent/cross-tenant asset is reported as ErrNotFound.
+// a valid but absent/cross-tenant asset is reported as ErrNotFound. The memory AssetStore is keyed by
+// natural identity rather than ID, so duplicate canonical IDs are detected here and fail closed to
+// mirror PostgreSQL's fleet_assets primary-key invariant.
 func (s *AssetStore) GetAssetByID(_ context.Context, tenantID, id shared.ID) (*asset.Asset, error) {
 	if tenantID.IsZero() || id.IsZero() {
 		return nil, fmt.Errorf("%w: asset id lookup needs tenant and id", shared.ErrValidation)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var found *asset.Asset
 	for _, a := range s.assets {
 		if a.TenantID != tenantID || a.ID != id {
 			continue
 		}
+		if found != nil {
+			return nil, fmt.Errorf("%w: duplicate canonical asset id %s in tenant %s",
+				shared.ErrValidation, id, tenantID)
+		}
 		cp := *a
 		cp.Attributes = cloneMap(a.Attributes)
-		return &cp, nil
+		found = &cp
 	}
-	return nil, shared.ErrNotFound
+	if found == nil {
+		return nil, shared.ErrNotFound
+	}
+	return found, nil
 }
