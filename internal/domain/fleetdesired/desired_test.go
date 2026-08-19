@@ -85,6 +85,11 @@ func TestStateValidateRequiresCanonicalNonEmptyVersionedPolicy(t *testing.T) {
 		t.Fatal("expected empty policy id to be rejected")
 	}
 	state = validState(now)
+	state.UpdatedBy = "   "
+	if err := state.Validate(); err == nil {
+		t.Fatal("expected blank actor to be rejected")
+	}
+	state = validState(now)
 	state.Capabilities = []string{"z", "a"}
 	if err := state.Validate(); err == nil {
 		t.Fatal("expected non-canonical ordering to be rejected")
