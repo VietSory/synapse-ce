@@ -118,6 +118,21 @@ func TestFleetDesiredRepository(t *testing.T) {
 		t.Fatalf("upsert history/mutable state mismatch: %+v", got)
 	}
 
+	// The caller may not forge an earlier CreatedAt to make an UpdatedAt that predates the persisted
+	// lifecycle appear valid. PostgreSQL must expose the same ErrValidation contract as the memory store.
+	backdated := &fleetdesired.State{
+		TenantID: "fd-a", AssetID: "fd-asset-a", PolicyID: "policy-a", Capabilities: []string{"telemetry.file"},
+		UpdatedBy: "operator-c", Version: 3,
+		Audit: shared.Audit{CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-time.Minute)},
+	}
+	if err := repo.Put(ctx, backdated); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("backdated desired update=%v, want ErrValidation", err)
+	}
+	got, err = repo.Get(ctx, "fd-a", "fd-asset-a")
+	if err != nil || got.Version != 2 || got.Capabilities[0] != "telemetry.network" || !got.Audit.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("backdated update changed stored policy: got=%+v err=%v", got, err)
+	}
+
 	// Replaying another version 2 after version 2 is already current is a stale concurrent writer.
 	stale := &fleetdesired.State{
 		TenantID: "fd-a", AssetID: "fd-asset-a", PolicyID: "policy-a", Capabilities: []string{"telemetry.file"},
