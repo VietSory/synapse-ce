@@ -1,6 +1,6 @@
-// Package fleetdesired reconciles operator-owned desired capabilities against the latest observed
-// fleet-agent state. It is intentionally read-only during reconciliation: repeatedly viewing fleet
-// health must not create database churn, and the same snapshot must always yield the same rows.
+// Package fleetdesired reconciles operator-owned desired capabilities for canonical host/cluster
+// assets against the latest server-authoritative agent binding and observed fleet-agent state.
+// Reconciliation is read-only: polling fleet health must not create database churn.
 package fleetdesired
 
 import (
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetcoverage"
 	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
@@ -19,15 +20,36 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-// AgentReader is the narrow identity/liveness view reconciliation needs.
+// AssetReader is the narrow canonical-asset lookup needed to admit a desired-state mutation. The
+// technical asset remains the durable policy subject across agent reinstall/re-enrolment.
+type AssetReader interface {
+	GetAssetByID(ctx context.Context, tenantID, assetID shared.ID) (*asset.Asset, error)
+}
+
+// CurrentBinding is the read projection #633 consumes from the server-authoritative AssetBinding
+// lifecycle owned by A0.1/A3/A4. This package deliberately does not own binding creation or trust.
+type CurrentBinding struct {
+	TenantID shared.ID
+	AssetID  shared.ID
+	AgentID  shared.ID
+}
+
+// BindingReader returns the current one-agent-to-one-asset binding projection for a tenant. Historical
+// bindings must not be returned here; two current agents for one asset are ambiguous and fail closed.
+type BindingReader interface {
+	ListCurrentBindings(ctx context.Context, tenantID shared.ID) ([]CurrentBinding, error)
+}
+
+// AgentReader is the narrow observed identity/liveness view reconciliation needs.
 type AgentReader interface {
-	GetAgent(ctx context.Context, tenantID, agentID shared.ID) (*fleetagent.Agent, error)
 	ListAgents(ctx context.Context, tenantID shared.ID) ([]*fleetagent.Agent, error)
 }
 
 // Service owns desired-state mutation and reconciliation.
 type Service struct {
 	store      ports.FleetDesiredStore
+	assets     AssetReader
+	bindings   BindingReader
 	agents     AgentReader
 	audit      ports.AuditLogger
 	clock      ports.Clock
@@ -36,68 +58,86 @@ type Service struct {
 
 // NewService validates and constructs the desired-state service. A non-positive staleAfter follows
 // fleetcoverage.AgentStateFrom semantics and disables time-based staleness checks.
-func NewService(store ports.FleetDesiredStore, agents AgentReader, audit ports.AuditLogger, clock ports.Clock, staleAfter time.Duration) (*Service, error) {
-	if store == nil || agents == nil || audit == nil || clock == nil {
-		return nil, fmt.Errorf("%w: fleet desired-state service needs a store, agent reader, audit log and clock", shared.ErrValidation)
+func NewService(store ports.FleetDesiredStore, assets AssetReader, bindings BindingReader, agents AgentReader, audit ports.AuditLogger, clock ports.Clock, staleAfter time.Duration) (*Service, error) {
+	if store == nil || assets == nil || bindings == nil || agents == nil || audit == nil || clock == nil {
+		return nil, fmt.Errorf("%w: fleet desired-state service needs store, asset reader, binding reader, agent reader, audit log and clock", shared.ErrValidation)
 	}
-	return &Service{store: store, agents: agents, audit: audit, clock: clock, staleAfter: staleAfter}, nil
+	return &Service{store: store, assets: assets, bindings: bindings, agents: agents, audit: audit, clock: clock, staleAfter: staleAfter}, nil
 }
 
-// SetInput atomically replaces one agent's desired capability set.
+// SetInput atomically replaces one canonical asset's non-empty desired capability set.
 type SetInput struct {
 	TenantID     shared.ID
-	AgentID      shared.ID
+	AssetID      shared.ID
 	Capabilities []string
 	Actor        shared.ID
 }
 
-// SetDesiredCapabilities replaces one agent's operator-owned desired capability set. Creating a NEW
-// intent first proves the canonical AgentID exists in the same tenant; after that, the intent is
-// independent of the observed row and can still be changed or cleared if the agent disappears. That
-// matches reconciliation: observed deletion is a gap, not ownership of (or a delete cascade for) policy.
-// An empty set is valid and means this agent is intentionally expected to run no governed capability classes.
+// ClearInput identifies one desired policy to remove. Clear is explicit so absence and an intentionally
+// empty array can never become two representations of the same state.
+type ClearInput struct {
+	TenantID shared.ID
+	AssetID  shared.ID
+	Actor    shared.ID
+}
+
+// SetDesiredCapabilities replaces one host/cluster asset's operator-owned desired capability set.
+// The canonical asset, not the current AgentID, owns the policy. Therefore a replacement agent bound
+// to the same asset can satisfy existing intent without a policy rewrite.
 func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*desireddom.State, error) {
-	if in.TenantID.IsZero() || in.AgentID.IsZero() || in.Actor.IsZero() {
-		return nil, fmt.Errorf("%w: desired-state change needs tenant, agent and actor", shared.ErrValidation)
+	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
+		return nil, fmt.Errorf("%w: desired-state change needs tenant, canonical asset and actor", shared.ErrValidation)
 	}
 	caps, err := desireddom.NormalizeCapabilities(in.Capabilities)
 	if err != nil {
 		return nil, err
 	}
-	var createdAt time.Time
-	if current, getErr := s.store.Get(ctx, in.TenantID, in.AgentID); getErr == nil {
-		if current == nil {
-			return nil, fmt.Errorf("%w: desired-state store returned a nil current row", shared.ErrValidation)
+	if len(caps) == 0 {
+		return nil, fmt.Errorf("%w: desired capability set is empty; use ClearDesiredCapabilities", shared.ErrValidation)
+	}
+
+	var current *desireddom.State
+	if got, getErr := s.store.Get(ctx, in.TenantID, in.AssetID); getErr == nil {
+		if err := validateStoredState(got, in.TenantID, in.AssetID); err != nil {
+			return nil, err
 		}
-		if err := current.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid current desired state: %w", err)
-		}
-		if current.TenantID != in.TenantID || current.AgentID != in.AgentID {
-			return nil, fmt.Errorf("%w: desired-state store returned identity %s/%s, want %s/%s",
-				shared.ErrValidation, current.TenantID, current.AgentID, in.TenantID, in.AgentID)
-		}
-		// Declarative re-apply is a no-op. A desired-state controller may submit the same canonical
-		// intent repeatedly; rewriting it would create database and audit churn without changing state.
+		current = got
+		// Declarative re-apply is a true no-op: no asset read, clock read, write, or audit churn.
 		if slices.Equal(current.Capabilities, caps) {
 			return current, nil
 		}
-		createdAt = current.Audit.CreatedAt
-	} else if errors.Is(getErr, shared.ErrNotFound) {
-		// Only creation depends on the observed registry. Once desired intent exists, requiring the
-		// observed row here would make an agent purge freeze stale policy forever — including preventing
-		// the operator from clearing it with an empty set.
-		if _, err := s.agents.GetAgent(ctx, in.TenantID, in.AgentID); err != nil {
-			return nil, fmt.Errorf("load desired-state agent: %w", err)
-		}
-	} else {
+	} else if !errors.Is(getErr, shared.ErrNotFound) {
 		return nil, fmt.Errorf("read current desired state: %w", getErr)
 	}
+
+	subject, err := s.assets.GetAssetByID(ctx, in.TenantID, in.AssetID)
+	if err != nil {
+		return nil, fmt.Errorf("load desired-state asset: %w", err)
+	}
+	if subject == nil {
+		return nil, fmt.Errorf("%w: asset reader returned nil for asset %s", shared.ErrValidation, in.AssetID)
+	}
+	if subject.TenantID != in.TenantID || subject.ID != in.AssetID {
+		return nil, fmt.Errorf("%w: asset reader returned identity %s/%s, want %s/%s",
+			shared.ErrValidation, subject.TenantID, subject.ID, in.TenantID, in.AssetID)
+	}
+	if !desireddom.SupportedAssetKind(subject.Kind) {
+		return nil, fmt.Errorf("%w: desired state may target only host/cluster assets, got %s kind %q",
+			shared.ErrValidation, subject.ID, subject.Kind)
+	}
+	if current != nil && current.AssetKind != subject.Kind {
+		return nil, fmt.Errorf("%w: desired-state asset kind changed from %q to %q for asset %s",
+			shared.ErrValidation, current.AssetKind, subject.Kind, subject.ID)
+	}
+
 	now := s.clock.Now().UTC()
-	if createdAt.IsZero() {
-		createdAt = now
+	createdAt := now
+	if current != nil {
+		createdAt = current.Audit.CreatedAt
 	}
 	state := &desireddom.State{
-		TenantID: in.TenantID, AgentID: in.AgentID, Capabilities: caps, UpdatedBy: in.Actor,
+		TenantID: in.TenantID, AssetID: in.AssetID, AssetKind: subject.Kind,
+		Capabilities: caps, UpdatedBy: in.Actor,
 		Audit: shared.Audit{CreatedAt: createdAt, UpdatedAt: now},
 	}
 	if err := state.Validate(); err != nil {
@@ -106,25 +146,59 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 	if err := s.store.Put(ctx, state); err != nil {
 		return nil, fmt.Errorf("store desired state: %w", err)
 	}
-	_ = s.audit.Record(ctx, ports.AuditEntry{
-		Actor: in.Actor.String(), Action: "fleet.desired_capabilities.set",
-		Target:   in.TenantID.String() + "/" + in.AgentID.String(),
-		Metadata: map[string]string{"capabilities": strings.Join(caps, ",")}, At: now,
-	})
+	s.record(ctx, state, in.Actor, "fleet.desired_capabilities.set", map[string]string{
+		"capabilities": strings.Join(caps, ","),
+	}, now)
 	return state, nil
 }
 
-// Get returns one agent's desired state.
-func (s *Service) Get(ctx context.Context, tenantID, agentID shared.ID) (*desireddom.State, error) {
-	if tenantID.IsZero() || agentID.IsZero() {
-		return nil, fmt.Errorf("%w: desired-state lookup needs tenant and agent", shared.ErrValidation)
+// ClearDesiredCapabilities removes one desired policy. Clearing an already-absent policy is a
+// side-effect-free success, which makes declarative cleanup idempotent even after an agent disappears.
+func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) error {
+	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
+		return fmt.Errorf("%w: desired-state clear needs tenant, canonical asset and actor", shared.ErrValidation)
 	}
-	return s.store.Get(ctx, tenantID, agentID)
+	current, err := s.store.Get(ctx, in.TenantID, in.AssetID)
+	if errors.Is(err, shared.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read desired state before clear: %w", err)
+	}
+	if err := validateStoredState(current, in.TenantID, in.AssetID); err != nil {
+		return err
+	}
+	if err := s.store.Delete(ctx, in.TenantID, in.AssetID); err != nil {
+		return fmt.Errorf("clear desired state: %w", err)
+	}
+	now := s.clock.Now().UTC()
+	s.record(ctx, current, in.Actor, "fleet.desired_capabilities.clear", map[string]string{
+		"previous_capabilities": strings.Join(current.Capabilities, ","),
+	}, now)
+	return nil
 }
 
-// ReconciliationRow is one desired capability compared with the latest observed agent state.
+// Get returns one canonical asset's desired state and fails closed if storage returns malformed or
+// cross-identity data.
+func (s *Service) Get(ctx context.Context, tenantID, assetID shared.ID) (*desireddom.State, error) {
+	if tenantID.IsZero() || assetID.IsZero() {
+		return nil, fmt.Errorf("%w: desired-state lookup needs tenant and asset", shared.ErrValidation)
+	}
+	state, err := s.store.Get(ctx, tenantID, assetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStoredState(state, tenantID, assetID); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+// ReconciliationRow is one desired asset capability compared with the current bound agent.
 type ReconciliationRow struct {
-	AgentID    string                    `json:"agent_id"`
+	AssetID    string                    `json:"asset_id"`
+	AssetKind  asset.Kind                `json:"asset_kind"`
+	AgentID    string                    `json:"agent_id,omitempty"`
 	Capability string                    `json:"capability"`
 	Health     fleetcoverage.AgentHealth `json:"agent_health,omitempty"`
 	Covered    bool                      `json:"covered"`
@@ -139,15 +213,14 @@ type observedAgent struct {
 	caps   map[string]struct{}
 }
 
-// Reconcile returns one row for every desired capability, deterministically sorted by agent then
-// capability. It performs two tenant-scoped reads and O(A + C + D log D + R) in-memory work, where D
-// is desired agents and R is returned rows. It does no persistence, so polling cannot amplify writes.
+// Reconcile returns one row for every desired capability, deterministically sorted by asset then
+// capability. It performs bounded tenant-scoped reads and no persistence, so polling cannot amplify
+// writes. Observed capability maps retain only capabilities this policy actually asks about.
 func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
 	return s.reconcile(ctx, tenantID, false)
 }
 
-// Gaps returns only uncovered desired rows from the same reconciliation path as Reconcile. Passing the
-// projection filter into the shared path avoids allocating the full covered fleet just to discard it.
+// Gaps returns only uncovered desired rows from the same reconciliation path as Reconcile.
 func (s *Service) Gaps(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
 	return s.reconcile(ctx, tenantID, true)
 }
@@ -160,6 +233,9 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 	if err != nil {
 		return nil, fmt.Errorf("list desired states: %w", err)
 	}
+	if len(states) == 0 {
+		return []ReconciliationRow{}, nil
+	}
 
 	ordered := append([]*desireddom.State(nil), states...)
 	desiredIDs := make(map[shared.ID]struct{}, len(ordered))
@@ -169,80 +245,124 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 			return nil, fmt.Errorf("%w: desired-state snapshot contains nil row at index %d", shared.ErrValidation, i)
 		}
 		if err := desired.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid desired-state snapshot for agent %s: %w", desired.AgentID, err)
+			return nil, fmt.Errorf("invalid desired-state snapshot for asset %s: %w", desired.AssetID, err)
 		}
 		if desired.TenantID != tenantID {
-			return nil, fmt.Errorf("%w: desired-state snapshot for agent %s belongs to tenant %s, want %s", shared.ErrValidation, desired.AgentID, desired.TenantID, tenantID)
+			return nil, fmt.Errorf("%w: desired-state snapshot for asset %s belongs to tenant %s, want %s",
+				shared.ErrValidation, desired.AssetID, desired.TenantID, tenantID)
 		}
-		if _, duplicate := desiredIDs[desired.AgentID]; duplicate {
-			return nil, fmt.Errorf("%w: duplicate desired-state row for agent %s", shared.ErrValidation, desired.AgentID)
+		if _, duplicate := desiredIDs[desired.AssetID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate desired-state row for asset %s", shared.ErrValidation, desired.AssetID)
 		}
-		desiredIDs[desired.AgentID] = struct{}{}
+		desiredIDs[desired.AssetID] = struct{}{}
 		rowCount += len(desired.Capabilities)
 	}
-	if rowCount == 0 {
-		// No governed class means there is nothing an observed agent can cover or fail to cover.
-		// Avoid a full fleet-agent read on the common pre-configuration/cleared-policy path.
-		return []ReconciliationRow{}, nil
-	}
-	// Sort only the desired documents, not every expanded capability row. Each State already validates
-	// that its capabilities are sorted, so this keeps deterministic output at D log D rather than R log R.
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].AgentID < ordered[j].AgentID })
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].AssetID < ordered[j].AssetID })
 
-	agents, err := s.agents.ListAgents(ctx, tenantID)
+	bindings, err := s.bindings.ListCurrentBindings(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("list fleet agents: %w", err)
+		return nil, fmt.Errorf("list current agent bindings: %w", err)
 	}
-	now := s.clock.Now()
-	seenAgents := make(map[shared.ID]struct{}, len(agents))
-	observedCap := len(agents)
-	if len(ordered) < observedCap {
-		observedCap = len(ordered)
+	bindingByAsset := make(map[shared.ID]CurrentBinding, min(len(bindings), len(ordered)))
+	assetByAgent := make(map[shared.ID]shared.ID, len(bindings))
+	for i, binding := range bindings {
+		if binding.TenantID.IsZero() || binding.AssetID.IsZero() || binding.AgentID.IsZero() {
+			return nil, fmt.Errorf("%w: binding snapshot contains empty identity at index %d", shared.ErrValidation, i)
+		}
+		if binding.TenantID != tenantID {
+			return nil, fmt.Errorf("%w: binding %s/%s belongs to tenant %s, want %s",
+				shared.ErrValidation, binding.AssetID, binding.AgentID, binding.TenantID, tenantID)
+		}
+		if _, duplicate := bindingByAsset[binding.AssetID]; duplicate {
+			return nil, fmt.Errorf("%w: multiple current agent bindings for asset %s", shared.ErrValidation, binding.AssetID)
+		}
+		if other, duplicate := assetByAgent[binding.AgentID]; duplicate {
+			return nil, fmt.Errorf("%w: current agent %s is bound to both assets %s and %s",
+				shared.ErrValidation, binding.AgentID, other, binding.AssetID)
+		}
+		assetByAgent[binding.AgentID] = binding.AssetID
+		if _, wanted := desiredIDs[binding.AssetID]; wanted {
+			bindingByAsset[binding.AssetID] = binding
+		}
 	}
-	byID := make(map[shared.ID]observedAgent, observedCap)
-	for i, agent := range agents {
-		if agent == nil {
-			return nil, fmt.Errorf("%w: observed-agent snapshot contains nil row at index %d", shared.ErrValidation, i)
-		}
-		if agent.ID.IsZero() {
-			return nil, fmt.Errorf("%w: observed-agent snapshot contains an empty agent id at index %d", shared.ErrValidation, i)
-		}
-		if agent.TenantID != tenantID {
-			return nil, fmt.Errorf("%w: observed agent %s belongs to tenant %s, want %s", shared.ErrValidation, agent.ID, agent.TenantID, tenantID)
-		}
-		if _, duplicate := seenAgents[agent.ID]; duplicate {
-			return nil, fmt.Errorf("%w: duplicate observed-agent row for agent %s", shared.ErrValidation, agent.ID)
-		}
-		seenAgents[agent.ID] = struct{}{}
-		if _, wanted := desiredIDs[agent.ID]; !wanted {
+
+	wantedByAgent := make(map[shared.ID]map[string]struct{}, len(bindingByAsset))
+	for _, desired := range ordered {
+		binding, ok := bindingByAsset[desired.AssetID]
+		if !ok {
 			continue
 		}
-		caps := make(map[string]struct{}, len(agent.Capabilities))
-		for _, capability := range agent.Capabilities {
-			capability = strings.TrimSpace(capability)
-			if capability != "" {
-				caps[capability] = struct{}{}
-			}
+		wanted := make(map[string]struct{}, len(desired.Capabilities))
+		for _, capability := range desired.Capabilities {
+			wanted[capability] = struct{}{}
 		}
-		byID[agent.ID] = observedAgent{
-			agent:  agent,
-			health: fleetcoverage.AgentStateFrom(agent.LastSeenAt, now, s.staleAfter, agent.Revoked(), agent.Decommissioned()),
-			caps:   caps,
+		wantedByAgent[binding.AgentID] = wanted
+	}
+
+	byID := make(map[shared.ID]observedAgent, len(wantedByAgent))
+	if len(wantedByAgent) > 0 {
+		agents, err := s.agents.ListAgents(ctx, tenantID)
+		if err != nil {
+			return nil, fmt.Errorf("list fleet agents: %w", err)
+		}
+		now := s.clock.Now().UTC()
+		seenAgents := make(map[shared.ID]struct{}, len(agents))
+		for i, agent := range agents {
+			if agent == nil {
+				return nil, fmt.Errorf("%w: observed-agent snapshot contains nil row at index %d", shared.ErrValidation, i)
+			}
+			if agent.ID.IsZero() {
+				return nil, fmt.Errorf("%w: observed-agent snapshot contains an empty agent id at index %d", shared.ErrValidation, i)
+			}
+			if agent.TenantID != tenantID {
+				return nil, fmt.Errorf("%w: observed agent %s belongs to tenant %s, want %s",
+					shared.ErrValidation, agent.ID, agent.TenantID, tenantID)
+			}
+			if _, duplicate := seenAgents[agent.ID]; duplicate {
+				return nil, fmt.Errorf("%w: duplicate observed-agent row for agent %s", shared.ErrValidation, agent.ID)
+			}
+			seenAgents[agent.ID] = struct{}{}
+			wanted, relevant := wantedByAgent[agent.ID]
+			if !relevant {
+				continue
+			}
+			caps := make(map[string]struct{}, len(wanted))
+			for _, raw := range agent.Capabilities {
+				capability := strings.TrimSpace(raw)
+				if _, keep := wanted[capability]; keep {
+					caps[capability] = struct{}{}
+				}
+			}
+			byID[agent.ID] = observedAgent{
+				agent:  agent,
+				health: fleetcoverage.AgentStateFrom(agent.LastSeenAt, now, s.staleAfter, agent.Revoked(), agent.Decommissioned()),
+				caps:   caps,
+			}
 		}
 	}
 
 	outCap := rowCount
 	if gapsOnly {
-		outCap = 0 // a healthy fleet should not allocate memory proportional to all covered rows
+		outCap = 0
 	}
 	rows := make([]ReconciliationRow, 0, outCap)
 	for _, desired := range ordered {
-		obs, exists := byID[desired.AgentID]
+		binding, bound := bindingByAsset[desired.AssetID]
 		for _, capability := range desired.Capabilities {
-			row := ReconciliationRow{AgentID: desired.AgentID.String(), Capability: capability}
+			row := ReconciliationRow{
+				AssetID: desired.AssetID.String(), AssetKind: desired.AssetKind, Capability: capability,
+			}
+			if !bound {
+				row.GapReason = desireddom.GapAgentMissing
+				row.Detail = "no current agent is bound to this desired asset"
+				rows = append(rows, row)
+				continue
+			}
+			row.AgentID = binding.AgentID.String()
+			obs, exists := byID[binding.AgentID]
 			if !exists {
 				row.GapReason = desireddom.GapAgentMissing
-				row.Detail = "no current observed agent record exists for this desired identity"
+				row.Detail = "the asset's current binding names an agent with no observed registry row"
 				rows = append(rows, row)
 				continue
 			}
@@ -251,20 +371,22 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 			switch obs.health {
 			case fleetcoverage.AgentRevoked:
 				row.GapReason = desireddom.GapAgentRevoked
-				row.Detail = "the desired agent was revoked and cannot provide coverage"
+				row.Detail = "the bound agent was revoked and cannot provide coverage"
 			case fleetcoverage.AgentDecommissioned:
 				row.GapReason = desireddom.GapAgentDecommissioned
-				row.Detail = "the desired agent was decommissioned and no replacement satisfies this intent"
+				row.Detail = "the bound agent was decommissioned and no replacement currently satisfies this asset intent"
 			case fleetcoverage.AgentStale:
 				row.GapReason = desireddom.GapAgentStale
-				row.Detail = "the desired agent heartbeat is stale"
+				row.Detail = "the bound agent heartbeat is stale"
 			case fleetcoverage.AgentHealthy:
 				if _, advertised := obs.caps[capability]; advertised {
 					row.Covered = true
 				} else {
 					row.GapReason = desireddom.GapCapabilityMissing
-					row.Detail = "the healthy agent does not advertise the desired capability"
+					row.Detail = "the healthy bound agent does not advertise the desired capability"
 				}
+			default:
+				return nil, fmt.Errorf("%w: derived invalid agent health %q for agent %s", shared.ErrValidation, obs.health, binding.AgentID)
 			}
 			if gapsOnly && row.Covered {
 				continue
@@ -273,4 +395,39 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 		}
 	}
 	return rows, nil
+}
+
+func validateStoredState(state *desireddom.State, tenantID, assetID shared.ID) error {
+	if state == nil {
+		return fmt.Errorf("%w: desired-state store returned a nil row", shared.ErrValidation)
+	}
+	if err := state.Validate(); err != nil {
+		return fmt.Errorf("invalid current desired state: %w", err)
+	}
+	if state.TenantID != tenantID || state.AssetID != assetID {
+		return fmt.Errorf("%w: desired-state store returned identity %s/%s, want %s/%s",
+			shared.ErrValidation, state.TenantID, state.AssetID, tenantID, assetID)
+	}
+	return nil
+}
+
+// record audits a successful desired-state mutation. As with fleet rollout, a write may already be
+// externally observable by the time the separate audit sink fails; rolling policy back would create a
+// worse split-brain. Audit delivery is therefore best-effort here and failures are surfaced by the audit
+// implementation's own alerting. The explicit helper makes that non-atomic contract intentional rather
+// than an accidental ignored error.
+func (s *Service) record(ctx context.Context, state *desireddom.State, actor shared.ID, action string, extra map[string]string, at time.Time) {
+	metadata := map[string]string{
+		"tenant_id":  state.TenantID.String(),
+		"asset_id":   state.AssetID.String(),
+		"asset_kind": string(state.AssetKind),
+	}
+	for k, v := range extra {
+		if v != "" {
+			metadata[k] = v
+		}
+	}
+	_ = s.audit.Record(ctx, ports.AuditEntry{
+		Actor: actor.String(), Action: action, Target: state.AssetID.String(), Metadata: metadata, At: at,
+	})
 }
