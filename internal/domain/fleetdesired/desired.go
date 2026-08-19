@@ -18,29 +18,25 @@ import (
 )
 
 const (
-	// MaxCapabilities bounds the canonical desired set for one host/cluster.
-	MaxCapabilities = 64
-	// MaxCapabilityInputs separately bounds raw mutation input. This allows benign duplicates while
-	// preventing an attacker or broken client from making normalization unbounded.
+	MaxCapabilities   = 64
 	MaxCapabilityInputs = 256
-	// MaxCapabilityLen bounds one capability identifier while leaving room for namespaced values.
-	MaxCapabilityLen = 128
+	MaxCapabilityLen  = 128
 )
 
-// State is the operator-owned desired capability set for one canonical host/cluster AssetID. Asset
-// kind is deliberately not duplicated here: fleet_assets is authoritative for that immutable
-// identity property, while this aggregate stores only policy-owned data. Version is a monotonic CAS
-// token: new state starts at 1 and every semantic replacement increments it exactly once.
+// State is the operator-owned desired capability set for one canonical host/cluster AssetID.
+// PolicyID identifies one policy lifecycle and never changes during updates; clearing and recreating
+// the policy mints a new PolicyID. Version starts at 1 within that lifecycle and increments once per
+// semantic replacement. The pair prevents both lost updates and delete/recreate ABA races.
 type State struct {
 	TenantID     shared.ID
 	AssetID      shared.ID
+	PolicyID     shared.ID
 	Capabilities []string
 	UpdatedBy    shared.ID
 	Version      int64
 	Audit        shared.Audit
 }
 
-// GapReason explains why one desired capability is not currently covered.
 type GapReason string
 
 const (
@@ -51,7 +47,6 @@ const (
 	GapCapabilityMissing   GapReason = "capability_missing"
 )
 
-// Valid reports whether r is a known reconciliation gap reason.
 func (r GapReason) Valid() bool {
 	switch r {
 	case GapAgentMissing, GapAgentStale, GapAgentRevoked, GapAgentDecommissioned, GapCapabilityMissing:
@@ -61,8 +56,6 @@ func (r GapReason) Valid() bool {
 	}
 }
 
-// SupportedAssetKind reports whether desired fleet policy may target this technical asset kind. #633
-// governs one VM host or one Kubernetes cluster; workload/image policy belongs to other controllers.
 func SupportedAssetKind(kind asset.Kind) bool {
 	return kind == asset.KindHost || kind == asset.KindCluster
 }
@@ -101,15 +94,15 @@ func NormalizeCapabilities(in []string) ([]string, error) {
 	return out, nil
 }
 
-// Validate reports whether state is safe and canonical to persist. Subject existence/type is an
-// admission invariant checked against the canonical asset store by the use case; this aggregate only
-// validates fields it owns.
 func (s State) Validate() error {
 	if s.TenantID.IsZero() {
 		return fmt.Errorf("%w: desired state needs a tenant", shared.ErrValidation)
 	}
 	if s.AssetID.IsZero() {
 		return fmt.Errorf("%w: desired state needs a canonical asset", shared.ErrValidation)
+	}
+	if s.PolicyID.IsZero() {
+		return fmt.Errorf("%w: desired state needs a policy id", shared.ErrValidation)
 	}
 	if s.UpdatedBy.IsZero() {
 		return fmt.Errorf("%w: desired state change needs an actor", shared.ErrValidation)
