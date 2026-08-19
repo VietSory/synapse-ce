@@ -9,7 +9,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
-	desireduc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleetdesired"
+	desireduc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/desired"
 )
 
 type noAssetRead struct{ calls int }
