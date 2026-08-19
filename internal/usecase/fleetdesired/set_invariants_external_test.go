@@ -84,8 +84,7 @@ func (c *setInvariantClock) Now() time.Time {
 
 func setInvariantState(now time.Time) *desireddom.State {
 	return &desireddom.State{
-		TenantID: "tenant", AssetID: "asset", AssetKind: asset.KindHost,
-		Capabilities: []string{"network", "process"}, UpdatedBy: "operator",
+		TenantID: "tenant", AssetID: "asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator",
 		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
