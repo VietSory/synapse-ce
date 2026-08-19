@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	desireduc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleetdesired"
