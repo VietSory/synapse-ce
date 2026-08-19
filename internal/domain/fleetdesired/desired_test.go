@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
@@ -20,13 +21,30 @@ func TestNormalizeCapabilitiesCanonical(t *testing.T) {
 	}
 }
 
-func TestNormalizeCapabilitiesBounds(t *testing.T) {
-	tooMany := make([]string, MaxCapabilities+1)
-	for i := range tooMany {
-		tooMany[i] = fmt.Sprintf("cap.%d", i)
+func TestNormalizeCapabilitiesBoundsRawAndCanonicalIndependently(t *testing.T) {
+	duplicates := make([]string, MaxCapabilities+1)
+	for i := range duplicates {
+		duplicates[i] = "process"
 	}
-	if _, err := NormalizeCapabilities(tooMany); err == nil {
-		t.Fatal("expected capability-count validation error")
+	got, err := NormalizeCapabilities(duplicates)
+	if err != nil || len(got) != 1 || got[0] != "process" {
+		t.Fatalf("benign duplicates should canonicalize: got=%v err=%v", got, err)
+	}
+
+	tooManyDistinct := make([]string, MaxCapabilities+1)
+	for i := range tooManyDistinct {
+		tooManyDistinct[i] = fmt.Sprintf("cap.%03d", i)
+	}
+	if _, err := NormalizeCapabilities(tooManyDistinct); err == nil {
+		t.Fatal("expected distinct capability-count validation error")
+	}
+
+	tooManyInputs := make([]string, MaxCapabilityInputs+1)
+	for i := range tooManyInputs {
+		tooManyInputs[i] = "process"
+	}
+	if _, err := NormalizeCapabilities(tooManyInputs); err == nil {
+		t.Fatal("expected raw input-count validation error")
 	}
 	if _, err := NormalizeCapabilities([]string{strings.Repeat("x", MaxCapabilityLen+1)}); err == nil {
 		t.Fatal("expected capability-length validation error")
@@ -36,17 +54,37 @@ func TestNormalizeCapabilitiesBounds(t *testing.T) {
 	}
 }
 
-func TestStateValidateRequiresCanonicalCapabilities(t *testing.T) {
-	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
-	state := State{
-		TenantID: shared.ID("tenant-1"), AgentID: shared.ID("agent-1"), UpdatedBy: shared.ID("operator-1"),
-		Capabilities: []string{"z", "a"}, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+func validState(now time.Time) State {
+	return State{
+		TenantID: "tenant-1", AssetID: "asset-1", AssetKind: asset.KindHost, UpdatedBy: "operator-1",
+		Capabilities: []string{"a", "z"}, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
+}
+
+func TestStateValidateRequiresCanonicalNonEmptyHostOrClusterPolicy(t *testing.T) {
+	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
+	state := validState(now)
+	if err := state.Validate(); err != nil {
+		t.Fatalf("valid host state rejected: %v", err)
+	}
+	state.AssetKind = asset.KindCluster
+	if err := state.Validate(); err != nil {
+		t.Fatalf("valid cluster state rejected: %v", err)
+	}
+
+	state = validState(now)
+	state.Capabilities = []string{"z", "a"}
 	if err := state.Validate(); err == nil {
 		t.Fatal("expected non-canonical ordering to be rejected")
 	}
-	state.Capabilities = []string{"a", "z"}
-	if err := state.Validate(); err != nil {
-		t.Fatalf("canonical state rejected: %v", err)
+	state = validState(now)
+	state.Capabilities = nil
+	if err := state.Validate(); err == nil {
+		t.Fatal("expected empty policy to be rejected")
+	}
+	state = validState(now)
+	state.AssetKind = asset.KindWorkload
+	if err := state.Validate(); err == nil {
+		t.Fatal("expected workload desired policy to be rejected")
 	}
 }
