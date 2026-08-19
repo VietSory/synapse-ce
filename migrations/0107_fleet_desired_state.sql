@@ -9,8 +9,8 @@
 -- Intentionally NO foreign key to fleet_agents. Desired state is operator intent and must outlive the
 -- observed identity row: if an agent is later purged, retaining this row is what lets reconciliation
 -- surface `agent_missing` instead of silently deleting the expectation. The mutation use case proves
--- the canonical AgentID exists in the same tenant when the intent is configured; tenant RLS remains
--- the storage isolation boundary after that observation disappears.
+-- the canonical AgentID exists in the same tenant when the intent is first configured; tenant RLS
+-- remains the storage isolation boundary after that observation disappears.
 CREATE TABLE fleet_desired_state (
     tenant_id    TEXT NOT NULL REFERENCES tenants(id),
     agent_id     TEXT NOT NULL CHECK (agent_id <> ''),
