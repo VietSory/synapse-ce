@@ -97,6 +97,30 @@ func TestFleetDesiredRepository(t *testing.T) {
 		t.Fatalf("desired attribution/audit did not round-trip: %+v", got)
 	}
 
+	updatedAt := now.Add(time.Minute)
+	update := &fleetdesired.State{
+		TenantID:     shared.ID("fd-a"),
+		AgentID:      shared.ID("agent-a"),
+		Capabilities: []string{"telemetry.network"},
+		UpdatedBy:    shared.ID("operator-b"),
+		// A replacement document may carry a different candidate CreatedAt; the repository contract
+		// preserves the original database value on conflict rather than rewriting history.
+		Audit: shared.Audit{CreatedAt: now.Add(-time.Hour), UpdatedAt: updatedAt},
+	}
+	if err := repo.Put(ctx, update); err != nil {
+		t.Fatalf("update desired state: %v", err)
+	}
+	got, err = repo.Get(ctx, shared.ID("fd-a"), shared.ID("agent-a"))
+	if err != nil {
+		t.Fatalf("get updated desired state: %v", err)
+	}
+	if !got.Audit.CreatedAt.Equal(now) || !got.Audit.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("upsert changed created_at or failed to advance updated_at: %+v", got.Audit)
+	}
+	if got.UpdatedBy != shared.ID("operator-b") || len(got.Capabilities) != 1 || got.Capabilities[0] != "telemetry.network" {
+		t.Fatalf("upsert did not replace mutable desired state: %+v", got)
+	}
+
 	// Tenant scoping is both in the query and in WithTenant/RLS: another tenant must observe the same
 	// canonical AgentID as absent rather than learning that a desired policy exists elsewhere.
 	if _, err := repo.Get(ctx, shared.ID("fd-b"), shared.ID("agent-a")); !errors.Is(err, shared.ErrNotFound) {
