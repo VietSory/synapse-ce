@@ -8,13 +8,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-const fleetDesiredCols = `tenant_id, asset_id, asset_kind, capabilities, updated_by, created_at, updated_at`
+const fleetDesiredCols = `tenant_id, asset_id, capabilities, updated_by, created_at, updated_at`
 
 // FleetDesiredRepository persists operator-owned desired state (migration 0107). Every operation is
 // tenant-scoped through WithTenant so PostgreSQL RLS is the final isolation boundary.
@@ -65,13 +64,12 @@ func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.St
 	err := WithTenant(ctx, r.pool, state.TenantID.String(), func(tx pgx.Tx) error {
 		_, execErr := tx.Exec(ctx, `
 			INSERT INTO fleet_desired_state (`+fleetDesiredCols+`)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)
+			VALUES ($1,$2,$3,$4,$5,$6)
 			ON CONFLICT (tenant_id, asset_id) DO UPDATE SET
-			  asset_kind   = EXCLUDED.asset_kind,
 			  capabilities = EXCLUDED.capabilities,
 			  updated_by   = EXCLUDED.updated_by,
 			  updated_at   = EXCLUDED.updated_at`,
-			state.TenantID.String(), state.AssetID.String(), string(state.AssetKind), state.Capabilities,
+			state.TenantID.String(), state.AssetID.String(), state.Capabilities,
 			state.UpdatedBy.String(), state.Audit.CreatedAt, state.Audit.UpdatedAt)
 		return execErr
 	})
@@ -132,17 +130,16 @@ func (r *FleetDesiredRepository) List(ctx context.Context, tenantID shared.ID) (
 
 func scanFleetDesired(row rowScanner) (*fleetdesired.State, error) {
 	var (
-		state                       fleetdesired.State
-		tenant, assetID, kind, actor string
+		state                    fleetdesired.State
+		tenant, assetID, updatedBy string
 	)
-	if err := row.Scan(&tenant, &assetID, &kind, &state.Capabilities, &actor,
+	if err := row.Scan(&tenant, &assetID, &state.Capabilities, &updatedBy,
 		&state.Audit.CreatedAt, &state.Audit.UpdatedAt); err != nil {
 		return nil, err
 	}
 	state.TenantID = shared.ID(tenant)
 	state.AssetID = shared.ID(assetID)
-	state.AssetKind = asset.Kind(kind)
-	state.UpdatedBy = shared.ID(actor)
+	state.UpdatedBy = shared.ID(updatedBy)
 	if err := state.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid stored fleet desired state: %w", err)
 	}
