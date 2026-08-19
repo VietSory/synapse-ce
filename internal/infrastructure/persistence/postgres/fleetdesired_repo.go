@@ -13,7 +13,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-const fleetDesiredCols = `tenant_id, asset_id, capabilities, updated_by, created_at, updated_at`
+const fleetDesiredCols = `tenant_id, asset_id, capabilities, updated_by, version, created_at, updated_at`
 
 // FleetDesiredRepository persists operator-owned desired state (migration 0107). Every operation is
 // tenant-scoped through WithTenant so PostgreSQL RLS is the final isolation boundary.
@@ -52,10 +52,10 @@ func (r *FleetDesiredRepository) Get(ctx context.Context, tenantID, assetID shar
 	return state, nil
 }
 
-// Put atomically replaces one asset's desired capability array. Subject admission (canonical
-// host/cluster) belongs to the use case; the database FK independently guarantees that the referenced
-// technical asset exists in the same tenant. created_at is preserved on conflict while mutable policy
-// and attribution advance.
+// Put stores one CAS version. Version 1 creates an absent row. Version N>1 updates only version N-1;
+// a stale writer gets shared.ErrConflict instead of silently replacing a newer policy. Subject
+// admission (canonical host/cluster) belongs to the use case; the database FK independently guarantees
+// that a newly created desired row references a technical asset in the same tenant.
 func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.State) error {
 	if state == nil {
 		return fmt.Errorf("%w: nil fleet desired state", shared.ErrValidation)
@@ -64,16 +64,35 @@ func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.St
 		return err
 	}
 	err := WithTenant(ctx, r.pool, state.TenantID.String(), func(tx pgx.Tx) error {
-		_, execErr := tx.Exec(ctx, `
-			INSERT INTO fleet_desired_state (`+fleetDesiredCols+`)
-			VALUES ($1,$2,$3,$4,$5,$6)
-			ON CONFLICT (tenant_id, asset_id) DO UPDATE SET
-			  capabilities = EXCLUDED.capabilities,
-			  updated_by   = EXCLUDED.updated_by,
-			  updated_at   = EXCLUDED.updated_at`,
-			state.TenantID.String(), state.AssetID.String(), state.Capabilities,
-			state.UpdatedBy.String(), state.Audit.CreatedAt, state.Audit.UpdatedAt)
-		return execErr
+		if state.Version == 1 {
+			var insertedVersion int64
+			err := tx.QueryRow(ctx, `
+				INSERT INTO fleet_desired_state (`+fleetDesiredCols+`)
+				VALUES ($1,$2,$3,$4,$5,$6,$7)
+				ON CONFLICT (tenant_id, asset_id) DO NOTHING
+				RETURNING version`,
+				state.TenantID.String(), state.AssetID.String(), state.Capabilities, state.UpdatedBy.String(),
+				state.Version, state.Audit.CreatedAt, state.Audit.UpdatedAt).Scan(&insertedVersion)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: desired state for asset %s already exists", shared.ErrConflict, state.AssetID)
+			}
+			return err
+		}
+
+		tag, err := tx.Exec(ctx, `
+			UPDATE fleet_desired_state
+			SET capabilities=$3, updated_by=$4, version=$5, updated_at=$6
+			WHERE tenant_id=$1 AND asset_id=$2 AND version=$7`,
+			state.TenantID.String(), state.AssetID.String(), state.Capabilities, state.UpdatedBy.String(),
+			state.Version, state.Audit.UpdatedAt, state.Version-1)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: desired state for asset %s no longer has version %d",
+				shared.ErrConflict, state.AssetID, state.Version-1)
+		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("store fleet desired state: %w", err)
@@ -81,15 +100,33 @@ func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.St
 	return nil
 }
 
-// Delete clears one asset's desired policy. It is idempotent by contract.
-func (r *FleetDesiredRepository) Delete(ctx context.Context, tenantID, assetID shared.ID) error {
-	if tenantID.IsZero() || assetID.IsZero() {
-		return fmt.Errorf("%w: desired-state delete needs tenant and asset", shared.ErrValidation)
+// Delete clears one asset's desired policy only if expectedVersion is still current. If the row is
+// already absent it is an idempotent success; if a newer row exists it returns shared.ErrConflict.
+func (r *FleetDesiredRepository) Delete(ctx context.Context, tenantID, assetID shared.ID, expectedVersion int64) error {
+	if tenantID.IsZero() || assetID.IsZero() || expectedVersion < 1 {
+		return fmt.Errorf("%w: desired-state delete needs tenant, asset and positive expected version", shared.ErrValidation)
 	}
 	err := WithTenant(ctx, r.pool, tenantID.String(), func(tx pgx.Tx) error {
-		_, execErr := tx.Exec(ctx, `DELETE FROM fleet_desired_state WHERE tenant_id=$1 AND asset_id=$2`,
-			tenantID.String(), assetID.String())
-		return execErr
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM fleet_desired_state WHERE tenant_id=$1 AND asset_id=$2 AND version=$3`,
+			tenantID.String(), assetID.String(), expectedVersion)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM fleet_desired_state WHERE tenant_id=$1 AND asset_id=$2)`,
+			tenantID.String(), assetID.String()).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("%w: desired state for asset %s changed after version %d",
+				shared.ErrConflict, assetID, expectedVersion)
+		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("delete fleet desired state: %w", err)
@@ -135,7 +172,7 @@ func scanFleetDesired(row rowScanner) (*fleetdesired.State, error) {
 		state                      fleetdesired.State
 		tenant, assetID, updatedBy string
 	)
-	if err := row.Scan(&tenant, &assetID, &state.Capabilities, &updatedBy,
+	if err := row.Scan(&tenant, &assetID, &state.Capabilities, &updatedBy, &state.Version,
 		&state.Audit.CreatedAt, &state.Audit.UpdatedAt); err != nil {
 		return nil, err
 	}
