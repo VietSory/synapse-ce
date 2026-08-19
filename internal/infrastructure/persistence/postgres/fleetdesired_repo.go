@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
@@ -69,6 +70,13 @@ func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.St
 				state.UpdatedBy.String(), state.Version, state.Audit.CreatedAt, state.Audit.UpdatedAt).Scan(&insertedVersion)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("%w: desired state for asset %s already exists", shared.ErrConflict, state.AssetID)
+			}
+			if err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+					return fmt.Errorf("%w: desired policy id %s already exists in tenant %s",
+						shared.ErrConflict, state.PolicyID, state.TenantID)
+				}
 			}
 			return err
 		}
