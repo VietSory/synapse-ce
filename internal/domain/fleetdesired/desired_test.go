@@ -67,12 +67,12 @@ func TestSupportedAssetKind(t *testing.T) {
 
 func validState(now time.Time) State {
 	return State{
-		TenantID: "tenant-1", AssetID: "asset-1", UpdatedBy: "operator-1",
+		TenantID: "tenant-1", AssetID: "asset-1", UpdatedBy: "operator-1", Version: 1,
 		Capabilities: []string{"a", "z"}, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
 
-func TestStateValidateRequiresCanonicalNonEmptyPolicy(t *testing.T) {
+func TestStateValidateRequiresCanonicalNonEmptyVersionedPolicy(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
 	state := validState(now)
 	if err := state.Validate(); err != nil {
@@ -88,5 +88,10 @@ func TestStateValidateRequiresCanonicalNonEmptyPolicy(t *testing.T) {
 	state.Capabilities = nil
 	if err := state.Validate(); err == nil {
 		t.Fatal("expected empty policy to be rejected")
+	}
+	state = validState(now)
+	state.Version = 0
+	if err := state.Validate(); err == nil {
+		t.Fatal("expected non-positive version to be rejected")
 	}
 }
