@@ -88,6 +88,11 @@ func (r *FleetDesiredRepository) Put(ctx context.Context, state *fleetdesired.St
 			state.TenantID.String(), state.AssetID.String(), state.PolicyID.String(), state.Capabilities,
 			state.UpdatedBy.String(), state.Version, state.Audit.UpdatedAt, state.Version-1)
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23514" && pgErr.ConstraintName == "fleet_desired_state_time_order" {
+				return fmt.Errorf("%w: desired state updated_at precedes stored created_at for asset %s",
+					shared.ErrValidation, state.AssetID)
+			}
 			return err
 		}
 		if tag.RowsAffected() != 1 {
