@@ -1,26 +1,46 @@
 -- +goose Up
 -- Durable desired-vs-observed fleet intent (#633).
 --
--- The observed `fleet_agents.capabilities` column is agent-reported and therefore must never double
--- as desired state: if an unhealthy or compromised agent stopped advertising a sensor, using the
--- observed column as policy would make the missing sensor disappear from coverage. This table holds
--- the independent operator intent that reconciliation compares against observations.
---
--- Intentionally NO foreign key to fleet_agents. Desired state is operator intent and must outlive the
--- observed identity row: if an agent is later purged, retaining this row is what lets reconciliation
--- surface `agent_missing` instead of silently deleting the expectation. The mutation use case proves
--- the canonical AgentID exists in the same tenant when the intent is first configured; tenant RLS
--- remains the storage isolation boundary after that observation disappears.
+-- `fleet_agents.capabilities` is agent-reported observation and must never double as policy. Durable
+-- intent is attached to the canonical host/cluster technical asset instead of the enrolment-scoped
+-- AgentID: reinstalling or replacing an agent must not orphan the policy for the host/cluster it serves.
+-- The A0.1/A3/A4 server-authoritative AssetBinding selects the CURRENT agent for that AssetID; #633
+-- only consumes that binding when reconciling desired intent against observations.
+
+-- Keep storage canonical even if a future writer bypasses the Go use case. The C collation matches
+-- Go's bytewise sort.Strings ordering for capability identifiers.
+CREATE FUNCTION synapse_fleet_desired_capabilities_valid(caps TEXT[])
+RETURNS BOOLEAN
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT
+        array_ndims(caps) = 1
+        AND cardinality(caps) BETWEEN 1 AND 64
+        AND NOT EXISTS (
+            SELECT 1
+            FROM unnest(caps) AS c
+            WHERE c IS NULL
+               OR btrim(c) = ''
+               OR c <> btrim(c)
+               OR octet_length(c) > 128
+               OR c ~ '[[:cntrl:]]'
+        )
+        AND cardinality(caps) = (SELECT count(DISTINCT c) FROM unnest(caps) AS c)
+        AND caps = ARRAY(SELECT c FROM unnest(caps) AS c ORDER BY c COLLATE "C")
+$$;
+
 CREATE TABLE fleet_desired_state (
     tenant_id    TEXT NOT NULL REFERENCES tenants(id),
-    agent_id     TEXT NOT NULL CHECK (agent_id <> ''),
-    capabilities TEXT[] NOT NULL DEFAULT '{}',
+    asset_id     TEXT NOT NULL CHECK (asset_id <> ''),
+    asset_kind   TEXT NOT NULL CHECK (asset_kind IN ('host', 'cluster')),
+    capabilities TEXT[] NOT NULL,
     updated_by   TEXT NOT NULL CHECK (updated_by <> ''),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, agent_id),
-    CONSTRAINT fleet_desired_state_capability_bound CHECK (cardinality(capabilities) <= 64),
-    CONSTRAINT fleet_desired_state_capability_nonnull CHECK (array_position(capabilities, NULL) IS NULL),
+    PRIMARY KEY (tenant_id, asset_id),
+    FOREIGN KEY (tenant_id, asset_id) REFERENCES fleet_assets(tenant_id, id),
+    CONSTRAINT fleet_desired_state_capabilities_canonical CHECK (synapse_fleet_desired_capabilities_valid(capabilities)),
     CONSTRAINT fleet_desired_state_time_order CHECK (updated_at >= created_at)
 );
 
@@ -28,3 +48,4 @@ CALL synapse_enable_tenant_rls('fleet_desired_state');
 
 -- +goose Down
 DROP TABLE fleet_desired_state;
+DROP FUNCTION synapse_fleet_desired_capabilities_valid(TEXT[]);
