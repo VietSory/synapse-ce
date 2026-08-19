@@ -15,11 +15,12 @@ import (
 )
 
 type setInvariantStore struct {
-	current *desireddom.State
-	getErr  error
-	puts    int
-	deletes int
-	written *desireddom.State
+	current        *desireddom.State
+	getErr         error
+	puts           int
+	deletes        int
+	deleteExpected int64
+	written        *desireddom.State
 }
 
 func (s *setInvariantStore) Get(context.Context, shared.ID, shared.ID) (*desireddom.State, error) {
@@ -32,8 +33,9 @@ func (s *setInvariantStore) Put(_ context.Context, state *desireddom.State) erro
 	s.getErr = nil
 	return nil
 }
-func (s *setInvariantStore) Delete(context.Context, shared.ID, shared.ID) error {
+func (s *setInvariantStore) Delete(_ context.Context, _ shared.ID, _ shared.ID, expectedVersion int64) error {
 	s.deletes++
+	s.deleteExpected = expectedVersion
 	s.current = nil
 	s.getErr = shared.ErrNotFound
 	return nil
@@ -84,7 +86,7 @@ func (c *setInvariantClock) Now() time.Time {
 
 func setInvariantState(now time.Time) *desireddom.State {
 	return &desireddom.State{
-		TenantID: "tenant", AssetID: "asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator",
+		TenantID: "tenant", AssetID: "asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator", Version: 1,
 		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
@@ -118,7 +120,7 @@ func TestSetDesiredCapabilitiesIdenticalReapplyIsSideEffectFree(t *testing.T) {
 		t.Fatalf("identical reapply caused side effects: puts=%d deletes=%d asset_reads=%d audit=%d clock=%d",
 			store.puts, store.deletes, assets.calls, audit.records, clock.calls)
 	}
-	if got != current || !got.Audit.UpdatedAt.Equal(now) {
+	if got != current || got.Version != 1 || !got.Audit.UpdatedAt.Equal(now) {
 		t.Fatalf("identical reapply did not return unchanged state: %+v", got)
 	}
 }
@@ -172,9 +174,27 @@ func TestSetDesiredCapabilitiesAllowsPolicyBeforeAgentBindingExists(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AssetID != "asset" || store.puts != 1 || bindings.calls != 0 || agents.calls != 0 || audit.records != 1 || clock.calls != 1 {
-		t.Fatalf("pre-binding desired write mismatch: got=%+v puts=%d bindings=%d agents=%d audit=%d clock=%d",
-			got, store.puts, bindings.calls, agents.calls, audit.records, clock.calls)
+	if got.AssetID != "asset" || got.Version != 1 || store.puts != 1 || store.written.Version != 1 || bindings.calls != 0 || agents.calls != 0 || audit.records != 1 || clock.calls != 1 {
+		t.Fatalf("pre-binding desired write mismatch: got=%+v written=%+v puts=%d bindings=%d agents=%d audit=%d clock=%d",
+			got, store.written, store.puts, bindings.calls, agents.calls, audit.records, clock.calls)
+	}
+}
+
+func TestSetDesiredCapabilitiesIncrementsCurrentVersionExactlyOnce(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	current := setInvariantState(now)
+	current.Version = 41
+	store := &setInvariantStore{current: current}
+	assets := &setInvariantAssetReader{asset: &asset.Asset{ID: "asset", TenantID: "tenant", Kind: asset.KindHost}}
+	svc := setInvariantService(t, store, assets, &setInvariantAudit{}, &setInvariantClock{now: now.Add(time.Minute)})
+	got, err := svc.SetDesiredCapabilities(context.Background(), desireduc.SetInput{
+		TenantID: "tenant", AssetID: "asset", Actor: "operator", Capabilities: []string{"file"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 42 || store.written.Version != 42 {
+		t.Fatalf("semantic update version=%d written=%d want 42", got.Version, store.written.Version)
 	}
 }
 
@@ -191,8 +211,8 @@ func TestClearDesiredCapabilitiesDoesNotDependOnAssetOrAgentExistence(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if assets.calls != 0 || store.deletes != 1 || audit.records != 1 || clock.calls != 1 {
-		t.Fatalf("clear side effects mismatch: asset_reads=%d deletes=%d audit=%d clock=%d",
-			assets.calls, store.deletes, audit.records, clock.calls)
+	if assets.calls != 0 || store.deletes != 1 || store.deleteExpected != 1 || audit.records != 1 || clock.calls != 1 {
+		t.Fatalf("clear side effects mismatch: asset_reads=%d deletes=%d expected=%d audit=%d clock=%d",
+			assets.calls, store.deletes, store.deleteExpected, audit.records, clock.calls)
 	}
 }
