@@ -1,5 +1,5 @@
 // Package fleetdesired reconciles operator-owned desired capabilities for canonical host/cluster
-// assets against the latest server-authoritative agent binding and observed fleet-agent state.
+// assets against the latest server-authoritative agent bindings and observed fleet-agent state.
 // Reconciliation is read-only: polling fleet health must not create database churn.
 package fleetdesired
 
@@ -24,6 +24,10 @@ type AssetReader interface {
 	GetAssetByID(ctx context.Context, tenantID, assetID shared.ID) (*asset.Asset, error)
 }
 
+// CurrentBinding is the read projection of one server-authoritative agent -> asset binding. The
+// reverse relation is intentionally not constrained here: more than one current agent may serve the
+// same canonical asset (for example, distinct cluster components). One AgentID, however, may not be
+// current for two assets at once.
 type CurrentBinding struct {
 	TenantID shared.ID
 	AssetID  shared.ID
@@ -73,7 +77,7 @@ type ClearInput struct {
 // within one lifecycle; a clear followed by recreation receives a new ID. Store CAS on
 // (PolicyID,Version) prevents both concurrent lost updates and delete/recreate ABA races.
 func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*desireddom.State, error) {
-	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
+	if in.TenantID.IsZero() || in.AssetID.IsZero() || strings.TrimSpace(in.Actor.String()) == "" {
 		return nil, fmt.Errorf("%w: desired-state change needs tenant, canonical asset and actor", shared.ErrValidation)
 	}
 	caps, err := desireddom.NormalizeCapabilities(in.Capabilities)
@@ -155,7 +159,7 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 }
 
 func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) error {
-	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
+	if in.TenantID.IsZero() || in.AssetID.IsZero() || strings.TrimSpace(in.Actor.String()) == "" {
 		return fmt.Errorf("%w: desired-state clear needs tenant, canonical asset and actor", shared.ErrValidation)
 	}
 	current, err := s.store.Get(ctx, in.TenantID, in.AssetID)
@@ -196,19 +200,32 @@ type ReconciliationRow struct {
 	AssetID       string                    `json:"asset_id"`
 	PolicyID      string                    `json:"policy_id"`
 	PolicyVersion int64                     `json:"policy_version"`
-	AgentID       string                    `json:"agent_id,omitempty"`
-	Capability    string                    `json:"capability"`
-	Health        fleetcoverage.AgentHealth `json:"agent_health,omitempty"`
-	Covered       bool                      `json:"covered"`
-	GapReason     desireddom.GapReason      `json:"gap_reason,omitempty"`
-	Detail        string                    `json:"detail,omitempty"`
-	LastSeen      time.Time                 `json:"last_seen,omitempty"`
+	// AgentID is the deterministic witness that satisfied the capability, or the best available
+	// representative when the capability is uncovered. Asset coverage does not imply reverse-unique
+	// AssetID -> AgentID binding.
+	AgentID    string                    `json:"agent_id,omitempty"`
+	Capability string                    `json:"capability"`
+	Health     fleetcoverage.AgentHealth `json:"agent_health,omitempty"`
+	Covered    bool                      `json:"covered"`
+	GapReason  desireddom.GapReason      `json:"gap_reason,omitempty"`
+	Detail     string                    `json:"detail,omitempty"`
+	LastSeen   time.Time                 `json:"last_seen,omitempty"`
 }
 
 type observedAgent struct {
 	agent  *fleetagent.Agent
 	health fleetcoverage.AgentHealth
 	caps   map[string]struct{}
+}
+
+type bindingEvaluation struct {
+	binding  CurrentBinding
+	observed observedAgent
+	hasAgent bool
+	covered  bool
+	reason   desireddom.GapReason
+	detail   string
+	rank     int
 }
 
 func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
@@ -257,8 +274,7 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 	if err != nil {
 		return nil, fmt.Errorf("list current agent bindings: %w", err)
 	}
-	bindingByAsset := make(map[shared.ID]CurrentBinding, min(len(bindings), len(ordered)))
-	seenBindingAssets := make(map[shared.ID]struct{}, len(bindings))
+	bindingsByAsset := make(map[shared.ID][]CurrentBinding, min(len(bindings), len(ordered)))
 	assetByAgent := make(map[shared.ID]shared.ID, len(bindings))
 	for i, binding := range bindings {
 		if binding.TenantID.IsZero() || binding.AssetID.IsZero() || binding.AgentID.IsZero() {
@@ -268,31 +284,34 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 			return nil, fmt.Errorf("%w: binding %s/%s belongs to tenant %s, want %s",
 				shared.ErrValidation, binding.AssetID, binding.AgentID, binding.TenantID, tenantID)
 		}
-		if _, duplicate := seenBindingAssets[binding.AssetID]; duplicate {
-			return nil, fmt.Errorf("%w: multiple current agent bindings for asset %s", shared.ErrValidation, binding.AssetID)
-		}
-		seenBindingAssets[binding.AssetID] = struct{}{}
 		if other, duplicate := assetByAgent[binding.AgentID]; duplicate {
+			if other == binding.AssetID {
+				return nil, fmt.Errorf("%w: duplicate current binding for agent %s and asset %s",
+					shared.ErrValidation, binding.AgentID, binding.AssetID)
+			}
 			return nil, fmt.Errorf("%w: current agent %s is bound to both assets %s and %s",
 				shared.ErrValidation, binding.AgentID, other, binding.AssetID)
 		}
 		assetByAgent[binding.AgentID] = binding.AssetID
 		if _, wanted := desiredIDs[binding.AssetID]; wanted {
-			bindingByAsset[binding.AssetID] = binding
+			bindingsByAsset[binding.AssetID] = append(bindingsByAsset[binding.AssetID], binding)
 		}
 	}
+	for assetID := range bindingsByAsset {
+		sort.Slice(bindingsByAsset[assetID], func(i, j int) bool {
+			return bindingsByAsset[assetID][i].AgentID < bindingsByAsset[assetID][j].AgentID
+		})
+	}
 
-	wantedByAgent := make(map[shared.ID]map[string]struct{}, len(bindingByAsset))
+	wantedByAgent := make(map[shared.ID]map[string]struct{}, len(bindings))
 	for _, desired := range ordered {
-		binding, ok := bindingByAsset[desired.AssetID]
-		if !ok {
-			continue
+		for _, binding := range bindingsByAsset[desired.AssetID] {
+			wanted := make(map[string]struct{}, len(desired.Capabilities))
+			for _, capability := range desired.Capabilities {
+				wanted[capability] = struct{}{}
+			}
+			wantedByAgent[binding.AgentID] = wanted
 		}
-		wanted := make(map[string]struct{}, len(desired.Capabilities))
-		for _, capability := range desired.Capabilities {
-			wanted[capability] = struct{}{}
-		}
-		wantedByAgent[binding.AgentID] = wanted
 	}
 
 	byID := make(map[shared.ID]observedAgent, len(wantedByAgent))
@@ -343,47 +362,29 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 	}
 	rows := make([]ReconciliationRow, 0, outCap)
 	for _, desired := range ordered {
-		binding, bound := bindingByAsset[desired.AssetID]
+		assetBindings := bindingsByAsset[desired.AssetID]
 		for _, capability := range desired.Capabilities {
 			row := ReconciliationRow{
 				AssetID: desired.AssetID.String(), PolicyID: desired.PolicyID.String(), PolicyVersion: desired.Version,
 				Capability: capability,
 			}
-			if !bound {
+			if len(assetBindings) == 0 {
 				row.GapReason = desireddom.GapAgentMissing
 				row.Detail = "no current agent is bound to this desired asset"
 				rows = append(rows, row)
 				continue
 			}
-			row.AgentID = binding.AgentID.String()
-			obs, exists := byID[binding.AgentID]
-			if !exists {
-				row.GapReason = desireddom.GapAgentMissing
-				row.Detail = "the asset's current binding names an agent with no observed registry row"
-				rows = append(rows, row)
-				continue
+			evaluation, err := selectBindingForCapability(assetBindings, byID, capability)
+			if err != nil {
+				return nil, err
 			}
-			row.LastSeen = obs.agent.LastSeenAt
-			row.Health = obs.health
-			switch obs.health {
-			case fleetcoverage.AgentRevoked:
-				row.GapReason = desireddom.GapAgentRevoked
-				row.Detail = "the bound agent was revoked and cannot provide coverage"
-			case fleetcoverage.AgentDecommissioned:
-				row.GapReason = desireddom.GapAgentDecommissioned
-				row.Detail = "the bound agent was decommissioned and no replacement currently satisfies this asset intent"
-			case fleetcoverage.AgentStale:
-				row.GapReason = desireddom.GapAgentStale
-				row.Detail = "the bound agent heartbeat is stale"
-			case fleetcoverage.AgentHealthy:
-				if _, advertised := obs.caps[capability]; advertised {
-					row.Covered = true
-				} else {
-					row.GapReason = desireddom.GapCapabilityMissing
-					row.Detail = "the healthy bound agent does not advertise the desired capability"
-				}
-			default:
-				return nil, fmt.Errorf("%w: derived invalid agent health %q for agent %s", shared.ErrValidation, obs.health, binding.AgentID)
+			row.AgentID = evaluation.binding.AgentID.String()
+			row.Covered = evaluation.covered
+			row.GapReason = evaluation.reason
+			row.Detail = evaluation.detail
+			if evaluation.hasAgent {
+				row.LastSeen = evaluation.observed.agent.LastSeenAt
+				row.Health = evaluation.observed.health
 			}
 			if gapsOnly && row.Covered {
 				continue
@@ -392,6 +393,62 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 		}
 	}
 	return rows, nil
+}
+
+// selectBindingForCapability implements presence semantics for one desired asset capability. Any
+// healthy bound agent advertising the capability satisfies it. If none does, the deterministic
+// representative is the most informative available state: healthy-but-missing capability, stale,
+// missing registry row, revoked, then decommissioned; AgentID order breaks ties. Required replica/node
+// cardinality is a separate topology policy and is deliberately not invented by this foundation.
+func selectBindingForCapability(bindings []CurrentBinding, byID map[shared.ID]observedAgent, capability string) (bindingEvaluation, error) {
+	var best bindingEvaluation
+	for _, binding := range bindings {
+		obs, exists := byID[binding.AgentID]
+		if !exists {
+			candidate := bindingEvaluation{
+				binding: binding, reason: desireddom.GapAgentMissing, rank: 3,
+				detail: "a current binding names an agent with no observed registry row",
+			}
+			if best.rank == 0 || candidate.rank < best.rank {
+				best = candidate
+			}
+			continue
+		}
+
+		candidate := bindingEvaluation{binding: binding, observed: obs, hasAgent: true}
+		switch obs.health {
+		case fleetcoverage.AgentHealthy:
+			if _, advertised := obs.caps[capability]; advertised {
+				candidate.covered = true
+				return candidate, nil
+			}
+			candidate.reason = desireddom.GapCapabilityMissing
+			candidate.detail = "no healthy bound agent advertises the desired capability"
+			candidate.rank = 1
+		case fleetcoverage.AgentStale:
+			candidate.reason = desireddom.GapAgentStale
+			candidate.detail = "no healthy bound agent provides this capability; the selected bound agent heartbeat is stale"
+			candidate.rank = 2
+		case fleetcoverage.AgentRevoked:
+			candidate.reason = desireddom.GapAgentRevoked
+			candidate.detail = "no healthy bound agent provides this capability; the selected bound agent was revoked"
+			candidate.rank = 4
+		case fleetcoverage.AgentDecommissioned:
+			candidate.reason = desireddom.GapAgentDecommissioned
+			candidate.detail = "no healthy bound agent provides this capability; the selected bound agent was decommissioned"
+			candidate.rank = 5
+		default:
+			return bindingEvaluation{}, fmt.Errorf("%w: derived invalid agent health %q for agent %s",
+				shared.ErrValidation, obs.health, binding.AgentID)
+		}
+		if best.rank == 0 || candidate.rank < best.rank {
+			best = candidate
+		}
+	}
+	if best.rank == 0 {
+		return bindingEvaluation{}, fmt.Errorf("%w: desired asset binding set is unexpectedly empty", shared.ErrValidation)
+	}
+	return best, nil
 }
 
 func validateStoredState(state *desireddom.State, tenantID, assetID shared.ID) error {
