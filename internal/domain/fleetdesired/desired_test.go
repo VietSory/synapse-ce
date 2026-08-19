@@ -52,6 +52,9 @@ func TestNormalizeCapabilitiesBoundsRawAndCanonicalIndependently(t *testing.T) {
 	if _, err := NormalizeCapabilities([]string{"sensor\nexec"}); err == nil {
 		t.Fatal("expected control-character validation error")
 	}
+	if _, err := NormalizeCapabilities([]string{string([]byte{0xff})}); err == nil {
+		t.Fatal("expected invalid UTF-8 capability validation error")
+	}
 }
 
 func TestSupportedAssetKind(t *testing.T) {
