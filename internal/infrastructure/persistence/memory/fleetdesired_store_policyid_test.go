@@ -65,3 +65,73 @@ func TestFleetDesiredStoreDeleteRecreateRejectsStaleLifecycleDelete(t *testing.T
 		t.Fatalf("stale delete removed or changed recreated lifecycle: %+v", got)
 	}
 }
+
+func TestFleetDesiredStoreConcurrentCASAllowsExactlyOneWinner(t *testing.T) {
+	ctx := context.Background()
+	store := NewFleetDesiredStore()
+	now := time.Date(2026, 8, 19, 6, 0, 0, 0, time.UTC)
+
+	createResults := make(chan error, 2)
+	startCreate := make(chan struct{})
+	for _, state := range []*fleetdesired.State{
+		desiredStoreState("tenant", "asset", "policy-a", []string{"process"}, 1, now),
+		desiredStoreState("tenant", "asset", "policy-b", []string{"network"}, 1, now),
+	} {
+		state := state
+		go func() {
+			<-startCreate
+			createResults <- store.Put(ctx, state)
+		}()
+	}
+	close(startCreate)
+	assertOneCASWinner(t, createResults)
+
+	current, err := store.Get(ctx, "tenant", "asset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != 1 || current.PolicyID.IsZero() {
+		t.Fatalf("concurrent create stored invalid winner: %+v", current)
+	}
+
+	updateResults := make(chan error, 2)
+	startUpdate := make(chan struct{})
+	for _, caps := range [][]string{{"file"}, {"privilege"}} {
+		state := desiredStoreState("tenant", "asset", current.PolicyID.String(), caps, 2, now.Add(time.Minute))
+		state.Audit.CreatedAt = now
+		go func(state *fleetdesired.State) {
+			<-startUpdate
+			updateResults <- store.Put(ctx, state)
+		}(state)
+	}
+	close(startUpdate)
+	assertOneCASWinner(t, updateResults)
+
+	current, err = store.Get(ctx, "tenant", "asset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != 2 || current.PolicyID.IsZero() || len(current.Capabilities) != 1 {
+		t.Fatalf("concurrent update stored invalid winner: %+v", current)
+	}
+}
+
+func assertOneCASWinner(t *testing.T, results <-chan error) {
+	t.Helper()
+	successes := 0
+	conflicts := 0
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, shared.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected CAS result: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("CAS results successes=%d conflicts=%d, want exactly one of each", successes, conflicts)
+	}
+}
