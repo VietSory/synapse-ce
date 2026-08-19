@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
-	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetcoverage"
+	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
@@ -141,14 +141,18 @@ func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]Reconcil
 		byID[agent.ID] = observed{agent: agent, caps: caps}
 	}
 
-	rows := make([]ReconciliationRow, 0)
+	rowCount := 0
+	for _, desired := range states {
+		rowCount += len(desired.Capabilities)
+	}
+	rows := make([]ReconciliationRow, 0, rowCount)
 	for _, desired := range states {
 		obs, exists := byID[desired.AgentID]
 		for _, capability := range desired.Capabilities {
 			row := ReconciliationRow{AgentID: desired.AgentID.String(), Capability: capability}
 			if !exists {
 				row.GapReason = desireddom.GapAgentMissing
-				row.Detail = "the desired agent is not enrolled in this tenant"
+				row.Detail = "no current observed agent record exists for this desired identity"
 				rows = append(rows, row)
 				continue
 			}
