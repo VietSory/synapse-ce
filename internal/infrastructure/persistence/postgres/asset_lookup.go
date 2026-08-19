@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -12,7 +13,8 @@ import (
 
 // GetAssetByID returns one canonical technical asset by server-issued ID under tenant RLS. It is a
 // narrow extension for control-plane policy admission; normal asset observation remains keyed by the
-// natural (tenant, kind, key) identity.
+// natural (tenant, kind, key) identity. Cross-tenant and missing ids both resolve to ErrNotFound so a
+// caller cannot distinguish another tenant's asset from an absent one.
 func (r *AssetRepository) GetAssetByID(ctx context.Context, tenantID, id shared.ID) (*asset.Asset, error) {
 	if tenantID.IsZero() || id.IsZero() {
 		return nil, fmt.Errorf("%w: asset id lookup needs tenant and id", shared.ErrValidation)
@@ -25,8 +27,11 @@ func (r *AssetRepository) GetAssetByID(ctx context.Context, tenantID, id shared.
 			tenantID.String(), id.String()))
 		return scanErr
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("asset %s: %w", id, shared.ErrNotFound)
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("asset id lookup: %w", err)
 	}
 	if out == nil || out.TenantID != tenantID || out.ID != id {
 		return nil, fmt.Errorf("%w: asset id lookup returned inconsistent identity", shared.ErrValidation)
