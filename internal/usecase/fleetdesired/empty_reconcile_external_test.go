@@ -42,7 +42,8 @@ func TestReconcileNoDesiredPolicyDoesNotReadOtherFleetState(t *testing.T) {
 	bindings := &noBindingRead{}
 	agents := &noObservedRead{}
 	clock := &noClockRead{}
-	svc, err := desireduc.NewService(reconcileDesiredStore{rows: nil}, assets, bindings, agents, reconcileAudit{}, clock, time.Minute)
+	ids := &testIDGenerator{}
+	svc, err := desireduc.NewService(reconcileDesiredStore{rows: nil}, assets, bindings, agents, reconcileAudit{}, clock, ids, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +54,8 @@ func TestReconcileNoDesiredPolicyDoesNotReadOtherFleetState(t *testing.T) {
 	if len(rows) != 0 || rows == nil {
 		t.Fatalf("rows=%#v, want non-nil empty projection", rows)
 	}
-	if assets.calls != 0 || bindings.calls != 0 || agents.calls != 0 || clock.calls != 0 {
-		t.Fatalf("empty policy performed unnecessary reads: assets=%d bindings=%d agents=%d clock=%d",
-			assets.calls, bindings.calls, agents.calls, clock.calls)
+	if assets.calls != 0 || bindings.calls != 0 || agents.calls != 0 || clock.calls != 0 || ids.calls != 0 {
+		t.Fatalf("empty policy performed unnecessary reads: assets=%d bindings=%d agents=%d clock=%d ids=%d",
+			assets.calls, bindings.calls, agents.calls, clock.calls, ids.calls)
 	}
 }
