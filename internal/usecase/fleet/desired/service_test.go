@@ -11,7 +11,7 @@ import (
 	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
-	desireduc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleetdesired"
+	desireduc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/desired"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
