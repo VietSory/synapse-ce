@@ -29,7 +29,9 @@ func (s reconcileDesiredStore) Get(context.Context, shared.ID, shared.ID) (*desi
 	return nil, shared.ErrNotFound
 }
 func (s reconcileDesiredStore) Put(context.Context, *desireddom.State) error { return nil }
-func (s reconcileDesiredStore) Delete(context.Context, shared.ID, shared.ID, int64) error { return nil }
+func (s reconcileDesiredStore) Delete(context.Context, shared.ID, shared.ID, shared.ID, int64) error {
+	return nil
+}
 func (s reconcileDesiredStore) List(context.Context, shared.ID) ([]*desireddom.State, error) {
 	return s.rows, nil
 }
@@ -55,8 +57,8 @@ func (s reconcileAgentReader) ListAgents(context.Context, shared.ID) ([]*fleetag
 
 func desiredFixture(id string, caps []string, now time.Time) *desireddom.State {
 	return &desireddom.State{
-		TenantID: "tenant", AssetID: shared.ID(id), Capabilities: caps, UpdatedBy: "operator", Version: 1,
-		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		TenantID: "tenant", AssetID: shared.ID(id), PolicyID: shared.ID("policy-" + id), Capabilities: caps,
+		UpdatedBy: "operator", Version: 1, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
 
@@ -75,7 +77,7 @@ func reconcileService(t testing.TB, desired []*desireddom.State, bindings []desi
 	t.Helper()
 	svc, err := desireduc.NewService(
 		reconcileDesiredStore{rows: desired}, &reconcileAssets{}, reconcileBindings{rows: bindings},
-		reconcileAgentReader{rows: agents}, reconcileAudit{}, reconcileClock{now}, 5*time.Minute,
+		reconcileAgentReader{rows: agents}, reconcileAudit{}, reconcileClock{now}, &testIDGenerator{}, 5*time.Minute,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -97,15 +99,15 @@ func TestReconcileCanonicalizesObservedCapabilitiesAndDoesNotMutateDesiredOrder(
 		t.Fatal(err)
 	}
 	want := []string{
-		"a-asset/agent-a/network/true/",
-		"a-asset/agent-a/process/true/",
-		"z-asset//process/false/agent_missing",
+		"a-asset/policy-a-asset/agent-a/network/true/",
+		"a-asset/policy-a-asset/agent-a/process/true/",
+		"z-asset/policy-z-asset//process/false/agent_missing",
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("got %d rows: %#v", len(rows), rows)
 	}
 	for i, row := range rows {
-		got := fmt.Sprintf("%s/%s/%s/%t/%s", row.AssetID, row.AgentID, row.Capability, row.Covered, row.GapReason)
+		got := fmt.Sprintf("%s/%s/%s/%s/%t/%s", row.AssetID, row.PolicyID, row.AgentID, row.Capability, row.Covered, row.GapReason)
 		if got != want[i] {
 			t.Fatalf("row[%d]=%q want %q", i, got, want[i])
 		}
@@ -127,7 +129,7 @@ func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 	}{
 		{name: "nil desired", desired: []*desireddom.State{nil}},
 		{name: "cross-tenant desired", desired: []*desireddom.State{{
-			TenantID: "other", AssetID: "asset", Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
+			TenantID: "other", AssetID: "asset", PolicyID: "policy-asset", Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
 			Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}}},
 		{name: "duplicate desired", desired: []*desireddom.State{valid, valid}},
