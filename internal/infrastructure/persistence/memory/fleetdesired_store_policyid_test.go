@@ -117,6 +117,60 @@ func TestFleetDesiredStoreConcurrentCASAllowsExactlyOneWinner(t *testing.T) {
 	}
 }
 
+func TestFleetDesiredStoreConcurrentUpdateAndClearAllowsExactlyOneWinner(t *testing.T) {
+	ctx := context.Background()
+	store := NewFleetDesiredStore()
+	now := time.Date(2026, 8, 19, 7, 0, 0, 0, time.UTC)
+	base := desiredStoreState("tenant", "asset", "policy-race", []string{"process"}, 1, now)
+	if err := store.Put(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	update := desiredStoreState("tenant", "asset", "policy-race", []string{"network"}, 2, now.Add(time.Minute))
+	update.Audit.CreatedAt = now
+
+	type result struct {
+		op  string
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	go func() {
+		<-start
+		results <- result{op: "update", err: store.Put(ctx, update)}
+	}()
+	go func() {
+		<-start
+		results <- result{op: "clear", err: store.Delete(ctx, "tenant", "asset", "policy-race", 1)}
+	}()
+	close(start)
+	first, second := <-results, <-results
+	outcomes := map[string]error{first.op: first.err, second.op: second.err}
+	wins, conflicts := 0, 0
+	for _, result := range []result{first, second} {
+		switch {
+		case result.err == nil:
+			wins++
+		case errors.Is(result.err, shared.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("%s returned unexpected error: %v", result.op, result.err)
+		}
+	}
+	if wins != 1 || conflicts != 1 {
+		t.Fatalf("update/clear race wins=%d conflicts=%d, want one each: %+v", wins, conflicts, outcomes)
+	}
+	got, err := store.Get(ctx, "tenant", "asset")
+	if outcomes["update"] == nil {
+		if err != nil || got.Version != 2 || len(got.Capabilities) != 1 || got.Capabilities[0] != "network" {
+			t.Fatalf("winning update not preserved: got=%+v err=%v outcomes=%+v", got, err, outcomes)
+		}
+		return
+	}
+	if !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("winning clear left policy behind: got=%+v err=%v outcomes=%+v", got, err, outcomes)
+	}
+}
+
 func assertOneCASWinner(t *testing.T, results <-chan error) {
 	t.Helper()
 	successes := 0
