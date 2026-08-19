@@ -85,7 +85,7 @@ func newTestService(t *testing.T, store ports.FleetDesiredStore, assets desiredu
 	return svc
 }
 
-func TestSetDesiredCapabilitiesNormalizesAuditsAndPreservesCreatedAt(t *testing.T) {
+func TestSetDesiredCapabilitiesNormalizesAuditsPreservesCreatedAtAndIncrementsVersion(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
 	clock := &testClock{now: now}
@@ -101,8 +101,8 @@ func TestSetDesiredCapabilitiesNormalizesAuditsAndPreservesCreatedAt(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Capabilities) != 2 || first.Capabilities[0] != "inventory.host" || first.Capabilities[1] != "telemetry.process" {
-		t.Fatalf("state not canonical: %+v", first)
+	if first.Version != 1 || len(first.Capabilities) != 2 || first.Capabilities[0] != "inventory.host" || first.Capabilities[1] != "telemetry.process" {
+		t.Fatalf("state not canonical/versioned: %+v", first)
 	}
 	clock.now = now.Add(time.Minute)
 	second, err := svc.SetDesiredCapabilities(ctx, desireduc.SetInput{
@@ -111,10 +111,13 @@ func TestSetDesiredCapabilitiesNormalizesAuditsAndPreservesCreatedAt(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if second.Version != 2 {
+		t.Fatalf("second version=%d want 2", second.Version)
+	}
 	if !second.Audit.CreatedAt.Equal(first.Audit.CreatedAt) || !second.Audit.UpdatedAt.Equal(clock.now) {
 		t.Fatalf("audit timestamps not preserved/moved: first=%v second=%v", first.Audit, second.Audit)
 	}
-	if len(audit.entries) != 2 || audit.entries[1].Action != "fleet.desired_capabilities.set" || audit.entries[1].Actor != "operator-2" {
+	if len(audit.entries) != 2 || audit.entries[1].Action != "fleet.desired_capabilities.set" || audit.entries[1].Actor != "operator-2" || audit.entries[1].Metadata["policy_version"] != "2" {
 		t.Fatalf("unexpected audit entries: %#v", audit.entries)
 	}
 	if assets.calls != 2 {
@@ -162,7 +165,7 @@ func TestClearDesiredCapabilitiesIsExplicitAndIdempotent(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
 	store := memory.NewFleetDesiredStore()
 	if err := store.Put(ctx, &desireddom.State{
-		TenantID: "tenant-1", AssetID: "asset-1", Capabilities: []string{"process"}, UpdatedBy: "operator",
+		TenantID: "tenant-1", AssetID: "asset-1", Capabilities: []string{"process"}, UpdatedBy: "operator", Version: 1,
 		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}); err != nil {
 		t.Fatal(err)
@@ -178,8 +181,8 @@ func TestClearDesiredCapabilitiesIsExplicitAndIdempotent(t *testing.T) {
 	if _, err := store.Get(ctx, "tenant-1", "asset-1"); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("cleared policy still exists: %v", err)
 	}
-	if assets.calls != 0 || len(audit.entries) != 1 || clock.calls != 1 {
-		t.Fatalf("clear side effects: asset_reads=%d audits=%d clock=%d", assets.calls, len(audit.entries), clock.calls)
+	if assets.calls != 0 || len(audit.entries) != 1 || clock.calls != 1 || audit.entries[0].Metadata["policy_version"] != "1" {
+		t.Fatalf("clear side effects: asset_reads=%d audits=%#v clock=%d", assets.calls, audit.entries, clock.calls)
 	}
 	if err := svc.ClearDesiredCapabilities(ctx, desireduc.ClearInput{TenantID: "tenant-1", AssetID: "asset-1", Actor: "operator-2"}); err != nil {
 		t.Fatal(err)
@@ -194,7 +197,7 @@ func TestReenrolledReplacementAgentSatisfiesExistingAssetPolicy(t *testing.T) {
 	now := time.Date(2026, 8, 19, 2, 0, 0, 0, time.UTC)
 	store := memory.NewFleetDesiredStore()
 	if err := store.Put(ctx, &desireddom.State{
-		TenantID: "tenant-1", AssetID: "host-asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator",
+		TenantID: "tenant-1", AssetID: "host-asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator", Version: 1,
 		Audit: shared.Audit{CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
 	}); err != nil {
 		t.Fatal(err)
@@ -220,7 +223,7 @@ func TestReconcileSurfacesHealthCapabilityAndBindingGaps(t *testing.T) {
 		t.Helper()
 		if err := store.Put(ctx, &desireddom.State{
 			TenantID: "tenant-1", AssetID: shared.ID(assetID), Capabilities: caps,
-			UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+			UpdatedBy: "operator", Version: 1, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}); err != nil {
 			t.Fatal(err)
 		}
