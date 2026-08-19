@@ -24,7 +24,6 @@ type FleetDesiredStore struct {
 
 var _ ports.FleetDesiredStore = (*FleetDesiredStore)(nil)
 
-// NewFleetDesiredStore returns an empty store.
 func NewFleetDesiredStore() *FleetDesiredStore {
 	return &FleetDesiredStore{states: make(map[fleetDesiredStoreKey]fleetdesired.State)}
 }
@@ -34,7 +33,6 @@ func cloneDesired(state fleetdesired.State) fleetdesired.State {
 	return state
 }
 
-// Get returns one asset's desired state, or shared.ErrNotFound when none is configured.
 func (s *FleetDesiredStore) Get(_ context.Context, tenantID, assetID shared.ID) (*fleetdesired.State, error) {
 	if tenantID.IsZero() || assetID.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state lookup needs tenant and asset", shared.ErrValidation)
@@ -49,9 +47,8 @@ func (s *FleetDesiredStore) Get(_ context.Context, tenantID, assetID shared.ID) 
 	return &state, nil
 }
 
-// Put stores one CAS version. Version 1 creates an absent row; later versions must be exactly one
-// greater than the stored version. A stale concurrent writer therefore fails with ErrConflict instead
-// of silently replacing a newer operator decision.
+// Put applies a lifecycle-aware CAS. A new PolicyID may only create an absent row at version 1;
+// updates must retain the stored PolicyID and advance version by exactly one.
 func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) error {
 	if state == nil {
 		return fmt.Errorf("%w: nil fleet desired state", shared.ErrValidation)
@@ -72,6 +69,10 @@ func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) er
 		s.states[key] = stored
 		return nil
 	}
+	if stored.PolicyID != current.PolicyID {
+		return fmt.Errorf("%w: desired policy lifecycle changed from %s to %s for asset %s",
+			shared.ErrConflict, current.PolicyID, stored.PolicyID, state.AssetID)
+	}
 	if current.Version == 1<<63-1 {
 		return fmt.Errorf("%w: desired state version exhausted for asset %s", shared.ErrConflict, state.AssetID)
 	}
@@ -87,11 +88,11 @@ func (s *FleetDesiredStore) Put(_ context.Context, state *fleetdesired.State) er
 	return nil
 }
 
-// Delete clears one asset's desired policy only if expectedVersion is still current. Absence is an
-// idempotent success; a newer concurrent policy returns ErrConflict and is never erased.
-func (s *FleetDesiredStore) Delete(_ context.Context, tenantID, assetID shared.ID, expectedVersion int64) error {
-	if tenantID.IsZero() || assetID.IsZero() || expectedVersion < 1 {
-		return fmt.Errorf("%w: desired-state delete needs tenant, asset and positive expected version", shared.ErrValidation)
+// Delete clears only the lifecycle/version the caller observed. Absence is idempotent; either a newer
+// version or a delete/recreate lifecycle returns ErrConflict and remains untouched.
+func (s *FleetDesiredStore) Delete(_ context.Context, tenantID, assetID, expectedPolicyID shared.ID, expectedVersion int64) error {
+	if tenantID.IsZero() || assetID.IsZero() || expectedPolicyID.IsZero() || expectedVersion < 1 {
+		return fmt.Errorf("%w: desired-state delete needs tenant, asset, policy id and positive expected version", shared.ErrValidation)
 	}
 	key := fleetDesiredStoreKey{tenantID: tenantID, assetID: assetID}
 	s.mu.Lock()
@@ -100,15 +101,14 @@ func (s *FleetDesiredStore) Delete(_ context.Context, tenantID, assetID shared.I
 	if !exists {
 		return nil
 	}
-	if current.Version != expectedVersion {
-		return fmt.Errorf("%w: desired state version changed from %d to %d for asset %s",
-			shared.ErrConflict, expectedVersion, current.Version, assetID)
+	if current.PolicyID != expectedPolicyID || current.Version != expectedVersion {
+		return fmt.Errorf("%w: desired policy changed after %s@%d for asset %s",
+			shared.ErrConflict, expectedPolicyID, expectedVersion, assetID)
 	}
 	delete(s.states, key)
 	return nil
 }
 
-// List returns a tenant's desired states ordered by canonical AssetID.
 func (s *FleetDesiredStore) List(_ context.Context, tenantID shared.ID) ([]*fleetdesired.State, error) {
 	if tenantID.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state list needs a tenant", shared.ErrValidation)
