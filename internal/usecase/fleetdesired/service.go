@@ -65,7 +65,7 @@ func NewService(store ports.FleetDesiredStore, assets AssetReader, bindings Bind
 	return &Service{store: store, assets: assets, bindings: bindings, agents: agents, audit: audit, clock: clock, staleAfter: staleAfter}, nil
 }
 
-// SetInput atomically replaces one canonical asset's non-empty desired capability set.
+// SetInput replaces one canonical asset's non-empty desired capability set.
 type SetInput struct {
 	TenantID     shared.ID
 	AssetID      shared.ID
@@ -83,7 +83,8 @@ type ClearInput struct {
 
 // SetDesiredCapabilities replaces one host/cluster asset's operator-owned desired capability set.
 // The canonical asset, not the current AgentID, owns the policy. Therefore a replacement agent bound
-// to the same asset can satisfy existing intent without a policy rewrite.
+// to the same asset can satisfy existing intent without a policy rewrite. Store CAS prevents concurrent
+// writers that both read the same version from silently overwriting one another.
 func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*desireddom.State, error) {
 	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state change needs tenant, canonical asset and actor", shared.ErrValidation)
@@ -108,6 +109,14 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 		}
 	} else if !errors.Is(getErr, shared.ErrNotFound) {
 		return nil, fmt.Errorf("read current desired state: %w", getErr)
+	}
+
+	version := int64(1)
+	if current != nil {
+		if current.Version == 1<<63-1 {
+			return nil, fmt.Errorf("%w: desired state version exhausted for asset %s", shared.ErrConflict, in.AssetID)
+		}
+		version = current.Version + 1
 	}
 
 	// Validate the durable policy subject on every semantic change. This keeps a stale/corrupt desired
@@ -135,7 +144,7 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 		createdAt = current.Audit.CreatedAt
 	}
 	state := &desireddom.State{
-		TenantID: in.TenantID, AssetID: in.AssetID, Capabilities: caps, UpdatedBy: in.Actor,
+		TenantID: in.TenantID, AssetID: in.AssetID, Capabilities: caps, UpdatedBy: in.Actor, Version: version,
 		Audit: shared.Audit{CreatedAt: createdAt, UpdatedAt: now},
 	}
 	if err := state.Validate(); err != nil {
@@ -151,7 +160,8 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 }
 
 // ClearDesiredCapabilities removes one desired policy. Clearing an already-absent policy is a
-// side-effect-free success, which makes declarative cleanup idempotent even after an agent disappears.
+// side-effect-free success. If a concurrent writer replaces the version after this method reads it,
+// the CAS delete returns ErrConflict and preserves the newer policy.
 func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) error {
 	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
 		return fmt.Errorf("%w: desired-state clear needs tenant, canonical asset and actor", shared.ErrValidation)
@@ -166,7 +176,7 @@ func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) e
 	if err := validateStoredState(current, in.TenantID, in.AssetID); err != nil {
 		return err
 	}
-	if err := s.store.Delete(ctx, in.TenantID, in.AssetID); err != nil {
+	if err := s.store.Delete(ctx, in.TenantID, in.AssetID, current.Version); err != nil {
 		return fmt.Errorf("clear desired state: %w", err)
 	}
 	now := s.clock.Now().UTC()
@@ -415,8 +425,9 @@ func validateStoredState(state *desireddom.State, tenantID, assetID shared.ID) e
 // than an accidental ignored error.
 func (s *Service) record(ctx context.Context, state *desireddom.State, actor shared.ID, action string, extra map[string]string, at time.Time) {
 	metadata := map[string]string{
-		"tenant_id": state.TenantID.String(),
-		"asset_id":  state.AssetID.String(),
+		"tenant_id":      state.TenantID.String(),
+		"asset_id":       state.AssetID.String(),
+		"policy_version": fmt.Sprintf("%d", state.Version),
 	}
 	for k, v := range extra {
 		if v != "" {
