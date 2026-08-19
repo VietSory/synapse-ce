@@ -54,22 +54,29 @@ func TestNormalizeCapabilitiesBoundsRawAndCanonicalIndependently(t *testing.T) {
 	}
 }
 
+func TestSupportedAssetKind(t *testing.T) {
+	if !SupportedAssetKind(asset.KindHost) || !SupportedAssetKind(asset.KindCluster) {
+		t.Fatal("host and cluster must be supported desired-state subjects")
+	}
+	for _, kind := range []asset.Kind{asset.KindWorkload, asset.KindImage, asset.KindNamespace} {
+		if SupportedAssetKind(kind) {
+			t.Fatalf("unexpected desired-state subject kind accepted: %q", kind)
+		}
+	}
+}
+
 func validState(now time.Time) State {
 	return State{
-		TenantID: "tenant-1", AssetID: "asset-1", AssetKind: asset.KindHost, UpdatedBy: "operator-1",
+		TenantID: "tenant-1", AssetID: "asset-1", UpdatedBy: "operator-1",
 		Capabilities: []string{"a", "z"}, Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 }
 
-func TestStateValidateRequiresCanonicalNonEmptyHostOrClusterPolicy(t *testing.T) {
+func TestStateValidateRequiresCanonicalNonEmptyPolicy(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
 	state := validState(now)
 	if err := state.Validate(); err != nil {
-		t.Fatalf("valid host state rejected: %v", err)
-	}
-	state.AssetKind = asset.KindCluster
-	if err := state.Validate(); err != nil {
-		t.Fatalf("valid cluster state rejected: %v", err)
+		t.Fatalf("valid state rejected: %v", err)
 	}
 
 	state = validState(now)
@@ -81,10 +88,5 @@ func TestStateValidateRequiresCanonicalNonEmptyHostOrClusterPolicy(t *testing.T)
 	state.Capabilities = nil
 	if err := state.Validate(); err == nil {
 		t.Fatal("expected empty policy to be rejected")
-	}
-	state = validState(now)
-	state.AssetKind = asset.KindWorkload
-	if err := state.Validate(); err == nil {
-		t.Fatal("expected workload desired policy to be rejected")
 	}
 }
