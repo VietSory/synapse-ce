@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -74,6 +75,9 @@ func NormalizeCapabilities(in []string) ([]string, error) {
 		capability := strings.TrimSpace(raw)
 		if capability == "" {
 			continue
+		}
+		if !utf8.ValidString(capability) {
+			return nil, fmt.Errorf("%w: capability %q is not valid UTF-8", shared.ErrValidation, capability)
 		}
 		if len(capability) > MaxCapabilityLen {
 			return nil, fmt.Errorf("%w: capability %q is longer than %d bytes", shared.ErrValidation, capability, MaxCapabilityLen)
