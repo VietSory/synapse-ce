@@ -123,7 +123,7 @@ func TestReconcileSurfacesEveryDesiredGapWithoutWrites(t *testing.T) {
 	put("agent-stale", "telemetry.process")
 	put("agent-revoked", "telemetry.process")
 	put("agent-decommissioned", "telemetry.process")
-	put("agent-missing", "telemetry.process") // memory deliberately exercises a broken referent; Postgres FK prevents this.
+	put("agent-missing", "telemetry.process") // desired intent deliberately outlives a missing observed agent row.
 
 	svc, err := desireduc.NewService(store, agents, &testAudit{}, clock, 5*time.Minute)
 	if err != nil {
