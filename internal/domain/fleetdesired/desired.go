@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	MaxCapabilities   = 64
+	MaxCapabilities     = 64
 	MaxCapabilityInputs = 256
-	MaxCapabilityLen  = 128
+	MaxCapabilityLen    = 128
 )
 
 // State is the operator-owned desired capability set for one canonical host/cluster AssetID.
