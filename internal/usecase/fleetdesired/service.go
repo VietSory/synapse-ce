@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -50,27 +51,50 @@ type SetInput struct {
 	Actor        shared.ID
 }
 
-// SetDesiredCapabilities replaces one agent's operator-owned desired capability set. It first proves
-// the canonical AgentID exists in the same tenant; an operator cannot create an expectation bound to
-// another tenant's identity. An empty set is valid and means this agent is intentionally expected to
-// run no governed capability classes.
+// SetDesiredCapabilities replaces one agent's operator-owned desired capability set. Creating a NEW
+// intent first proves the canonical AgentID exists in the same tenant; after that, the intent is
+// independent of the observed row and can still be changed or cleared if the agent disappears. That
+// matches reconciliation: observed deletion is a gap, not ownership of (or a delete cascade for) policy.
+// An empty set is valid and means this agent is intentionally expected to run no governed capability classes.
 func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*desireddom.State, error) {
 	if in.TenantID.IsZero() || in.AgentID.IsZero() || in.Actor.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state change needs tenant, agent and actor", shared.ErrValidation)
-	}
-	if _, err := s.agents.GetAgent(ctx, in.TenantID, in.AgentID); err != nil {
-		return nil, fmt.Errorf("load desired-state agent: %w", err)
 	}
 	caps, err := desireddom.NormalizeCapabilities(in.Capabilities)
 	if err != nil {
 		return nil, err
 	}
-	now := s.clock.Now().UTC()
-	createdAt := now
+	var createdAt time.Time
 	if current, getErr := s.store.Get(ctx, in.TenantID, in.AgentID); getErr == nil {
+		if current == nil {
+			return nil, fmt.Errorf("%w: desired-state store returned a nil current row", shared.ErrValidation)
+		}
+		if err := current.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid current desired state: %w", err)
+		}
+		if current.TenantID != in.TenantID || current.AgentID != in.AgentID {
+			return nil, fmt.Errorf("%w: desired-state store returned identity %s/%s, want %s/%s",
+				shared.ErrValidation, current.TenantID, current.AgentID, in.TenantID, in.AgentID)
+		}
+		// Declarative re-apply is a no-op. A desired-state controller may submit the same canonical
+		// intent repeatedly; rewriting it would create database and audit churn without changing state.
+		if slices.Equal(current.Capabilities, caps) {
+			return current, nil
+		}
 		createdAt = current.Audit.CreatedAt
-	} else if !errors.Is(getErr, shared.ErrNotFound) {
+	} else if errors.Is(getErr, shared.ErrNotFound) {
+		// Only creation depends on the observed registry. Once desired intent exists, requiring the
+		// observed row here would make an agent purge freeze stale policy forever — including preventing
+		// the operator from clearing it with an empty set.
+		if _, err := s.agents.GetAgent(ctx, in.TenantID, in.AgentID); err != nil {
+			return nil, fmt.Errorf("load desired-state agent: %w", err)
+		}
+	} else {
 		return nil, fmt.Errorf("read current desired state: %w", getErr)
+	}
+	now := s.clock.Now().UTC()
+	if createdAt.IsZero() {
+		createdAt = now
 	}
 	state := &desireddom.State{
 		TenantID: in.TenantID, AgentID: in.AgentID, Capabilities: caps, UpdatedBy: in.Actor,
