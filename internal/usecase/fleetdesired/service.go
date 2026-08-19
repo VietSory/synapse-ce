@@ -180,6 +180,11 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 		desiredIDs[desired.AgentID] = struct{}{}
 		rowCount += len(desired.Capabilities)
 	}
+	if rowCount == 0 {
+		// No governed class means there is nothing an observed agent can cover or fail to cover.
+		// Avoid a full fleet-agent read on the common pre-configuration/cleared-policy path.
+		return []ReconciliationRow{}, nil
+	}
 	// Sort only the desired documents, not every expanded capability row. Each State already validates
 	// that its capabilities are sorted, so this keeps deterministic output at D log D rather than R log R.
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].AgentID < ordered[j].AgentID })
