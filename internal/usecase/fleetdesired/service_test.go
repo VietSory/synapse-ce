@@ -101,7 +101,7 @@ func TestSetDesiredCapabilitiesNormalizesAuditsAndPreservesCreatedAt(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.AssetKind != asset.KindHost || len(first.Capabilities) != 2 || first.Capabilities[0] != "inventory.host" || first.Capabilities[1] != "telemetry.process" {
+	if len(first.Capabilities) != 2 || first.Capabilities[0] != "inventory.host" || first.Capabilities[1] != "telemetry.process" {
 		t.Fatalf("state not canonical: %+v", first)
 	}
 	clock.now = now.Add(time.Minute)
@@ -162,8 +162,8 @@ func TestClearDesiredCapabilitiesIsExplicitAndIdempotent(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
 	store := memory.NewFleetDesiredStore()
 	if err := store.Put(ctx, &desireddom.State{
-		TenantID: "tenant-1", AssetID: "asset-1", AssetKind: asset.KindHost,
-		Capabilities: []string{"process"}, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+		TenantID: "tenant-1", AssetID: "asset-1", Capabilities: []string{"process"}, UpdatedBy: "operator",
+		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +194,7 @@ func TestReenrolledReplacementAgentSatisfiesExistingAssetPolicy(t *testing.T) {
 	now := time.Date(2026, 8, 19, 2, 0, 0, 0, time.UTC)
 	store := memory.NewFleetDesiredStore()
 	if err := store.Put(ctx, &desireddom.State{
-		TenantID: "tenant-1", AssetID: "host-asset", AssetKind: asset.KindHost,
-		Capabilities: []string{"network", "process"}, UpdatedBy: "operator",
+		TenantID: "tenant-1", AssetID: "host-asset", Capabilities: []string{"network", "process"}, UpdatedBy: "operator",
 		Audit: shared.Audit{CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
 	}); err != nil {
 		t.Fatal(err)
@@ -220,8 +219,8 @@ func TestReconcileSurfacesHealthCapabilityAndBindingGaps(t *testing.T) {
 	put := func(assetID string, caps ...string) {
 		t.Helper()
 		if err := store.Put(ctx, &desireddom.State{
-			TenantID: "tenant-1", AssetID: shared.ID(assetID), AssetKind: asset.KindHost,
-			Capabilities: caps, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+			TenantID: "tenant-1", AssetID: shared.ID(assetID), Capabilities: caps,
+			UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -253,11 +252,11 @@ func TestReconcileSurfacesHealthCapabilityAndBindingGaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantGaps := map[string]desireddom.GapReason{
-		"asset-healthy/file":             desireddom.GapCapabilityMissing,
-		"asset-stale/process":            desireddom.GapAgentStale,
-		"asset-revoked/process":          desireddom.GapAgentRevoked,
-		"asset-decommissioned/process":   desireddom.GapAgentDecommissioned,
-		"asset-unbound/process":          desireddom.GapAgentMissing,
+		"asset-healthy/file":              desireddom.GapCapabilityMissing,
+		"asset-stale/process":             desireddom.GapAgentStale,
+		"asset-revoked/process":           desireddom.GapAgentRevoked,
+		"asset-decommissioned/process":    desireddom.GapAgentDecommissioned,
+		"asset-unbound/process":           desireddom.GapAgentMissing,
 		"asset-agent-row-missing/process": desireddom.GapAgentMissing,
 	}
 	covered := 0
@@ -270,7 +269,8 @@ func TestReconcileSurfacesHealthCapabilityAndBindingGaps(t *testing.T) {
 			}
 			continue
 		}
-		if want, ok := wantGaps[key]; !ok || row.GapReason != want {
+		want, ok := wantGaps[key]
+		if !ok || row.GapReason != want {
 			t.Fatalf("row %s gap=%q want=%q known=%v", key, row.GapReason, want, ok)
 		}
 	}
