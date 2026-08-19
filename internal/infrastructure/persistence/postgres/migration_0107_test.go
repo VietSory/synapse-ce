@@ -47,7 +47,7 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 	}
 	defer pool.Close()
 
-	var table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck bool
+	var table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, versionColumn, versionCheck bool
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			to_regclass('fleet_desired_state') IS NOT NULL,
@@ -63,12 +63,22 @@ func TestMigration0107FleetDesiredState(t *testing.T) {
 				SELECT 1 FROM pg_constraint
 				WHERE conrelid=to_regclass('fleet_desired_state')
 				  AND conname='fleet_desired_state_capabilities_canonical' AND contype='c'
+			),
+			EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema='public' AND table_name='fleet_desired_state'
+				  AND column_name='version' AND data_type='bigint' AND is_nullable='NO'
+			),
+			EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid=to_regclass('fleet_desired_state') AND contype='c'
+				  AND pg_get_constraintdef(oid) LIKE '%version >= 1%'
 			)
-	`).Scan(&table, &validator, &rlsEnabled, &rlsForced, &assetFK, &canonicalCheck); err != nil {
+	`).Scan(&table, &validator, &rlsEnabled, &rlsForced, &assetFK, &canonicalCheck, &versionColumn, &versionCheck); err != nil {
 		t.Fatalf("inspect migration 0107: %v", err)
 	}
-	if !table || !validator || !rlsEnabled || !rlsForced || !assetFK || !canonicalCheck {
-		t.Fatalf("0107 objects incomplete: table=%v validator=%v rls=%v force=%v asset_fk=%v canonical_check=%v",
-			table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck)
+	if !table || !validator || !rlsEnabled || !rlsForced || !assetFK || !canonicalCheck || !versionColumn || !versionCheck {
+		t.Fatalf("0107 objects incomplete: table=%v validator=%v rls=%v force=%v asset_fk=%v canonical_check=%v version_column=%v version_check=%v",
+			table, validator, rlsEnabled, rlsForced, assetFK, canonicalCheck, versionColumn, versionCheck)
 	}
 }
