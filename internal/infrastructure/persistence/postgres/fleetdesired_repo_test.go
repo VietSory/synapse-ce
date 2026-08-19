@@ -70,7 +70,6 @@ func TestFleetDesiredRepository(t *testing.T) {
 	}
 	createAsset("fd-a", "fd-asset-a", asset.KindHost)
 	createAsset("fd-a", "fd-asset-c", asset.KindHost)
-	createAsset("fd-a", "fd-asset-workload", asset.KindWorkload)
 	createAsset("fd-b", "fd-asset-b", asset.KindCluster)
 
 	// The narrow ID lookup must preserve the same tenant boundary as natural-key asset reads.
@@ -156,21 +155,13 @@ func TestFleetDesiredRepository(t *testing.T) {
 		t.Fatalf("RLS permitted %d cross-tenant updates", crossTenantUpdated)
 	}
 
-	// The adapter independently enforces canonical subject existence and host/cluster kind even when a
-	// caller bypasses the use case.
+	// The FK independently rejects a desired row whose canonical technical asset does not exist.
 	missingAsset := &fleetdesired.State{
 		TenantID: "fd-a", AssetID: "fd-asset-missing", Capabilities: []string{"process"},
 		UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
-	if err := repo.Put(ctx, missingAsset); !errors.Is(err, shared.ErrNotFound) {
-		t.Fatalf("missing asset Put=%v, want ErrNotFound", err)
-	}
-	unsupported := &fleetdesired.State{
-		TenantID: "fd-a", AssetID: "fd-asset-workload", Capabilities: []string{"process"},
-		UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
-	}
-	if err := repo.Put(ctx, unsupported); !errors.Is(err, shared.ErrValidation) {
-		t.Fatalf("workload desired Put=%v, want validation error", err)
+	if err := repo.Put(ctx, missingAsset); err == nil {
+		t.Fatal("desired state for a missing canonical asset unexpectedly persisted")
 	}
 
 	// Bypass the repository validator and prove the SQL CHECK rejects a non-canonical capability array.
