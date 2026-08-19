@@ -102,6 +102,42 @@ func setInvariantService(t *testing.T, store *setInvariantStore, assets *setInva
 	return svc
 }
 
+func TestDesiredMutationRejectsBlankActorBeforeSideEffects(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		run  func(*desireduc.Service) error
+	}{
+		{name: "set", run: func(svc *desireduc.Service) error {
+			_, err := svc.SetDesiredCapabilities(context.Background(), desireduc.SetInput{
+				TenantID: "tenant", AssetID: "asset", Actor: "   ", Capabilities: []string{"process"},
+			})
+			return err
+		}},
+		{name: "clear", run: func(svc *desireduc.Service) error {
+			return svc.ClearDesiredCapabilities(context.Background(), desireduc.ClearInput{
+				TenantID: "tenant", AssetID: "asset", Actor: "   ",
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &setInvariantStore{current: setInvariantState(now)}
+			assets := &setInvariantAssetReader{}
+			audit := &setInvariantAudit{}
+			clock := &setInvariantClock{now: now}
+			ids := &testIDGenerator{}
+			svc := setInvariantService(t, store, assets, audit, clock, ids)
+			if err := tc.run(svc); !errors.Is(err, shared.ErrValidation) {
+				t.Fatalf("error=%v, want validation", err)
+			}
+			if store.puts != 0 || store.deletes != 0 || assets.calls != 0 || audit.records != 0 || clock.calls != 0 || ids.calls != 0 {
+				t.Fatalf("blank actor caused side effects: puts=%d deletes=%d asset_reads=%d audit=%d clock=%d ids=%d",
+					store.puts, store.deletes, assets.calls, audit.records, clock.calls, ids.calls)
+			}
+		})
+	}
+}
+
 func TestSetDesiredCapabilitiesIdenticalReapplyIsSideEffectFree(t *testing.T) {
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	current := setInvariantState(now)
