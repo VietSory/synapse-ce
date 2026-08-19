@@ -110,6 +110,9 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 		return nil, fmt.Errorf("read current desired state: %w", getErr)
 	}
 
+	// Validate the durable policy subject on every semantic change. This keeps a stale/corrupt desired
+	// row from being mutated after its canonical host/cluster identity no longer exists, while Clear
+	// remains available as the recovery path.
 	subject, err := s.assets.GetAssetByID(ctx, in.TenantID, in.AssetID)
 	if err != nil {
 		return nil, fmt.Errorf("load desired-state asset: %w", err)
@@ -125,10 +128,6 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 		return nil, fmt.Errorf("%w: desired state may target only host/cluster assets, got %s kind %q",
 			shared.ErrValidation, subject.ID, subject.Kind)
 	}
-	if current != nil && current.AssetKind != subject.Kind {
-		return nil, fmt.Errorf("%w: desired-state asset kind changed from %q to %q for asset %s",
-			shared.ErrValidation, current.AssetKind, subject.Kind, subject.ID)
-	}
 
 	now := s.clock.Now().UTC()
 	createdAt := now
@@ -136,8 +135,7 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 		createdAt = current.Audit.CreatedAt
 	}
 	state := &desireddom.State{
-		TenantID: in.TenantID, AssetID: in.AssetID, AssetKind: subject.Kind,
-		Capabilities: caps, UpdatedBy: in.Actor,
+		TenantID: in.TenantID, AssetID: in.AssetID, Capabilities: caps, UpdatedBy: in.Actor,
 		Audit: shared.Audit{CreatedAt: createdAt, UpdatedAt: now},
 	}
 	if err := state.Validate(); err != nil {
@@ -197,7 +195,6 @@ func (s *Service) Get(ctx context.Context, tenantID, assetID shared.ID) (*desire
 // ReconciliationRow is one desired asset capability compared with the current bound agent.
 type ReconciliationRow struct {
 	AssetID    string                    `json:"asset_id"`
-	AssetKind  asset.Kind                `json:"asset_kind"`
 	AgentID    string                    `json:"agent_id,omitempty"`
 	Capability string                    `json:"capability"`
 	Health     fleetcoverage.AgentHealth `json:"agent_health,omitempty"`
@@ -264,6 +261,7 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 		return nil, fmt.Errorf("list current agent bindings: %w", err)
 	}
 	bindingByAsset := make(map[shared.ID]CurrentBinding, min(len(bindings), len(ordered)))
+	seenBindingAssets := make(map[shared.ID]struct{}, len(bindings))
 	assetByAgent := make(map[shared.ID]shared.ID, len(bindings))
 	for i, binding := range bindings {
 		if binding.TenantID.IsZero() || binding.AssetID.IsZero() || binding.AgentID.IsZero() {
@@ -273,9 +271,10 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 			return nil, fmt.Errorf("%w: binding %s/%s belongs to tenant %s, want %s",
 				shared.ErrValidation, binding.AssetID, binding.AgentID, binding.TenantID, tenantID)
 		}
-		if _, duplicate := bindingByAsset[binding.AssetID]; duplicate {
+		if _, duplicate := seenBindingAssets[binding.AssetID]; duplicate {
 			return nil, fmt.Errorf("%w: multiple current agent bindings for asset %s", shared.ErrValidation, binding.AssetID)
 		}
+		seenBindingAssets[binding.AssetID] = struct{}{}
 		if other, duplicate := assetByAgent[binding.AgentID]; duplicate {
 			return nil, fmt.Errorf("%w: current agent %s is bound to both assets %s and %s",
 				shared.ErrValidation, binding.AgentID, other, binding.AssetID)
@@ -349,9 +348,7 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 	for _, desired := range ordered {
 		binding, bound := bindingByAsset[desired.AssetID]
 		for _, capability := range desired.Capabilities {
-			row := ReconciliationRow{
-				AssetID: desired.AssetID.String(), AssetKind: desired.AssetKind, Capability: capability,
-			}
+			row := ReconciliationRow{AssetID: desired.AssetID.String(), Capability: capability}
 			if !bound {
 				row.GapReason = desireddom.GapAgentMissing
 				row.Detail = "no current agent is bound to this desired asset"
@@ -418,9 +415,8 @@ func validateStoredState(state *desireddom.State, tenantID, assetID shared.ID) e
 // than an accidental ignored error.
 func (s *Service) record(ctx context.Context, state *desireddom.State, actor shared.ID, action string, extra map[string]string, at time.Time) {
 	metadata := map[string]string{
-		"tenant_id":  state.TenantID.String(),
-		"asset_id":   state.AssetID.String(),
-		"asset_kind": string(state.AssetKind),
+		"tenant_id": state.TenantID.String(),
+		"asset_id":  state.AssetID.String(),
 	}
 	for k, v := range extra {
 		if v != "" {
