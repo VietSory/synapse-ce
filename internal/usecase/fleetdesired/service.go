@@ -20,32 +20,24 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-// AssetReader is the narrow canonical-asset lookup needed to admit a desired-state mutation. The
-// technical asset remains the durable policy subject across agent reinstall/re-enrolment.
 type AssetReader interface {
 	GetAssetByID(ctx context.Context, tenantID, assetID shared.ID) (*asset.Asset, error)
 }
 
-// CurrentBinding is the read projection #633 consumes from the server-authoritative AssetBinding
-// lifecycle owned by A0.1/A3/A4. This package deliberately does not own binding creation or trust.
 type CurrentBinding struct {
 	TenantID shared.ID
 	AssetID  shared.ID
 	AgentID  shared.ID
 }
 
-// BindingReader returns the current one-agent-to-one-asset binding projection for a tenant. Historical
-// bindings must not be returned here; two current agents for one asset are ambiguous and fail closed.
 type BindingReader interface {
 	ListCurrentBindings(ctx context.Context, tenantID shared.ID) ([]CurrentBinding, error)
 }
 
-// AgentReader is the narrow observed identity/liveness view reconciliation needs.
 type AgentReader interface {
 	ListAgents(ctx context.Context, tenantID shared.ID) ([]*fleetagent.Agent, error)
 }
 
-// Service owns desired-state mutation and reconciliation.
 type Service struct {
 	store      ports.FleetDesiredStore
 	assets     AssetReader
@@ -53,19 +45,17 @@ type Service struct {
 	agents     AgentReader
 	audit      ports.AuditLogger
 	clock      ports.Clock
+	ids        ports.IDGenerator
 	staleAfter time.Duration
 }
 
-// NewService validates and constructs the desired-state service. A non-positive staleAfter follows
-// fleetcoverage.AgentStateFrom semantics and disables time-based staleness checks.
-func NewService(store ports.FleetDesiredStore, assets AssetReader, bindings BindingReader, agents AgentReader, audit ports.AuditLogger, clock ports.Clock, staleAfter time.Duration) (*Service, error) {
-	if store == nil || assets == nil || bindings == nil || agents == nil || audit == nil || clock == nil {
-		return nil, fmt.Errorf("%w: fleet desired-state service needs store, asset reader, binding reader, agent reader, audit log and clock", shared.ErrValidation)
+func NewService(store ports.FleetDesiredStore, assets AssetReader, bindings BindingReader, agents AgentReader, audit ports.AuditLogger, clock ports.Clock, ids ports.IDGenerator, staleAfter time.Duration) (*Service, error) {
+	if store == nil || assets == nil || bindings == nil || agents == nil || audit == nil || clock == nil || ids == nil {
+		return nil, fmt.Errorf("%w: fleet desired-state service needs store, asset reader, binding reader, agent reader, audit log, clock and id generator", shared.ErrValidation)
 	}
-	return &Service{store: store, assets: assets, bindings: bindings, agents: agents, audit: audit, clock: clock, staleAfter: staleAfter}, nil
+	return &Service{store: store, assets: assets, bindings: bindings, agents: agents, audit: audit, clock: clock, ids: ids, staleAfter: staleAfter}, nil
 }
 
-// SetInput replaces one canonical asset's non-empty desired capability set.
 type SetInput struct {
 	TenantID     shared.ID
 	AssetID      shared.ID
@@ -73,18 +63,15 @@ type SetInput struct {
 	Actor        shared.ID
 }
 
-// ClearInput identifies one desired policy to remove. Clear is explicit so absence and an intentionally
-// empty array can never become two representations of the same state.
 type ClearInput struct {
 	TenantID shared.ID
 	AssetID  shared.ID
 	Actor    shared.ID
 }
 
-// SetDesiredCapabilities replaces one host/cluster asset's operator-owned desired capability set.
-// The canonical asset, not the current AgentID, owns the policy. Therefore a replacement agent bound
-// to the same asset can satisfy existing intent without a policy rewrite. Store CAS prevents concurrent
-// writers that both read the same version from silently overwriting one another.
+// SetDesiredCapabilities replaces one host/cluster asset's desired capability set. PolicyID is stable
+// within one lifecycle; a clear followed by recreation receives a new ID. Store CAS on
+// (PolicyID,Version) prevents both concurrent lost updates and delete/recreate ABA races.
 func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*desireddom.State, error) {
 	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state change needs tenant, canonical asset and actor", shared.ErrValidation)
@@ -103,7 +90,6 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 			return nil, err
 		}
 		current = got
-		// Declarative re-apply is a true no-op: no asset read, clock read, write, or audit churn.
 		if slices.Equal(current.Capabilities, caps) {
 			return current, nil
 		}
@@ -112,16 +98,17 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 	}
 
 	version := int64(1)
+	policyID := shared.ID("")
 	if current != nil {
 		if current.Version == 1<<63-1 {
 			return nil, fmt.Errorf("%w: desired state version exhausted for asset %s", shared.ErrConflict, in.AssetID)
 		}
 		version = current.Version + 1
+		policyID = current.PolicyID
 	}
 
-	// Validate the durable policy subject on every semantic change. This keeps a stale/corrupt desired
-	// row from being mutated after its canonical host/cluster identity no longer exists, while Clear
-	// remains available as the recovery path.
+	// Every semantic change re-validates the canonical subject. Clear remains available as the recovery
+	// path if the asset registry is damaged or the observation disappeared.
 	subject, err := s.assets.GetAssetByID(ctx, in.TenantID, in.AssetID)
 	if err != nil {
 		return nil, fmt.Errorf("load desired-state asset: %w", err)
@@ -138,13 +125,21 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 			shared.ErrValidation, subject.ID, subject.Kind)
 	}
 
+	if current == nil {
+		policyID = s.ids.NewID()
+		if policyID.IsZero() {
+			return nil, fmt.Errorf("%w: id generator returned an empty desired policy id", shared.ErrValidation)
+		}
+	}
+
 	now := s.clock.Now().UTC()
 	createdAt := now
 	if current != nil {
 		createdAt = current.Audit.CreatedAt
 	}
 	state := &desireddom.State{
-		TenantID: in.TenantID, AssetID: in.AssetID, Capabilities: caps, UpdatedBy: in.Actor, Version: version,
+		TenantID: in.TenantID, AssetID: in.AssetID, PolicyID: policyID,
+		Capabilities: caps, UpdatedBy: in.Actor, Version: version,
 		Audit: shared.Audit{CreatedAt: createdAt, UpdatedAt: now},
 	}
 	if err := state.Validate(); err != nil {
@@ -159,9 +154,6 @@ func (s *Service) SetDesiredCapabilities(ctx context.Context, in SetInput) (*des
 	return state, nil
 }
 
-// ClearDesiredCapabilities removes one desired policy. Clearing an already-absent policy is a
-// side-effect-free success. If a concurrent writer replaces the version after this method reads it,
-// the CAS delete returns ErrConflict and preserves the newer policy.
 func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) error {
 	if in.TenantID.IsZero() || in.AssetID.IsZero() || in.Actor.IsZero() {
 		return fmt.Errorf("%w: desired-state clear needs tenant, canonical asset and actor", shared.ErrValidation)
@@ -176,7 +168,7 @@ func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) e
 	if err := validateStoredState(current, in.TenantID, in.AssetID); err != nil {
 		return err
 	}
-	if err := s.store.Delete(ctx, in.TenantID, in.AssetID, current.Version); err != nil {
+	if err := s.store.Delete(ctx, in.TenantID, in.AssetID, current.PolicyID, current.Version); err != nil {
 		return fmt.Errorf("clear desired state: %w", err)
 	}
 	now := s.clock.Now().UTC()
@@ -186,8 +178,6 @@ func (s *Service) ClearDesiredCapabilities(ctx context.Context, in ClearInput) e
 	return nil
 }
 
-// Get returns one canonical asset's desired state and fails closed if storage returns malformed or
-// cross-identity data.
 func (s *Service) Get(ctx context.Context, tenantID, assetID shared.ID) (*desireddom.State, error) {
 	if tenantID.IsZero() || assetID.IsZero() {
 		return nil, fmt.Errorf("%w: desired-state lookup needs tenant and asset", shared.ErrValidation)
@@ -202,16 +192,17 @@ func (s *Service) Get(ctx context.Context, tenantID, assetID shared.ID) (*desire
 	return state, nil
 }
 
-// ReconciliationRow is one desired asset capability compared with the current bound agent.
 type ReconciliationRow struct {
-	AssetID    string                    `json:"asset_id"`
-	AgentID    string                    `json:"agent_id,omitempty"`
-	Capability string                    `json:"capability"`
-	Health     fleetcoverage.AgentHealth `json:"agent_health,omitempty"`
-	Covered    bool                      `json:"covered"`
-	GapReason  desireddom.GapReason      `json:"gap_reason,omitempty"`
-	Detail     string                    `json:"detail,omitempty"`
-	LastSeen   time.Time                 `json:"last_seen,omitempty"`
+	AssetID       string                    `json:"asset_id"`
+	PolicyID      string                    `json:"policy_id"`
+	PolicyVersion int64                     `json:"policy_version"`
+	AgentID       string                    `json:"agent_id,omitempty"`
+	Capability    string                    `json:"capability"`
+	Health        fleetcoverage.AgentHealth `json:"agent_health,omitempty"`
+	Covered       bool                      `json:"covered"`
+	GapReason     desireddom.GapReason      `json:"gap_reason,omitempty"`
+	Detail        string                    `json:"detail,omitempty"`
+	LastSeen      time.Time                 `json:"last_seen,omitempty"`
 }
 
 type observedAgent struct {
@@ -220,14 +211,10 @@ type observedAgent struct {
 	caps   map[string]struct{}
 }
 
-// Reconcile returns one row for every desired capability, deterministically sorted by asset then
-// capability. It performs bounded tenant-scoped reads and no persistence, so polling cannot amplify
-// writes. Observed capability maps retain only capabilities this policy actually asks about.
 func (s *Service) Reconcile(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
 	return s.reconcile(ctx, tenantID, false)
 }
 
-// Gaps returns only uncovered desired rows from the same reconciliation path as Reconcile.
 func (s *Service) Gaps(ctx context.Context, tenantID shared.ID) ([]ReconciliationRow, error) {
 	return s.reconcile(ctx, tenantID, true)
 }
@@ -358,7 +345,10 @@ func (s *Service) reconcile(ctx context.Context, tenantID shared.ID, gapsOnly bo
 	for _, desired := range ordered {
 		binding, bound := bindingByAsset[desired.AssetID]
 		for _, capability := range desired.Capabilities {
-			row := ReconciliationRow{AssetID: desired.AssetID.String(), Capability: capability}
+			row := ReconciliationRow{
+				AssetID: desired.AssetID.String(), PolicyID: desired.PolicyID.String(), PolicyVersion: desired.Version,
+				Capability: capability,
+			}
 			if !bound {
 				row.GapReason = desireddom.GapAgentMissing
 				row.Detail = "no current agent is bound to this desired asset"
@@ -418,15 +408,14 @@ func validateStoredState(state *desireddom.State, tenantID, assetID shared.ID) e
 	return nil
 }
 
-// record audits a successful desired-state mutation. As with fleet rollout, a write may already be
-// externally observable by the time the separate audit sink fails; rolling policy back would create a
-// worse split-brain. Audit delivery is therefore best-effort here and failures are surfaced by the audit
-// implementation's own alerting. The explicit helper makes that non-atomic contract intentional rather
-// than an accidental ignored error.
+// record is intentionally best-effort after a durable mutation. A separate audit sink cannot be made
+// atomic with policy persistence here; rolling policy back after an audit failure would create a worse
+// split-brain. The audit implementation is responsible for surfacing its delivery failures.
 func (s *Service) record(ctx context.Context, state *desireddom.State, actor shared.ID, action string, extra map[string]string, at time.Time) {
 	metadata := map[string]string{
 		"tenant_id":      state.TenantID.String(),
 		"asset_id":       state.AssetID.String(),
+		"policy_id":      state.PolicyID.String(),
 		"policy_version": fmt.Sprintf("%d", state.Version),
 	}
 	for k, v := range extra {
