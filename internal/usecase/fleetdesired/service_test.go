@@ -15,9 +15,11 @@ import (
 )
 
 type testClock struct{ now time.Time }
+
 func (c *testClock) Now() time.Time { return c.now }
 
 type testAudit struct{ entries []ports.AuditEntry }
+
 func (a *testAudit) Record(_ context.Context, entry ports.AuditEntry) error {
 	a.entries = append(a.entries, entry)
 	return nil
