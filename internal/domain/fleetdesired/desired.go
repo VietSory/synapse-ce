@@ -29,12 +29,14 @@ const (
 
 // State is the operator-owned desired capability set for one canonical host/cluster AssetID. Asset
 // kind is deliberately not duplicated here: fleet_assets is authoritative for that immutable
-// identity property, while this aggregate stores only policy-owned data.
+// identity property, while this aggregate stores only policy-owned data. Version is a monotonic CAS
+// token: new state starts at 1 and every semantic replacement increments it exactly once.
 type State struct {
 	TenantID     shared.ID
 	AssetID      shared.ID
 	Capabilities []string
 	UpdatedBy    shared.ID
+	Version      int64
 	Audit        shared.Audit
 }
 
@@ -111,6 +113,9 @@ func (s State) Validate() error {
 	}
 	if s.UpdatedBy.IsZero() {
 		return fmt.Errorf("%w: desired state change needs an actor", shared.ErrValidation)
+	}
+	if s.Version < 1 {
+		return fmt.Errorf("%w: desired state version must be at least 1", shared.ErrValidation)
 	}
 	if s.Audit.CreatedAt.IsZero() || s.Audit.UpdatedAt.IsZero() {
 		return fmt.Errorf("%w: desired state needs audit timestamps", shared.ErrValidation)
