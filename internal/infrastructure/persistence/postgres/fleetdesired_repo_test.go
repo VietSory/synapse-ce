@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
@@ -41,7 +41,7 @@ func TestFleetDesiredRepository(t *testing.T) {
 				if _, err := tx.Exec(bg, `DELETE FROM fleet_desired_state WHERE tenant_id=$1`, tenant); err != nil {
 					return err
 				}
-				_, err := tx.Exec(bg, `DELETE FROM fleet_agents WHERE tenant_id=$1`, tenant)
+				_, err := tx.Exec(bg, `DELETE FROM fleet_assets WHERE tenant_id=$1 AND id LIKE 'fd-asset-%'`, tenant)
 				return err
 			})
 		}
@@ -56,102 +56,148 @@ func TestFleetDesiredRepository(t *testing.T) {
 		t.Fatal("FORCE RLS not set on fleet_desired_state")
 	}
 
-	agents := NewFleetAgentRepository(pool)
 	now := time.Now().UTC().Truncate(time.Second)
-	for _, tc := range []struct {
-		tenant string
-		agent  string
-	}{
-		{tenant: "fd-a", agent: "agent-a"},
-		{tenant: "fd-b", agent: "agent-b"},
-	} {
-		agent, err := fleetagent.NewAgent(shared.ID(tc.agent), shared.ID(tc.tenant), tc.agent, "linux", "", "1.0.0", []string{"telemetry.process"}, "test-token-hash", now)
+	assetRepo := NewAssetRepository(pool)
+	createAsset := func(tenant, id string, kind asset.Kind) {
+		t.Helper()
+		a, err := asset.New(shared.ID(id), shared.ID(tenant), kind, "key/"+id, id, nil, now)
 		if err != nil {
-			t.Fatalf("new agent %s: %v", tc.agent, err)
+			t.Fatalf("new asset %s: %v", id, err)
 		}
-		if err := agents.CreateAgent(ctx, agent); err != nil {
-			t.Fatalf("create agent %s: %v", tc.agent, err)
+		if err := assetRepo.UpsertAsset(ctx, a); err != nil {
+			t.Fatalf("create asset %s: %v", id, err)
 		}
+	}
+	createAsset("fd-a", "fd-asset-a", asset.KindHost)
+	createAsset("fd-a", "fd-asset-c", asset.KindHost)
+	createAsset("fd-b", "fd-asset-b", asset.KindCluster)
+
+	// The narrow ID lookup must preserve the same tenant boundary as natural-key asset reads.
+	gotAsset, err := assetRepo.GetAssetByID(ctx, "fd-a", "fd-asset-a")
+	if err != nil || gotAsset.ID != "fd-asset-a" || gotAsset.Kind != asset.KindHost {
+		t.Fatalf("asset id lookup mismatch: asset=%+v err=%v", gotAsset, err)
+	}
+	if _, err := assetRepo.GetAssetByID(ctx, "fd-b", "fd-asset-a"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("cross-tenant asset id lookup=%v, want ErrNotFound", err)
 	}
 
 	repo := NewFleetDesiredRepository(pool)
 	state := &fleetdesired.State{
-		TenantID:     shared.ID("fd-a"),
-		AgentID:      shared.ID("agent-a"),
+		TenantID:     "fd-a",
+		AssetID:      "fd-asset-a",
+		AssetKind:    asset.KindHost,
 		Capabilities: []string{"inventory.host", "telemetry.process"},
-		UpdatedBy:    shared.ID("operator-a"),
+		UpdatedBy:    "operator-a",
 		Audit:        shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
 	if err := repo.Put(ctx, state); err != nil {
 		t.Fatalf("put desired state: %v", err)
 	}
 
-	got, err := repo.Get(ctx, shared.ID("fd-a"), shared.ID("agent-a"))
+	got, err := repo.Get(ctx, "fd-a", "fd-asset-a")
 	if err != nil {
 		t.Fatalf("get desired state: %v", err)
 	}
-	if len(got.Capabilities) != 2 || got.Capabilities[0] != "inventory.host" || got.Capabilities[1] != "telemetry.process" {
-		t.Fatalf("desired capabilities did not round-trip: %+v", got.Capabilities)
+	if got.AssetKind != asset.KindHost || len(got.Capabilities) != 2 || got.Capabilities[0] != "inventory.host" || got.Capabilities[1] != "telemetry.process" {
+		t.Fatalf("desired state did not round-trip: %+v", got)
 	}
-	if got.UpdatedBy != shared.ID("operator-a") || !got.Audit.CreatedAt.Equal(now) {
+	if got.UpdatedBy != "operator-a" || !got.Audit.CreatedAt.Equal(now) {
 		t.Fatalf("desired attribution/audit did not round-trip: %+v", got)
 	}
 
 	updatedAt := now.Add(time.Minute)
 	update := &fleetdesired.State{
-		TenantID:     shared.ID("fd-a"),
-		AgentID:      shared.ID("agent-a"),
-		Capabilities: []string{"telemetry.network"},
-		UpdatedBy:    shared.ID("operator-b"),
-		// A replacement document may carry a different candidate CreatedAt; the repository contract
-		// preserves the original database value on conflict rather than rewriting history.
+		TenantID: "fd-a", AssetID: "fd-asset-a", AssetKind: asset.KindHost,
+		Capabilities: []string{"telemetry.network"}, UpdatedBy: "operator-b",
+		// The repository owns creation history and preserves the original value on conflict.
 		Audit: shared.Audit{CreatedAt: now.Add(-time.Hour), UpdatedAt: updatedAt},
 	}
 	if err := repo.Put(ctx, update); err != nil {
 		t.Fatalf("update desired state: %v", err)
 	}
-	got, err = repo.Get(ctx, shared.ID("fd-a"), shared.ID("agent-a"))
+	got, err = repo.Get(ctx, "fd-a", "fd-asset-a")
 	if err != nil {
 		t.Fatalf("get updated desired state: %v", err)
 	}
-	if !got.Audit.CreatedAt.Equal(now) || !got.Audit.UpdatedAt.Equal(updatedAt) {
-		t.Fatalf("upsert changed created_at or failed to advance updated_at: %+v", got.Audit)
-	}
-	if got.UpdatedBy != shared.ID("operator-b") || len(got.Capabilities) != 1 || got.Capabilities[0] != "telemetry.network" {
-		t.Fatalf("upsert did not replace mutable desired state: %+v", got)
+	if !got.Audit.CreatedAt.Equal(now) || !got.Audit.UpdatedAt.Equal(updatedAt) || got.UpdatedBy != "operator-b" || len(got.Capabilities) != 1 || got.Capabilities[0] != "telemetry.network" {
+		t.Fatalf("upsert history/mutable state mismatch: %+v", got)
 	}
 
-	// Tenant scoping is both in the query and in WithTenant/RLS: another tenant must observe the same
-	// canonical AgentID as absent rather than learning that a desired policy exists elsewhere.
-	if _, err := repo.Get(ctx, shared.ID("fd-b"), shared.ID("agent-a")); !errors.Is(err, shared.ErrNotFound) {
-		t.Fatalf("cross-tenant desired lookup = %v, want ErrNotFound", err)
+	if _, err := repo.Get(ctx, "fd-b", "fd-asset-a"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("cross-tenant desired lookup=%v, want ErrNotFound", err)
 	}
-	rows, err := repo.List(ctx, shared.ID("fd-a"))
-	if err != nil || len(rows) != 1 || rows[0].AgentID != shared.ID("agent-a") {
+	rows, err := repo.List(ctx, "fd-a")
+	if err != nil || len(rows) != 1 || rows[0].AssetID != "fd-asset-a" {
 		t.Fatalf("tenant desired list mismatch: rows=%+v err=%v", rows, err)
 	}
 
-	// Critical #633 invariant: desired state is operator intent, not an owned child of the observed
-	// agent row. Purging an observed identity must retain the expectation so reconciliation can surface
-	// agent_missing instead of silently going green/empty. The delete must run under tenant RLS and we
-	// assert the row count; otherwise a denied zero-row DELETE would make this test vacuously pass.
-	var deleted int64
-	if err := WithTenant(ctx, pool, "fd-a", func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `DELETE FROM fleet_agents WHERE tenant_id=$1 AND id=$2`, "fd-a", "agent-a")
+	// Prove the RLS policy itself, not merely repository WHERE predicates: execute a query that asks
+	// explicitly for fd-a while the session tenant is fd-b. A permissive/broken policy would leak it.
+	var visible int
+	if err := WithTenant(ctx, pool, "fd-b", func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM fleet_desired_state WHERE tenant_id='fd-a'`).Scan(&visible)
+	}); err != nil {
+		t.Fatalf("direct cross-tenant RLS read: %v", err)
+	}
+	if visible != 0 {
+		t.Fatalf("RLS leaked %d fd-a desired rows to fd-b", visible)
+	}
+	var crossTenantUpdated int64
+	if err := WithTenant(ctx, pool, "fd-b", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE fleet_desired_state SET updated_by='intruder' WHERE tenant_id='fd-a' AND asset_id='fd-asset-a'`)
 		if err == nil {
-			deleted = tag.RowsAffected()
+			crossTenantUpdated = tag.RowsAffected()
 		}
 		return err
 	}); err != nil {
-		t.Fatalf("purge observed agent: %v", err)
+		t.Fatalf("direct cross-tenant RLS update: %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("purge observed agent deleted %d rows, want 1", deleted)
+	if crossTenantUpdated != 0 {
+		t.Fatalf("RLS permitted %d cross-tenant updates", crossTenantUpdated)
 	}
-	if _, err := agents.GetAgent(ctx, "fd-a", "agent-a"); !errors.Is(err, shared.ErrNotFound) {
-		t.Fatalf("observed agent still exists after purge: %v", err)
+
+	// The database must independently enforce canonical asset existence and kind. These documents pass
+	// domain validation, so failure here proves the FK rather than the Go validator.
+	missingAsset := &fleetdesired.State{
+		TenantID: "fd-a", AssetID: "fd-asset-missing", AssetKind: asset.KindHost,
+		Capabilities: []string{"process"}, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
 	}
-	if _, err := repo.Get(ctx, shared.ID("fd-a"), shared.ID("agent-a")); err != nil {
-		t.Fatalf("desired intent must survive observed-agent purge: %v", err)
+	if err := repo.Put(ctx, missingAsset); err == nil {
+		t.Fatal("desired state for a missing canonical asset unexpectedly persisted")
+	}
+	wrongKind := &fleetdesired.State{
+		TenantID: "fd-a", AssetID: "fd-asset-a", AssetKind: asset.KindCluster,
+		Capabilities: []string{"process"}, UpdatedBy: "operator", Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
+	}
+	if err := repo.Put(ctx, wrongKind); err == nil {
+		t.Fatal("asset-kind mismatch unexpectedly bypassed composite FK")
+	}
+
+	// Bypass the repository validator and prove the SQL CHECK rejects a non-canonical capability array.
+	var invalidInserted int64
+	if err := WithTenant(ctx, pool, "fd-a", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO fleet_desired_state
+			  (tenant_id,asset_id,asset_kind,capabilities,updated_by,created_at,updated_at)
+			VALUES ('fd-a','fd-asset-c','host',ARRAY['z','a'],'operator',now(),now())`)
+		if err == nil {
+			invalidInserted = tag.RowsAffected()
+		}
+		return err
+	}); err == nil {
+		t.Fatal("unsorted capability array unexpectedly bypassed database canonicality CHECK")
+	}
+	if invalidInserted != 0 {
+		t.Fatalf("invalid direct insert affected %d rows", invalidInserted)
+	}
+
+	if err := repo.Delete(ctx, "fd-a", "fd-asset-a"); err != nil {
+		t.Fatalf("delete desired state: %v", err)
+	}
+	if err := repo.Delete(ctx, "fd-a", "fd-asset-a"); err != nil {
+		t.Fatalf("idempotent delete desired state: %v", err)
+	}
+	if _, err := repo.Get(ctx, "fd-a", "fd-asset-a"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("deleted desired state lookup=%v, want ErrNotFound", err)
 	}
 }
