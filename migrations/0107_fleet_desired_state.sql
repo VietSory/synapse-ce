@@ -35,6 +35,7 @@ CREATE TABLE fleet_desired_state (
     asset_id     TEXT NOT NULL CHECK (asset_id <> ''),
     capabilities TEXT[] NOT NULL,
     updated_by   TEXT NOT NULL CHECK (updated_by <> ''),
+    version      BIGINT NOT NULL CHECK (version >= 1),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, asset_id),
