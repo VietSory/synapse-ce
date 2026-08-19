@@ -6,32 +6,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
-	desireddom "github.com/KKloudTarus/synapse-ce/internal/domain/fleetdesired"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	desireduc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleetdesired"
 )
 
-type noObservedRead struct{ calls int }
+type noAssetRead struct{ calls int }
 
-func (r *noObservedRead) GetAgent(context.Context, shared.ID, shared.ID) (*fleetagent.Agent, error) {
+func (r *noAssetRead) GetAssetByID(context.Context, shared.ID, shared.ID) (*asset.Asset, error) {
 	r.calls++
-	return nil, errors.New("unexpected GetAgent")
+	return nil, errors.New("unexpected asset read")
 }
+
+type noBindingRead struct{ calls int }
+
+func (r *noBindingRead) ListCurrentBindings(context.Context, shared.ID) ([]desireduc.CurrentBinding, error) {
+	r.calls++
+	return nil, errors.New("unexpected binding read")
+}
+
+type noObservedRead struct{ calls int }
 
 func (r *noObservedRead) ListAgents(context.Context, shared.ID) ([]*fleetagent.Agent, error) {
 	r.calls++
-	return nil, errors.New("unexpected ListAgents")
+	return nil, errors.New("unexpected agent read")
 }
 
-func TestReconcileEmptyPolicyDoesNotReadObservedFleet(t *testing.T) {
-	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
-	store := reconcileDesiredStore{rows: []*desireddom.State{{
-		TenantID: "tenant", AgentID: "agent", Capabilities: []string{}, UpdatedBy: "operator",
-		Audit: shared.Audit{CreatedAt: now, UpdatedAt: now},
-	}}}
+type noClockRead struct{ calls int }
+
+func (c *noClockRead) Now() time.Time { c.calls++; return time.Now() }
+
+func TestReconcileNoDesiredPolicyDoesNotReadOtherFleetState(t *testing.T) {
+	assets := &noAssetRead{}
+	bindings := &noBindingRead{}
 	agents := &noObservedRead{}
-	svc, err := desireduc.NewService(store, agents, reconcileAudit{}, reconcileClock{now}, time.Minute)
+	clock := &noClockRead{}
+	svc, err := desireduc.NewService(reconcileDesiredStore{rows: nil}, assets, bindings, agents, reconcileAudit{}, clock, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +53,8 @@ func TestReconcileEmptyPolicyDoesNotReadObservedFleet(t *testing.T) {
 	if len(rows) != 0 || rows == nil {
 		t.Fatalf("rows=%#v, want non-nil empty projection", rows)
 	}
-	if agents.calls != 0 {
-		t.Fatalf("empty policy read observed fleet %d times", agents.calls)
+	if assets.calls != 0 || bindings.calls != 0 || agents.calls != 0 || clock.calls != 0 {
+		t.Fatalf("empty policy performed unnecessary reads: assets=%d bindings=%d agents=%d clock=%d",
+			assets.calls, bindings.calls, agents.calls, clock.calls)
 	}
 }
