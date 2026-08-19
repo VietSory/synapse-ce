@@ -104,7 +104,7 @@ func (s State) Validate() error {
 	if s.PolicyID.IsZero() {
 		return fmt.Errorf("%w: desired state needs a policy id", shared.ErrValidation)
 	}
-	if s.UpdatedBy.IsZero() {
+	if strings.TrimSpace(s.UpdatedBy.String()) == "" {
 		return fmt.Errorf("%w: desired state change needs an actor", shared.ErrValidation)
 	}
 	if s.Version < 1 {
