@@ -117,6 +117,40 @@ func TestReconcileCanonicalizesObservedCapabilitiesAndDoesNotMutateDesiredOrder(
 	}
 }
 
+func TestReconcileAllowsMultipleAgentsForOneAssetAndChoosesDeterministicWitness(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	desired := []*desireddom.State{desiredFixture("cluster", []string{"process"}, now)}
+	// Deliberately reverse the binding and observed-agent order. agent-b covers process; agent-a is
+	// healthy but does not. Reverse uniqueness AssetID -> AgentID is not part of the binding contract.
+	bindings := []desireduc.CurrentBinding{
+		bindingFixture("cluster", "agent-b"),
+		bindingFixture("cluster", "agent-a"),
+	}
+	agents := []*fleetagent.Agent{
+		agentFixture("agent-b", []string{"process"}, now),
+		agentFixture("agent-a", []string{"network"}, now),
+	}
+	svc := reconcileService(t, desired, bindings, agents, now)
+	rows, err := svc.Reconcile(context.Background(), "tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || !rows[0].Covered || rows[0].AgentID != "agent-b" || rows[0].GapReason != "" {
+		t.Fatalf("multi-agent covered result=%+v", rows)
+	}
+
+	// If no healthy bound agent advertises the capability, choose the lexicographically first healthy
+	// witness and return one asset-level capability gap rather than inventing a reverse-unique binding.
+	agents[0].Capabilities = []string{"file"}
+	rows, err = svc.Reconcile(context.Background(), "tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Covered || rows[0].AgentID != "agent-a" || rows[0].GapReason != desireddom.GapCapabilityMissing {
+		t.Fatalf("multi-agent uncovered result=%+v", rows)
+	}
+}
+
 func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	valid := desiredFixture("asset", []string{"process"}, now)
@@ -135,10 +169,7 @@ func TestReconcileFailsClosedOnMalformedSnapshots(t *testing.T) {
 		{name: "duplicate desired", desired: []*desireddom.State{valid, valid}},
 		{name: "empty binding identity", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{{TenantID: "tenant", AssetID: "asset"}}},
 		{name: "cross-tenant binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{{TenantID: "other", AssetID: "asset", AgentID: "agent"}}},
-		{name: "duplicate desired-asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding, validBinding}},
-		{name: "duplicate unrelated-asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{
-			bindingFixture("other-asset", "agent-1"), bindingFixture("other-asset", "agent-2"),
-		}},
+		{name: "duplicate agent-asset binding", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{validBinding, validBinding}},
 		{name: "agent bound to two assets", desired: []*desireddom.State{valid}, bindings: []desireduc.CurrentBinding{
 			validBinding, bindingFixture("other-asset", "agent"),
 		}},
