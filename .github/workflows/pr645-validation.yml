@@ -1,0 +1,94 @@
+name: PR 645 strict validation
+
+on:
+  push:
+    branches:
+      - validation/pr645-fa334b8
+
+permissions:
+  contents: read
+
+jobs:
+  linux-strict:
+    name: Linux strict gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v7
+        with:
+          ref: fa334b870f69220d1ee6c3976eb434ed522c3de7
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify exact source SHA
+        run: test "$(git rev-parse HEAD)" = "fa334b870f69220d1ee6c3976eb434ed522c3de7"
+
+      - name: Build
+        run: go build ./...
+
+      - name: DAST race stress x20
+        run: go test -race -count=20 ./internal/infrastructure/dastengine/
+
+      - name: DAST non-race stress x20
+        run: go test -count=20 ./internal/infrastructure/dastengine/
+
+      - name: Full repository race
+        run: go test -race -count=1 ./...
+
+      - name: Full repository test
+        run: go test -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Diff whitespace check
+        run: git diff --check dcd55af08e74e7a40ff9cdad1dd5874b2aee5a38 fa334b870f69220d1ee6c3976eb434ed522c3de7
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+  windows-acceptance:
+    name: Windows acceptance
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v7
+        with:
+          ref: fa334b870f69220d1ee6c3976eb434ed522c3de7
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify exact source SHA
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          if ($sha -ne "fa334b870f69220d1ee6c3976eb434ed522c3de7") { throw "unexpected SHA: $sha" }
+
+      - name: Build
+        run: go build ./...
+
+      - name: DAST race stress x20
+        run: go test -race -count=20 ./internal/infrastructure/dastengine/
+
+      - name: DAST non-race stress x20
+        run: go test -count=20 ./internal/infrastructure/dastengine/
+
+      - name: Full repository test
+        run: go test -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
