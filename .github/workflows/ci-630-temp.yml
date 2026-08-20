@@ -1,0 +1,113 @@
+name: CI RulePack Temporary
+
+on:
+  push:
+    branches: [ci-630-rulepack-test]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+  backend:
+    name: Backend (Go)
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${{ github.run_id }}
+      POSTGRES_DB: synapse
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ github.run_id }}
+          POSTGRES_DB: synapse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d synapse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Configure Postgres integration database
+        run: echo "SYNAPSE_TEST_DB_DSN=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable" >> "$GITHUB_ENV"
+      - name: Require Postgres integration database
+        run: |
+          if [ -z "${SYNAPSE_TEST_DB_DSN:-}" ]; then
+            echo "SYNAPSE_TEST_DB_DSN is required in CI; refusing to silently skip Postgres integration tests"
+            exit 1
+          fi
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Test Postgres suite again on the same database
+        run: go test -count=1 ./internal/infrastructure/persistence/postgres
+      - name: Build (CGO disabled – distroless parity)
+        run: CGO_ENABLED=0 go build ./cmd/...
+
+  backend-windows:
+    name: Backend (Go, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 ./...
+
+  frontend:
+    name: Frontend (web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 9
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Test
+        run: pnpm test
+      - name: Typecheck
+        run: pnpm run typecheck
+      - name: Build
+        run: pnpm build
