@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/privacy"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/telemetry"
 )
@@ -101,15 +102,28 @@ type DecodedPrivilege struct {
 	Cap                string
 }
 
-// Normalizer maps DecodedEvent → telemetry.TelemetryEnvelope. It is stateless; a zero value is ready to
-// use. It is a type (not just a function) so a future caller can inject it behind an interface without a
-// signature change.
-type Normalizer struct{}
+// Normalizer maps DecodedEvent → telemetry.TelemetryEnvelope and enforces source privacy before the
+// envelope can be handed to a spool or transport. A zero value is ready to use and applies
+// privacy.DefaultPolicy; New installs a validated tenant-specific policy without changing Normalize's
+// signature.
+type Normalizer struct {
+	privacyPolicy privacy.Policy
+}
+
+// New constructs a normalizer with an explicit source privacy policy. A zero Policy is the safe default.
+func New(policy privacy.Policy) (Normalizer, error) {
+	if err := policy.Validate(); err != nil {
+		return Normalizer{}, err
+	}
+	return Normalizer{privacyPolicy: policy.Clone()}, nil
+}
 
 // Normalize produces the canonical envelope for one decoded event, deriving stable entity ids, resolving
-// the source timestamp, recording coverage/quality honesty, and validating the result. It returns a
-// wrapped shared.ErrValidation for any malformed input so the caller maps it to a 4xx at the edge.
-func (Normalizer) Normalize(d DecodedEvent) (telemetry.TelemetryEnvelope, error) {
+// the source timestamp, recording coverage/quality honesty, scrubbing source-sensitive fields, and
+// validating the result. It returns a wrapped shared.ErrValidation for malformed input or policy so the
+// caller maps it to a 4xx at the edge. The returned envelope is already privacy-safe; unredacted payloads
+// never leave this method for a downstream spool/transport caller.
+func (n Normalizer) Normalize(d DecodedEvent) (telemetry.TelemetryEnvelope, error) {
 	if d.ObservedAt.IsZero() {
 		return telemetry.TelemetryEnvelope{}, fmt.Errorf("%w: decoded event has no observed-at timestamp", shared.ErrValidation)
 	}
@@ -153,10 +167,11 @@ func (Normalizer) Normalize(d DecodedEvent) (telemetry.TelemetryEnvelope, error)
 		ResourceContext: d.Resource,
 		Event:           event,
 	}
-	if err := env.Validate(); err != nil {
-		return telemetry.TelemetryEnvelope{}, err
+	scrubbed, err := privacy.Scrub(env, n.privacyPolicy)
+	if err != nil {
+		return telemetry.TelemetryEnvelope{}, fmt.Errorf("source privacy: %w", err)
 	}
-	return env, nil
+	return scrubbed, nil
 }
 
 func exactlyOnePayload(d DecodedEvent) error {

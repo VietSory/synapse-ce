@@ -47,10 +47,14 @@ type TelemetryEnvelope struct {
 	ReceivedAt     time.Time
 	// Sequence is the per-stream monotonic sequence number (within one incarnation/Epoch — see #594
 	// identity conventions; the incarnation is embedded in StreamID upstream).
-	Sequence        uint64
-	CoverageFlags   CoverageFlags
-	DataQuality     DataQuality
-	ResourceContext ResourceContext
+	Sequence      uint64
+	CoverageFlags CoverageFlags
+	DataQuality   DataQuality
+	// RedactionPolicyDigest identifies the exact source privacy policy applied to this envelope. It is
+	// deliberately distinct from sampling-policy metadata: privacy and sampling are independent controls.
+	// The normalizer sets it before an envelope may enter a spool or transport.
+	RedactionPolicyDigest string
+	ResourceContext       ResourceContext
 	// Event is the typed payload (the "TypedPayload" contract slot).
 	Event TelemetryEvent
 }
