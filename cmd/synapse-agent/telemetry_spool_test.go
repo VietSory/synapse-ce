@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/fleetclient"
 )
 
@@ -49,7 +51,8 @@ func TestOpenTelemetrySpoolUsesCanonicalIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer durable.Close()
-	if identity.AgentID != "agent-1" || identity.AssetID != "asset-1" || identity.AgentSession != identity.AgentID || identity.BootID.IsZero() {
+	wantAgentID := shared.ID("agent-1")
+	if identity.AgentID != wantAgentID || identity.AssetID != "asset-1" || identity.AgentSession != shared.ID(fleetagent.CanonicalSessionID(wantAgentID)) || identity.BootID.IsZero() {
 		t.Fatalf("identity = %#v", identity)
 	}
 }
