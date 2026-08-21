@@ -89,16 +89,16 @@ func postgresDeliveryBatchFor(t *testing.T, tenant, agent, asset shared.ID, epoc
 		PayloadDigest:        payloadDigest,
 	}
 	return ports.TelemetryDeliveryBatch{
-		TenantID:       tenant,
-		HostID:         agent,
-		AssetID:        asset,
-		AgentID:        agent,
-		AgentSessionID: session,
-		Manifest:       manifest,
-		KeyID:          "key-a",
-		Envelopes:      envelopes,
+		TenantID:        tenant,
+		HostID:          agent,
+		AssetID:         asset,
+		AgentID:         agent,
+		AgentSessionID:  session,
+		Manifest:        manifest,
+		KeyID:           "key-a",
+		Envelopes:       envelopes,
 		ProjectedEvents: projected,
-		ReceivedAt:     at.Add(time.Minute),
+		ReceivedAt:      at.Add(time.Minute),
 	}
 }
 
@@ -125,8 +125,21 @@ func TestPostgresTelemetryDeliveryConvergesAcrossReplayGapLateFillAndEpochReset(
 	if _, err := pool.Exec(ctx, `INSERT INTO tenants(id,name) VALUES($1,$1),($2,$2)`, tenantA.String(), tenantB.String()); err != nil {
 		t.Fatalf("seed tenants: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO fleet_assets(id,tenant_id,kind,"key",name) VALUES($1,$2,'host',$1,$1)`, asset.String(), tenantA.String()); err != nil {
+		t.Fatalf("seed canonical asset: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO fleet_agents(id,tenant_id,name,token_hash,state) VALUES($1,$2,$1,$3,'active')`, agent.String(), tenantA.String(), "test-token-"+id); err != nil {
+		t.Fatalf("seed fleet agent: %v", err)
+	}
 	t.Cleanup(func() {
 		bg := context.Background()
+		_, _ = pool.Exec(bg, `DELETE FROM telemetry_events WHERE tenant_id=$1`, tenantA.String())
+		_, _ = pool.Exec(bg, `DELETE FROM telemetry_gaps WHERE tenant_id=$1`, tenantA.String())
+		_, _ = pool.Exec(bg, `DELETE FROM telemetry_delivery_batches WHERE tenant_id=$1`, tenantA.String())
+		_, _ = pool.Exec(bg, `DELETE FROM telemetry_delivery_sequences WHERE tenant_id=$1`, tenantA.String())
+		_, _ = pool.Exec(bg, `DELETE FROM telemetry_delivery_streams WHERE tenant_id=$1`, tenantA.String())
+		_, _ = pool.Exec(bg, `DELETE FROM fleet_agents WHERE tenant_id=$1`, tenantA.String())
+		_, _ = pool.Exec(bg, `DELETE FROM fleet_assets WHERE tenant_id=$1`, tenantA.String())
 		_, _ = pool.Exec(bg, `DELETE FROM tenants WHERE id IN ($1,$2)`, tenantA.String(), tenantB.String())
 	})
 
