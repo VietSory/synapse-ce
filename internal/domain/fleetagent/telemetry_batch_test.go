@@ -21,6 +21,7 @@ func validTelemetryManifest(payload []byte) TelemetryBatchManifest {
 		SchemaVersion:        2,
 		BatchID:              DeriveTelemetryBatchID(agent, session, stream, 4, 12, payloadDigest),
 		AgentID:              agent,
+		HostID:               agent,
 		AgentSessionID:       session,
 		AssetID:              shared.ID("asset-1"),
 		StreamID:             stream,
@@ -68,6 +69,14 @@ func TestTelemetryBatchSignVerifyAndTamper(t *testing.T) {
 		tampered.Manifest.AssetID = shared.ID("asset-other")
 		if err := VerifyTelemetryBatch(tampered, pub); !errors.Is(err, shared.ErrValidation) {
 			t.Fatalf("tampered manifest error = %v, want validation rejection", err)
+		}
+	})
+
+	t.Run("host", func(t *testing.T) {
+		tampered := batch
+		tampered.Manifest.HostID = shared.ID("host-other")
+		if err := VerifyTelemetryBatch(tampered, pub); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("tampered host error = %v, want signature rejection", err)
 		}
 	})
 
