@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -32,24 +34,33 @@ func (s *CredentialStore) telemetrySignerPath() string {
 	return filepath.Join(s.dir, "telemetry-signing-key.json")
 }
 
-// EnsureTelemetrySigner loads a still-usable signer or creates one. Rotation is
-// deliberately done only after expiry; batches are signed at send time from WAL data,
-// so an expired signer does not strand already-spooled records under an old signature.
+// EnsureTelemetrySigner loads a usable signer or creates one only when the signer
+// is absent/expired. Corrupt or not-yet-valid persisted state fails loud: silently
+// overwriting damaged key material would hide local state corruption and make audit
+// provenance needlessly ambiguous.
 func (s *CredentialStore) EnsureTelemetrySigner(agentID string, now time.Time) (TelemetrySigner, error) {
 	if agentID == "" {
 		return TelemetrySigner{}, fmt.Errorf("fleetclient: telemetry signer requires agent id")
 	}
-	if material, err := s.loadTelemetrySigner(agentID); err == nil && now.Before(material.Key.NotAfter) {
+	now = now.UTC()
+	material, loadErr := s.loadTelemetrySigner(agentID)
+	switch {
+	case loadErr == nil && now.Before(material.Key.NotBefore):
+		return TelemetrySigner{}, fmt.Errorf("fleetclient: persisted telemetry signer is not valid until %s", material.Key.NotBefore)
+	case loadErr == nil && now.Before(material.Key.NotAfter):
 		return material, nil
+	case loadErr != nil && !errors.Is(loadErr, fs.ErrNotExist):
+		return TelemetrySigner{}, loadErr
 	}
+
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return TelemetrySigner{}, fmt.Errorf("fleetclient: generate telemetry signing key: %w", err)
 	}
 	// One minute of backwards tolerance prevents a tiny local/server clock skew from
 	// making a freshly registered key pending. The bounded expiry keeps rotation real.
-	notBefore := now.UTC().Add(-time.Minute).Truncate(time.Second)
-	notAfter := now.UTC().Add(telemetrySigningKeyLifetime).Truncate(time.Second)
+	notBefore := now.Add(-time.Minute).Truncate(time.Second)
+	notAfter := now.Add(telemetrySigningKeyLifetime).Truncate(time.Second)
 	key, err := BuildTelemetrySigningKey(agentID, priv, notBefore, notAfter)
 	if err != nil {
 		return TelemetrySigner{}, err
