@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
@@ -27,9 +28,6 @@ type fleetTelemetryTransport interface {
 	IngestSigned(context.Context, *fleetagent.Agent, fleetagent.SignedTelemetryBatch) (ports.TelemetryDeliveryResult, error)
 }
 
-// SetFleetTelemetry wires A3 onto the already-authenticated agent plane. All three
-// dependencies are required together: transport verification without the durable key
-// registry or authoritative asset binding would silently weaken the admission contract.
 func (rt *Router) SetFleetTelemetry(transport fleetTelemetryTransport, keys ports.AgentSigningKeyStore, bindings ports.TelemetryAssetBindingStore) {
 	if rt.fleet == nil {
 		return
@@ -97,7 +95,7 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
 		return
 	}
-	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	var batch fleetagent.SignedTelemetryBatch
 	if err := dec.Decode(&batch); err != nil {
@@ -175,10 +173,10 @@ func writeFleetTelemetryError(w http.ResponseWriter, f *fleetRouter, err error) 
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry request"})
 	case errors.Is(err, shared.ErrConflict):
 		writeJSON(w, http.StatusConflict, errorBody{Error: "telemetry conflict"})
+	case errors.Is(err, shared.ErrSaturated):
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusTooManyRequests, errorBody{Error: "telemetry saturated"})
 	default:
-		// The fleet-plane limiter already emits 429 + Retry-After. Runtime
-		// store/key-registry failures are 503 + Retry-After, giving A2 the two
-		// required retry classes without inventing a domain saturation sentinel.
 		f.log.Error("fleet telemetry request failed", "err", err)
 		w.Header().Set("Retry-After", "1")
 		writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "telemetry unavailable"})
