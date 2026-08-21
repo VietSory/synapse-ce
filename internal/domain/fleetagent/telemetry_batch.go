@@ -23,6 +23,10 @@ type TelemetryBatchManifest struct {
 	SchemaVersion        int              `json:"schema_version"`
 	BatchID              shared.ID        `json:"batch_id"`
 	AgentID              shared.ID        `json:"agent_id"`
+	// HostID is explicit because A0.1 requires the server to reject host attribution that disagrees
+	// with the authenticated VM agent. For the VM agent the canonical host identity is the enrolled
+	// AgentID; keeping the field signed makes that assertion auditable rather than implicit.
+	HostID               shared.ID        `json:"host_id"`
 	AgentSessionID       SessionID        `json:"agent_session_id"`
 	AssetID              shared.ID        `json:"asset_id"`
 	StreamID             shared.ID        `json:"stream_id"`
@@ -63,7 +67,7 @@ func (m TelemetryBatchManifest) Validate() error {
 	if err := telemetryschema.Validate(m.SchemaVersion); err != nil {
 		return err
 	}
-	if m.BatchID.IsZero() || m.AgentID.IsZero() || m.AssetID.IsZero() || m.StreamID.IsZero() {
+	if m.BatchID.IsZero() || m.AgentID.IsZero() || m.HostID.IsZero() || m.AssetID.IsZero() || m.StreamID.IsZero() {
 		return fmt.Errorf("%w: telemetry batch identity is incomplete", shared.ErrValidation)
 	}
 	if m.AgentSessionID == "" {
@@ -226,6 +230,7 @@ func telemetryManifestCommitment(m TelemetryBatchManifest) []byte {
 	writeCommitUint64(&buf, uint64(m.SchemaVersion))
 	writeCommitString(&buf, m.BatchID.String())
 	writeCommitString(&buf, m.AgentID.String())
+	writeCommitString(&buf, m.HostID.String())
 	writeCommitString(&buf, string(m.AgentSessionID))
 	writeCommitString(&buf, m.AssetID.String())
 	writeCommitString(&buf, m.StreamID.String())
