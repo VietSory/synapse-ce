@@ -33,21 +33,11 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/platform/buildinfo"
 )
 
-// agentVersion is reported to the control plane and gated by its version-skew floor. It reflects the
-// real build (a release tag via ldflags; "devel" for an untagged build) so the fleet floor can
-// distinguish agent releases in the field, matching how the control plane reports its own version.
 var agentVersion = buildinfo.App()
 
-// hostInventoryCapability is the work-order capability this agent fulfils. It follows the platform's
-// dotted capability namespace (cf. scan.source, detect.rules — workorder.WorkOrder.Capability).
 const hostInventoryCapability = "scan.host"
-
-// minControlPlaneVersion is the minimum control-plane version this agent requires (#412 version skew).
-// If the heartbeat reports an older control plane, the agent refuses to claim work this cycle rather
-// than risk acting against an incompatible transport contract.
 const minControlPlaneVersion = "0.1.0"
 
-// fleetAPI is the subset of the fleet client the run loop needs; a fake implements it in tests.
 type fleetAPI interface {
 	Enrol(ctx context.Context, enrolToken string, req fleetclient.EnrolRequest) (fleetclient.EnrolResponse, error)
 	Heartbeat(ctx context.Context, token string, req fleetclient.EnrolRequest) (fleetclient.HeartbeatResponse, error)
@@ -55,6 +45,12 @@ type fleetAPI interface {
 	Progress(ctx context.Context, token, orderID string) error
 	SubmitResult(ctx context.Context, token, orderID, status, reason string) error
 	SendHostInventory(ctx context.Context, token string, inv any) error
+}
+
+// hostInventoryResolvedAPI is optional so old test doubles remain source-compatible.
+// The real fleet client implements it and returns the canonical server asset binding.
+type hostInventoryResolvedAPI interface {
+	SendHostInventoryResolved(ctx context.Context, token string, inv any) (fleetclient.HostInventoryResponse, error)
 }
 
 type config struct {
@@ -66,16 +62,14 @@ type config struct {
 	poll          time.Duration
 	maxOrders     int
 	once          bool
-	detectClasses string  // SYNAPSE_DETECT_CLASSES; empty = detection engine off
-	detectCeiling float64 // SYNAPSE_DETECT_CPU_CEIL_PCT; 0 = no load shedding
-	spoolBytes    int64   // durable telemetry WAL quota
-	metricsAddr   string  // optional private agent metrics listener
+	detectClasses string
+	detectCeiling float64
+	spoolBytes    int64
+	metricsAddr   string
 }
 
 func main() {
 	log.SetFlags(0)
-	// The host floor is checked before the configuration, because it is the one refusal that no
-	// configuration can make valid.
 	if err := checkOSFloor(); err != nil {
 		log.Fatalf("synapse-agent: %v", err)
 	}
@@ -92,14 +86,9 @@ func main() {
 		cfg:     cfg,
 		store:   fleetclient.NewCredentialStore(cfg.stateDir),
 	}
-
-	// On Windows the Service Control Manager starts the binary and expects a status handshake; a
-	// process that just runs is killed as unresponsive. runAsService takes over when we were started
-	// that way and reports false otherwise, so the same binary is still an ordinary command-line tool.
 	if runAsService(r.run) {
 		return
 	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := r.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -111,8 +100,6 @@ func parseConfig() config {
 	var cfg config
 	var enrolTokenFile string
 	flag.StringVar(&cfg.baseURL, "url", os.Getenv("SYNAPSE_FLEET_URL"), "control plane fleet API base URL (https required, except a loopback host)")
-	// The enrolment token is a one-time secret. Prefer the env var or -enrol-token-file; the -enrol-token
-	// flag is DISCOURAGED because it is visible in the process listing (ps) and shell history.
 	flag.StringVar(&cfg.enrolToken, "enrol-token", os.Getenv("SYNAPSE_FLEET_ENROL_TOKEN"), "one-time enrolment token, first run only (DISCOURAGED: visible in ps; prefer -enrol-token-file)")
 	flag.StringVar(&enrolTokenFile, "enrol-token-file", os.Getenv("SYNAPSE_FLEET_ENROL_TOKEN_FILE"), "file to read the one-time enrolment token from (preferred over -enrol-token)")
 	flag.StringVar(&cfg.stateDir, "state-dir", envOr("SYNAPSE_AGENT_STATE_DIR", defaultStateDir()), "directory for the agent credential + offline buffer")
@@ -127,8 +114,6 @@ func parseConfig() config {
 	flag.StringVar(&cfg.metricsAddr, "agent-metrics-addr", os.Getenv("SYNAPSE_AGENT_METRICS_ADDR"), "optional address for private agent Prometheus metrics (for example 127.0.0.1:9465)")
 	flag.Parse()
 	if cfg.enrolToken == "" {
-		// An absent token file is NOT fatal: it is the normal state after enrolment, once the
-		// one-time secret has been cleaned up. EnsureEnrolled decides from the stored credential.
 		tok, err := fleetclient.ReadEnrolTokenFile(enrolTokenFile)
 		if err != nil {
 			log.Fatalf("synapse-agent: %v", err)
@@ -138,7 +123,6 @@ func parseConfig() config {
 	return cfg
 }
 
-// runner holds the run-loop dependencies so the loop can be tested with a fake API + collector.
 type runner struct {
 	api     fleetAPI
 	collect func(ctx context.Context, root string) (hostinventory.HostInventory, error)
@@ -151,17 +135,27 @@ func (r *runner) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Agent-side detection engine (#422): a continuous background observer, separate from the
-	// per-work-order inventory cycle below. Best-effort — it never blocks or fails the inventory loop.
-	// It is given the enrolled credential so its events carry the canonical AgentID, not the display
-	// name (D1 fix, #606).
-	r.startDetection(ctx, cred)
+	detectionStarted := false
 	for {
+		// A0.1: never manufacture an asset identity locally. The first successful
+		// host reconciliation establishes and persists it; only then may telemetry
+		// observation/signing start.
+		if !detectionStarted && cred.AssetID != "" {
+			r.startDetection(ctx, cred)
+			detectionStarted = true
+		}
 		if err := r.cycle(ctx, cred); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
 			log.Printf("cycle error (will retry): %v", err)
+		}
+		if current, ok := r.store.Load(); ok && current.AgentID == cred.AgentID {
+			cred = current
+		}
+		if !detectionStarted && cred.AssetID != "" {
+			r.startDetection(ctx, cred)
+			detectionStarted = true
 		}
 		if r.cfg.once {
 			return nil
@@ -174,8 +168,6 @@ func (r *runner) run(ctx context.Context) error {
 	}
 }
 
-// ensureEnrolled loads a persisted credential or, on first run, generates a key + CSR and enrols,
-// using the shared fleetclient helper so credential persistence lives in one place.
 func (r *runner) ensureEnrolled(ctx context.Context) (fleetclient.Credential, error) {
 	return fleetclient.EnsureEnrolled(ctx, r.api, r.store, r.cfg.enrolToken, fleetclient.EnrolRequest{
 		Name:         r.cfg.name,
@@ -192,12 +184,6 @@ func (r *runner) cycle(ctx context.Context, cred fleetclient.Credential) error {
 	if err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
-	// Version skew (#412): if this agent is below the control plane's minimum, it will be refused work
-	// server-side anyway — surface a clear update instruction. If the control plane is DEMONSTRABLY
-	// older than this agent requires, refuse to claim this cycle. This check fails OPEN (availability):
-	// an empty or unparseable control-plane version (e.g. an untagged "devel" build) is treated as
-	// "unknown, proceed" — only a parseable CP version strictly below the floor skips the cycle. (This
-	// is the opposite of the SERVER-side agent-version check, which fails closed for security.)
 	if !fleetversion.MeetsFloor(agentVersion, hb.MinSupportedAgentVersion) {
 		log.Printf("version skew: agent %s is below the control plane minimum %s — update this agent", agentVersion, hb.MinSupportedAgentVersion)
 	}
@@ -220,7 +206,6 @@ func (r *runner) cycle(ctx context.Context, cred fleetclient.Credential) error {
 	return nil
 }
 
-// handle runs one order to completion, reporting a terminal result either way.
 func (r *runner) handle(ctx context.Context, cred fleetclient.Credential, o fleetclient.Order) {
 	if o.Capability != "" && o.Capability != hostInventoryCapability {
 		_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "unsupported capability: "+o.Capability)
@@ -234,25 +219,33 @@ func (r *runner) handle(ctx context.Context, cred fleetclient.Credential, o flee
 		_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "collect: "+err.Error())
 		return
 	}
-	// Keep a durable local copy first (the buffer survives a transient reporting failure). If buffering
-	// fails the inventory is lost, so the order is not a success.
 	if err := r.buffer(o.ID, inv); err != nil {
 		log.Printf("order %s: buffer: %v", o.ID, err)
 		_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "buffer inventory: "+err.Error())
 		return
 	}
-	// Report the inventory to the control plane, which persists the host into the asset model (#446).
-	// The control plane records the coverage/degraded flags on the asset. If reporting fails the data
-	// did not land, so the order is not a clean success — fail it (the local buffer preserves the data).
-	if err := r.api.SendHostInventory(ctx, cred.Token, inv); err != nil {
+	if resolved, ok := r.api.(hostInventoryResolvedAPI); ok {
+		resp, reportErr := resolved.SendHostInventoryResolved(ctx, cred.Token, inv)
+		if reportErr != nil {
+			log.Printf("order %s: report inventory: %v", o.ID, reportErr)
+			_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "report inventory: "+reportErr.Error())
+			return
+		}
+		if resp.AssetID == "" {
+			_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "report inventory: control plane returned no canonical asset id")
+			return
+		}
+		cred.AssetID = resp.AssetID
+		if err := r.store.Persist(cred, nil); err != nil {
+			log.Printf("order %s: persist canonical asset binding: %v", o.ID, err)
+			_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "persist canonical asset binding: "+err.Error())
+			return
+		}
+	} else if err := r.api.SendHostInventory(ctx, cred.Token, inv); err != nil {
 		log.Printf("order %s: report inventory: %v", o.ID, err)
 		_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "report inventory: "+err.Error())
 		return
 	}
-	// Fail closed when the collected package data is untrustworthy (a package DB that exists but could
-	// not be read): a consumer must never treat a poisoned inventory as a clean success. An inventory
-	// that is merely incomplete for expected reasons (dimensions not yet collected) still succeeds, with
-	// the incompleteness stated in the reason and preserved on the persisted asset.
 	status := "succeeded"
 	if inv.Degraded() {
 		status = "failed"
@@ -262,7 +255,6 @@ func (r *runner) handle(ctx context.Context, cred fleetclient.Credential, o flee
 	}
 }
 
-// summary is a coverage-honest, secret-free one-liner for the result reason.
 func summary(inv hostinventory.HostInventory) string {
 	s := fmt.Sprintf("%d packages, os=%s/%s", len(inv.Packages), inv.Facts.OS, inv.Facts.OSVersion)
 	if inv.Degraded() {
@@ -274,13 +266,6 @@ func summary(inv hostinventory.HostInventory) string {
 	return s
 }
 
-// --- state persistence ---------------------------------------------------
-
-// buffer writes the collected inventory to the state dir as a local artifact and reports whether it
-// succeeded. The control plane's result endpoint records only the order outcome; this on-disk buffer
-// preserves the actual inventory for the forthcoming ingest surface and survives a transient
-// reporting failure. It reuses fleetclient.WriteSecret (0600 + chmod) so on-disk-secret handling is
-// not duplicated.
 func (r *runner) buffer(orderID string, inv hostinventory.HostInventory) error {
 	if err := os.MkdirAll(r.cfg.stateDir, 0o700); err != nil {
 		return fmt.Errorf("state dir: %w", err)
@@ -294,8 +279,6 @@ func (r *runner) buffer(orderID string, inv hostinventory.HostInventory) error {
 	}
 	return nil
 }
-
-// --- helpers --------------------------------------------------------------
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -330,7 +313,6 @@ func hostname() string {
 	return "synapse-agent"
 }
 
-// safe strips path separators from an order id used in a filename.
 func safe(s string) string {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
