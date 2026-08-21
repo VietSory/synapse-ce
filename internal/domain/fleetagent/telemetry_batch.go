@@ -69,8 +69,8 @@ func (m TelemetryBatchManifest) Validate() error {
 	if m.AgentSessionID == "" {
 		return fmt.Errorf("%w: telemetry batch agent session is required", shared.ErrValidation)
 	}
-	if err := m.Priority.Validate(); err != nil {
-		return err
+	if !m.Priority.Valid() {
+		return fmt.Errorf("%w: unknown delivery priority %d", shared.ErrValidation, int(m.Priority))
 	}
 	if m.Epoch == 0 || m.Sequence == 0 {
 		return fmt.Errorf("%w: telemetry batch epoch and sequence must be positive", shared.ErrValidation)
@@ -119,24 +119,36 @@ func (b SignedTelemetryBatch) Validate() error {
 	if got := SHA256Hex(b.Payload); got != b.Manifest.PayloadDigest {
 		return fmt.Errorf("%w: telemetry batch payload digest mismatch", shared.ErrValidation)
 	}
+	wantID := DeriveTelemetryBatchID(
+		b.Manifest.AgentID,
+		b.Manifest.AgentSessionID,
+		b.Manifest.StreamID,
+		b.Manifest.Epoch,
+		b.Manifest.Sequence,
+		b.Manifest.PayloadDigest,
+	)
+	if b.Manifest.BatchID != wantID {
+		return fmt.Errorf("%w: telemetry batch id %q does not match committed delivery coordinates", shared.ErrValidation, b.Manifest.BatchID)
+	}
 	return nil
 }
 
-// SignTelemetryBatch signs the canonical uncompressed manifest commitment. The
-// key id is carried outside the signature but is supplied to the verifier's
-// purpose-bound key resolver before verification.
+// SignTelemetryBatch signs the canonical uncompressed manifest commitment plus
+// KeyID. Binding KeyID into the signature prevents an intermediary from swapping
+// the resolver selector while leaving the signed payload untouched.
 func SignTelemetryBatch(manifest TelemetryBatchManifest, payload []byte, keyID string, privateKey ed25519.PrivateKey) (SignedTelemetryBatch, error) {
 	if len(privateKey) != ed25519.PrivateKeySize {
 		return SignedTelemetryBatch{}, fmt.Errorf("%w: telemetry batch requires an Ed25519 private key", shared.ErrValidation)
 	}
-	manifest.PayloadDigest = SHA256Hex(payload)
-	if err := manifest.Validate(); err != nil {
-		return SignedTelemetryBatch{}, err
-	}
 	if keyID == "" {
 		return SignedTelemetryBatch{}, fmt.Errorf("%w: telemetry batch key id is required", shared.ErrValidation)
 	}
-	msg := telemetryManifestCommitment(manifest)
+	manifest.PayloadDigest = SHA256Hex(payload)
+	manifest.BatchID = DeriveTelemetryBatchID(manifest.AgentID, manifest.AgentSessionID, manifest.StreamID, manifest.Epoch, manifest.Sequence, manifest.PayloadDigest)
+	if err := manifest.Validate(); err != nil {
+		return SignedTelemetryBatch{}, err
+	}
+	msg := telemetrySignedCommitment(manifest, keyID)
 	return SignedTelemetryBatch{
 		Manifest: manifest,
 		KeyID: keyID,
@@ -153,10 +165,30 @@ func VerifyTelemetryBatch(batch SignedTelemetryBatch, publicKey ed25519.PublicKe
 	if len(publicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: telemetry batch requires an Ed25519 public key", shared.ErrValidation)
 	}
-	if !ed25519.Verify(publicKey, telemetryManifestCommitment(batch.Manifest), batch.Signature) {
+	if !ed25519.Verify(publicKey, telemetrySignedCommitment(batch.Manifest, batch.KeyID), batch.Signature) {
 		return fmt.Errorf("%w: telemetry batch signature verification failed", shared.ErrValidation)
 	}
 	return nil
+}
+
+// VerifyTelemetryBatchWithKey is the lifecycle-aware admission gate for A3. It
+// applies the same key binding used by the other signed agent streams: telemetry
+// purpose only, canonical agent binding, exact KeyID, validity/revocation, then
+// cryptographic verification.
+func VerifyTelemetryBatchWithKey(key AgentSigningKey, now time.Time, batch SignedTelemetryBatch) error {
+	if key.Purpose != PurposeTelemetryBatch {
+		return fmt.Errorf("%w: signing key %s is for %q, not %q", shared.ErrForbidden, key.KeyID, key.Purpose, PurposeTelemetryBatch)
+	}
+	if key.AgentID != batch.Manifest.AgentID {
+		return fmt.Errorf("%w: signing key %s is bound to agent %s, not %s", shared.ErrForbidden, key.KeyID, key.AgentID, batch.Manifest.AgentID)
+	}
+	if batch.KeyID != key.KeyID {
+		return fmt.Errorf("%w: telemetry batch names key %s but was resolved as %s", shared.ErrForbidden, batch.KeyID, key.KeyID)
+	}
+	if err := key.UsableAt(now); err != nil {
+		return err
+	}
+	return VerifyTelemetryBatch(batch, key.PublicKey)
 }
 
 // DeriveTelemetryBatchID gives retries of the same committed range the same batch
@@ -180,9 +212,16 @@ func SHA256Hex(value []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func telemetryManifestCommitment(m TelemetryBatchManifest) []byte {
+func telemetrySignedCommitment(m TelemetryBatchManifest, keyID string) []byte {
 	var buf bytes.Buffer
 	writeCommitString(&buf, telemetryBatchSignatureContext)
+	writeCommitString(&buf, keyID)
+	_, _ = buf.Write(telemetryManifestCommitment(m))
+	return buf.Bytes()
+}
+
+func telemetryManifestCommitment(m TelemetryBatchManifest) []byte {
+	var buf bytes.Buffer
 	writeCommitUint64(&buf, uint64(m.ProtocolVersion))
 	writeCommitUint64(&buf, uint64(m.SchemaVersion))
 	writeCommitString(&buf, m.BatchID.String())
