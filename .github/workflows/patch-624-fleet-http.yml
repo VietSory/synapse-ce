@@ -1,0 +1,86 @@
+name: Patch 624 fleet plane
+on:
+  push:
+    branches: [feat/624-telemetry-transport]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/624-telemetry-transport
+      - name: Apply exact fleet-plane patches
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('internal/adapter/httpapi/fleet_handler.go')
+          s = p.read_text()
+          replacements = [
+          ('''\thostInv          fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
+\tminAgentVersion  string                // #412 version skew: agents below this are refused work; "" = no floor
+''', '''\thostInv          fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
+\ttelemetry        fleetTelemetryTransport
+\tsigningKeys      ports.AgentSigningKeyStore
+\ttelemetryBindings ports.TelemetryAssetBindingStore
+\tminAgentVersion  string                // #412 version skew: agents below this are refused work; "" = no floor
+'''),
+          ('''\t\t{"POST /api/v1/fleet/inventory/host", "/api/v1/fleet/inventory/",
+\t\t\tfunc(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.hostInventory)) }},
+\t}
+''', '''\t\t{"POST /api/v1/fleet/inventory/host", "/api/v1/fleet/inventory/",
+\t\t\tfunc(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.hostInventory)) }},
+\t\t{"POST /api/v1/fleet/signing-keys", "/api/v1/fleet/signing-keys",
+\t\t\tfunc(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.registerTelemetrySigningKey)) }},
+\t\t{"POST /api/v1/fleet/telemetry", "/api/v1/fleet/telemetry",
+\t\t\tfunc(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.ingestTelemetry)) }},
+\t}
+'''),
+          ('''\tres, err := f.hostInv.Sync(r.Context(), agent.ID.String(), hostinventoryuc.SyncInput{
+\t\tTenantID:  agent.TenantID,
+\t\tInventory: inv,
+\t})
+\tif err != nil {
+\t\twriteError(w, f.log, err)
+\t\treturn
+\t}
+\twriteJSON(w, http.StatusOK, map[string]any{
+''', '''\tres, err := f.hostInv.Sync(r.Context(), agent.ID.String(), hostinventoryuc.SyncInput{
+\t\tTenantID:  agent.TenantID,
+\t\tInventory: inv,
+\t})
+\tif err != nil {
+\t\twriteError(w, f.log, err)
+\t\treturn
+\t}
+\t// A3 consumes the canonical asset reconciliation result. The binding is server-owned:
+\t// the agent cannot create/change it through the telemetry body. When A3 is enabled,
+\t// binding durability is part of successful inventory ingestion; fail rather than return
+\t// an asset id the telemetry verifier cannot subsequently resolve.
+\tif f.telemetryBindings != nil {
+\t\tif err := f.telemetryBindings.BindTelemetryAsset(r.Context(), ports.TelemetryAssetBinding{
+\t\t\tTenantID: agent.TenantID, AgentID: agent.ID, AssetID: res.AssetID, UpdatedAt: time.Now().UTC(),
+\t\t}); err != nil {
+\t\t\twriteFleetTelemetryError(w, f, err)
+\t\t\treturn
+\t\t}
+\t}
+\twriteJSON(w, http.StatusOK, map[string]any{
+''')]
+          for old, new in replacements:
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'expected exactly one fleet_handler match, got {n}: {old[:80]!r}')
+              s = s.replace(old, new)
+          p.write_text(s)
+      - name: Remove patch workflow
+        run: git rm .github/workflows/patch-624-fleet-http.yml
+      - name: Commit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add internal/adapter/httpapi/fleet_handler.go
+          git commit -m 'feat(telemetry): wire authenticated fleet transport plane'
+          git push origin HEAD:feat/624-telemetry-transport
