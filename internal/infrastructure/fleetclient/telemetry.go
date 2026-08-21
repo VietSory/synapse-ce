@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
 // HostInventoryResponse returns the server-reconciled canonical asset identity. The
@@ -49,11 +50,12 @@ func (c *Client) RegisterTelemetrySigningKey(ctx context.Context, token string, 
 // highest contiguous sequence for the returned priority/epoch, never merely the
 // highest sequence observed in this request.
 type TelemetryShipResponse struct {
-	ACK       fleetagentAck `json:"ack"`
-	NewEvents int           `json:"new_events"`
+	ACK       FleetTelemetryACK `json:"ack"`
+	NewEvents int               `json:"new_events"`
 }
 
-type fleetagentAck struct {
+// FleetTelemetryACK is the client-side wire view of the server durable ACK.
+type FleetTelemetryACK struct {
 	Priority fleetagent.DeliveryPriority `json:"priority"`
 	Epoch    uint64                      `json:"epoch"`
 	Through  uint64                      `json:"through"`
@@ -135,10 +137,5 @@ func BuildTelemetrySigningKey(agentID string, private ed25519.PrivateKey, notBef
 	if !ok {
 		return fleetagent.AgentSigningKey{}, fmt.Errorf("fleetclient: telemetry private key has no Ed25519 public key")
 	}
-	return fleetagent.NewSigningKey(fleetagentID(agentID), fleetagent.PurposeTelemetryBatch, pub, notBefore, notAfter)
+	return fleetagent.NewSigningKey(shared.ID(agentID), fleetagent.PurposeTelemetryBatch, pub, notBefore, notAfter)
 }
-
-func fleetagentID(v string) fleetagentSharedID { return fleetagentSharedID(v) }
-
-// aliases keep the public client API string-based while avoiding a second identity parser.
-type fleetagentSharedID = interfaceID
