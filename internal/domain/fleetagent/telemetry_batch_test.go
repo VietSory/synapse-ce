@@ -71,6 +71,22 @@ func TestTelemetryBatchSignVerifyAndTamper(t *testing.T) {
 		}
 	})
 
+	t.Run("key id", func(t *testing.T) {
+		tampered := batch
+		tampered.KeyID = "key-other"
+		if err := VerifyTelemetryBatch(tampered, pub); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("tampered key id error = %v, want signature rejection", err)
+		}
+	})
+
+	t.Run("derived batch id", func(t *testing.T) {
+		tampered := batch
+		tampered.Manifest.BatchID = "tb_forged"
+		if err := VerifyTelemetryBatch(tampered, pub); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("forged batch id error = %v, want validation rejection", err)
+		}
+	})
+
 	t.Run("signature", func(t *testing.T) {
 		tampered := batch
 		tampered.Signature = append([]byte(nil), batch.Signature...)
@@ -79,6 +95,40 @@ func TestTelemetryBatchSignVerifyAndTamper(t *testing.T) {
 			t.Fatalf("tampered signature error = %v, want validation rejection", err)
 		}
 	})
+}
+
+func TestTelemetryBatchVerifyWithLifecycleKey(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 22, 1, 2, 3, 0, time.UTC)
+	key, err := NewSigningKey("agent-1", PurposeTelemetryBatch, pub, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`[{"event":"one"},{"event":"two"}]`)
+	batch, err := SignTelemetryBatch(validTelemetryManifest(payload), payload, key.KeyID, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyTelemetryBatchWithKey(key, now, batch); err != nil {
+		t.Fatalf("lifecycle verify: %v", err)
+	}
+
+	wrongPurpose, err := NewSigningKey("agent-1", PurposeDetectionBatch, pub, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyTelemetryBatchWithKey(wrongPurpose, now, batch); !errors.Is(err, shared.ErrForbidden) {
+		t.Fatalf("wrong-purpose key error = %v, want forbidden", err)
+	}
+
+	wrongAgent := key
+	wrongAgent.AgentID = "agent-other"
+	if err := VerifyTelemetryBatchWithKey(wrongAgent, now, batch); !errors.Is(err, shared.ErrForbidden) {
+		t.Fatalf("wrong-agent key error = %v, want forbidden", err)
+	}
 }
 
 func TestTelemetryBatchManifestRejectsSparseOrDuplicateRange(t *testing.T) {
