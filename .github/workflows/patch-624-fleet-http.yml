@@ -1,7 +1,7 @@
 name: Patch 624 fleet plane
 on:
-  push:
-    branches: [feat/624-telemetry-transport]
+  pull_request:
+    branches: [main]
 permissions:
   contents: write
 jobs:
@@ -21,11 +21,20 @@ jobs:
           replacements = [
           ('''\thostInv          fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
 \tminAgentVersion  string                // #412 version skew: agents below this are refused work; "" = no floor
-''', '''\thostInv          fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
-\ttelemetry        fleetTelemetryTransport
-\tsigningKeys      ports.AgentSigningKeyStore
+''', '''\thostInv           fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
+\ttelemetry         fleetTelemetryTransport
+\tsigningKeys       ports.AgentSigningKeyStore
 \ttelemetryBindings ports.TelemetryAssetBindingStore
-\tminAgentVersion  string                // #412 version skew: agents below this are refused work; "" = no floor
+\tnow               func() time.Time
+\tminAgentVersion   string                // #412 version skew: agents below this are refused work; "" = no floor
+'''),
+          ('''\t\tagents:           agents,
+\t\twork:             work,
+\t\tlog:              rt.log,
+''', '''\t\tagents:           agents,
+\t\twork:             work,
+\t\tnow:              now,
+\t\tlog:              rt.log,
 '''),
           ('''\t\t{"POST /api/v1/fleet/inventory/host", "/api/v1/fleet/inventory/",
 \t\t\tfunc(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.hostInventory)) }},
@@ -56,12 +65,12 @@ jobs:
 \t\treturn
 \t}
 \t// A3 consumes the canonical asset reconciliation result. The binding is server-owned:
-\t// the agent cannot create/change it through the telemetry body. When A3 is enabled,
-\t// binding durability is part of successful inventory ingestion; fail rather than return
-\t// an asset id the telemetry verifier cannot subsequently resolve.
+\t// the telemetry body can neither create nor change it. When A3 is enabled, binding
+\t// durability is part of successful inventory ingestion so a returned asset id is
+\t// immediately resolvable by the telemetry verifier.
 \tif f.telemetryBindings != nil {
 \t\tif err := f.telemetryBindings.BindTelemetryAsset(r.Context(), ports.TelemetryAssetBinding{
-\t\t\tTenantID: agent.TenantID, AgentID: agent.ID, AssetID: res.AssetID, UpdatedAt: time.Now().UTC(),
+\t\t\tTenantID: agent.TenantID, AgentID: agent.ID, AssetID: res.AssetID, UpdatedAt: f.now().UTC(),
 \t\t}); err != nil {
 \t\t\twriteFleetTelemetryError(w, f, err)
 \t\t\treturn
@@ -72,7 +81,7 @@ jobs:
           for old, new in replacements:
               n = s.count(old)
               if n != 1:
-                  raise SystemExit(f'expected exactly one fleet_handler match, got {n}: {old[:80]!r}')
+                  raise SystemExit(f'expected exactly one fleet_handler match, got {n}: {old[:100]!r}')
               s = s.replace(old, new)
           p.write_text(s)
       - name: Remove patch workflow
