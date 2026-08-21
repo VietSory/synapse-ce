@@ -60,8 +60,6 @@ func (r *runner) openTelemetrySpool(ctx context.Context, cred fleetclient.Creden
 	if cfg.MaxBytes < 1<<20 {
 		return nil, agentspool.SensorIdentity{}, fmt.Errorf("telemetry spool quota must be at least 1048576 bytes, got %d", cfg.MaxBytes)
 	}
-	// Reserve the same bounded share normalizeConfig will assign to loss
-	// evidence, so WAL sizing cannot consume the gap journal's capacity.
 	cfg.MaxGapBytes = spool.RecommendedGapBytes(cfg.MaxBytes)
 	walBytes := cfg.MaxBytes - cfg.MaxGapBytes
 	if cfg.SegmentBytes > walBytes {
@@ -78,12 +76,13 @@ func (r *runner) openTelemetrySpool(ctx context.Context, cred fleetclient.Creden
 		AgentID: agentID, AssetID: assetID, AgentSession: shared.ID(session),
 		BootID: bootID, SensorID: agentSensorID, SensorVersion: agentSensorVersion,
 	}
+	// The shipper shares this WAL with the sensor. It starts only after a canonical
+	// server asset binding exists and registers a purpose-bound signing key before
+	// any bytes leave the host. Close/cancellation is owned by startDetection.
+	r.startTelemetryShipper(ctx, durable, cred)
 	return durable, identity, nil
 }
 
-// currentBootID uses the Linux kernel boot UUID. eBPF detection is Linux-only,
-// so refusing to fabricate an incarnation on another platform is safer than a
-// stable installation id which would misclassify post-reboot sequence resets.
 func currentBootID() (shared.ID, error) {
 	if runtime.GOOS != "linux" {
 		return "", fmt.Errorf("kernel boot identity is unavailable on %s", runtime.GOOS)
