@@ -76,10 +76,6 @@ func (r *runner) openTelemetrySpool(ctx context.Context, cred fleetclient.Creden
 		AgentID: agentID, AssetID: assetID, AgentSession: shared.ID(session),
 		BootID: bootID, SensorID: agentSensorID, SensorVersion: agentSensorVersion,
 	}
-	// The shipper shares this WAL with the sensor. It starts only after a canonical
-	// server asset binding exists and registers a purpose-bound signing key before
-	// any bytes leave the host. Close/cancellation is owned by startDetection.
-	r.startTelemetryShipper(ctx, durable, cred)
 	return durable, identity, nil
 }
 
