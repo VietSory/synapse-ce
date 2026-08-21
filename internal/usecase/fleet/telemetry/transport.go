@@ -65,6 +65,13 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 	if m.AgentSessionID != wantSession {
 		return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "session_mismatch", fmt.Errorf("%w: telemetry batch session does not match authenticated enrollment session", shared.ErrForbidden))
 	}
+	wantStream, err := fleetagent.TelemetryDeliveryStreamID(agent.ID, wantSession, m.Priority)
+	if err != nil {
+		return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "delivery_stream_invalid", err)
+	}
+	if m.StreamID != wantStream {
+		return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "delivery_stream_mismatch", fmt.Errorf("%w: telemetry batch stream %q is not the server-derived delivery lane", shared.ErrForbidden, m.StreamID))
+	}
 	assetID, err := s.bindings.ResolveTelemetryAsset(ctx, agent.ID)
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) {
@@ -114,13 +121,11 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 		if env.AgentID != agent.ID || env.AssetID != assetID {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_identity_mismatch", fmt.Errorf("%w: telemetry event %d identity disagrees with authenticated binding", shared.ErrForbidden, i))
 		}
-		// v1 predates delivery identity fields and remains readable. When either optional field is present,
-		// however, it must agree with the signed/server-authoritative batch. v2 producers fill both.
+		// v1 predates delivery identity fields and remains readable. When session is present it must agree
+		// with the authenticated enrollment. Envelope.StreamID is SENSOR provenance and intentionally does
+		// NOT equal the A2 delivery-lane StreamID carried by the signed manifest.
 		if !env.AgentSessionID.IsZero() && env.AgentSessionID != shared.ID(wantSession) {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_session_mismatch", fmt.Errorf("%w: telemetry event %d session disagrees with manifest", shared.ErrForbidden, i))
-		}
-		if !env.StreamID.IsZero() && env.StreamID != m.StreamID {
-			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_stream_mismatch", fmt.Errorf("%w: telemetry event %d stream disagrees with manifest", shared.ErrValidation, i))
 		}
 		if !env.ReceivedAt.IsZero() {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "client_received_at", fmt.Errorf("%w: telemetry event %d attempts to set server received-at", shared.ErrForbidden, i))
@@ -131,7 +136,7 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 		if err := env.Validate(); err != nil {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_validation_failed", err)
 		}
-		ev, err := env.ToDetectionEvent(m.HostID)
+		ev, err := projectDetectionEvent(env, m.HostID)
 		if err != nil {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "projection_failed", err)
 		}
