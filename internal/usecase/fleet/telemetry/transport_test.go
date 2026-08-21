@@ -203,6 +203,34 @@ func TestTransportRejectsAuthenticatedAgentMismatch(t *testing.T) {
 	}
 }
 
+func TestTransportRejectsSignedAssetMismatch(t *testing.T) {
+	f := newTransportFixture(t)
+	batch := f.batch(t, 2, 1, 1)
+	batch.Manifest.AssetID = "asset-forged"
+	resigned, err := fleetagent.SignTelemetryBatch(batch.Manifest, batch.Payload, f.key.KeyID, f.private)
+	if err != nil {
+		t.Fatalf("re-sign forged asset fixture: %v", err)
+	}
+	if _, err := f.svc.IngestSigned(f.ctx, f.agent, resigned); !errors.Is(err, shared.ErrForbidden) {
+		t.Fatalf("server asset binding mismatch must be forbidden, got %v", err)
+	}
+	if !f.audit.has("telemetry.batch_rejected") {
+		t.Fatal("asset mismatch rejection must be audited")
+	}
+}
+
+func TestTransportRejectsTamperedSignature(t *testing.T) {
+	f := newTransportFixture(t)
+	batch := f.batch(t, 2, 1, 1)
+	batch.Signature[0] ^= 0xff
+	if _, err := f.svc.IngestSigned(f.ctx, f.agent, batch); err == nil {
+		t.Fatal("tampered telemetry signature was accepted")
+	}
+	if !f.audit.has("telemetry.batch_rejected") {
+		t.Fatal("signature rejection must be audited")
+	}
+}
+
 func TestTransportUnknownKeyFailsClosedAndAudited(t *testing.T) {
 	f := newTransportFixture(t)
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
