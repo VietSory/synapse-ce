@@ -9,19 +9,26 @@ import (
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	dtelemetry "github.com/KKloudTarus/synapse-ce/internal/domain/telemetry"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
 // TelemetryStore is the in-memory columnar-tier twin used inline/in dev and in tests. It upholds the same
 // contract as the Postgres tier: tenant-bucketed, tiered retention (hot -> warm-at-reduced-resolution ->
 // expiry), sampling recorded with the data, and sequence-gap visibility. It is reached only through
-// ports.TelemetryStore.
+// ports.TelemetryStore. A3 delivery state lives alongside the rows so idempotency, ACKs, explicit gaps,
+// schema provenance, and server-side asset bindings share the same tenant-scoped durability boundary.
 type TelemetryStore struct {
 	mu     sync.Mutex
 	rows   map[shared.ID][]telemetryRow        // tenant -> rows
 	losses map[shared.ID][]ports.TelemetryLoss // tenant -> first-class loss records (A0.6)
-	hot    time.Duration
-	warm   time.Duration
+
+	delivery     map[shared.ID]map[string]*memoryDeliveryLane
+	deliveryGaps map[shared.ID][]ports.TelemetryGap
+	bindings     map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding
+
+	hot  time.Duration
+	warm time.Duration
 }
 
 type telemetryRow struct {
@@ -32,13 +39,32 @@ type telemetryRow struct {
 	sampleRate         int
 	event              detection.Event
 	warm               bool
+
+	// A3 transport provenance. Legacy rows leave delivery=false and these values zero.
+	delivery       bool
+	schemaVersion  int
+	deliveryKey    string
+	deliveryStream shared.ID
+	epoch          uint64
+	canonical      *dtelemetry.TelemetryEnvelope
 }
 
 var _ ports.TelemetryStore = (*TelemetryStore)(nil)
+var _ ports.TelemetryDeliveryStore = (*TelemetryStore)(nil)
+var _ ports.TelemetryGapReader = (*TelemetryStore)(nil)
+var _ ports.TelemetryAssetBindingStore = (*TelemetryStore)(nil)
 
 // NewTelemetryStore constructs the store with the hot/warm tier boundaries (the config in ADR 0001).
 func NewTelemetryStore(hot, warm time.Duration) *TelemetryStore {
-	return &TelemetryStore{rows: map[shared.ID][]telemetryRow{}, losses: map[shared.ID][]ports.TelemetryLoss{}, hot: hot, warm: warm}
+	return &TelemetryStore{
+		rows:         map[shared.ID][]telemetryRow{},
+		losses:       map[shared.ID][]ports.TelemetryLoss{},
+		delivery:     map[shared.ID]map[string]*memoryDeliveryLane{},
+		deliveryGaps: map[shared.ID][]ports.TelemetryGap{},
+		bindings:     map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding{},
+		hot:          hot,
+		warm:         warm,
+	}
 }
 
 // RecordLoss persists a Truncated/Dropped loss record for the ctx tenant, idempotent on
@@ -62,8 +88,8 @@ func (s *TelemetryStore) RecordLoss(ctx context.Context, loss ports.TelemetryLos
 	return nil
 }
 
-// Ingest appends the batch's events, idempotent on (host, class, seq, event index). The bucket is the
-// AUTHENTICATED ctx tenant (fail-closed), never the wire batch's self-declared tenant.
+// Ingest appends the legacy batch's events, idempotent on (host, class, seq, event index). The bucket is
+// the AUTHENTICATED ctx tenant (fail-closed), never the wire batch's self-declared tenant.
 func (s *TelemetryStore) Ingest(ctx context.Context, batch ports.TelemetryBatch) error {
 	tenant, err := requireTelemetryTenant(ctx)
 	if err != nil {
@@ -73,6 +99,9 @@ func (s *TelemetryStore) Ingest(ctx context.Context, batch ports.TelemetryBatch)
 	defer s.mu.Unlock()
 	existing := make(map[string]struct{}, len(s.rows[tenant]))
 	for _, r := range s.rows[tenant] {
+		if r.delivery {
+			continue // A3 rows have a separate incarnation-aware DeliveryKey.
+		}
 		existing[rowKey(r.host, r.class, r.seq, r.idx)] = struct{}{}
 	}
 	for i, ev := range batch.Events {
@@ -87,7 +116,9 @@ func (s *TelemetryStore) Ingest(ctx context.Context, batch ports.TelemetryBatch)
 	return nil
 }
 
-// LastSequence returns the highest sequence stored for a (host, class) in the ctx tenant.
+// LastSequence returns the highest LEGACY sequence stored for a (host, class) in the ctx tenant. A3
+// delivery is ordered by its own lane/Epoch ledger; mixing that sequence into this per-class scalar would
+// invent gaps whenever a priority lane interleaves two classes.
 func (s *TelemetryStore) LastSequence(ctx context.Context, hostID shared.ID, class detection.Class) (uint64, error) {
 	tenant, err := requireTelemetryTenant(ctx)
 	if err != nil {
@@ -97,7 +128,7 @@ func (s *TelemetryStore) LastSequence(ctx context.Context, hostID shared.ID, cla
 	defer s.mu.Unlock()
 	var last uint64
 	for _, r := range s.rows[tenant] {
-		if r.host == hostID && r.class == class && r.seq > last {
+		if !r.delivery && r.host == hostID && r.class == class && r.seq > last {
 			last = r.seq
 		}
 	}
@@ -127,11 +158,15 @@ func (s *TelemetryStore) Query(ctx context.Context, q ports.HuntQuery) (ports.Hu
 				res.MaxSampleRate = r.sampleRate
 			}
 		}
-		k := r.host.String() + "\x00" + string(r.class)
-		if seqsByHostClass[k] == nil {
-			seqsByHostClass[k] = map[uint64]struct{}{}
+		// Only legacy rows participate in the legacy per-class gap detector. A3 lanes have explicit
+		// incarnation-aware gaps below; using lane sequences here would create false class gaps.
+		if !r.delivery {
+			k := r.host.String() + "\x00" + string(r.class)
+			if seqsByHostClass[k] == nil {
+				seqsByHostClass[k] = map[uint64]struct{}{}
+			}
+			seqsByHostClass[k][r.seq] = struct{}{}
 		}
-		seqsByHostClass[k][r.seq] = struct{}{}
 	}
 	res.SequenceGaps = detectSeqGaps(seqsByHostClass)
 	// First-class losses intersecting the window (by host/asset/class/time, like the events). Any loss
@@ -142,7 +177,14 @@ func (s *TelemetryStore) Query(ctx context.Context, q ports.HuntQuery) (ports.Hu
 		}
 	}
 	sort.Slice(res.Losses, func(i, j int) bool { return res.Losses[i].FromAt.Before(res.Losses[j].FromAt) })
-	res.Complete = !res.Sampled && len(res.SequenceGaps) == 0 && len(res.Losses) == 0
+	deliveryIncomplete := false
+	for _, g := range s.deliveryGaps[tenant] {
+		if g.ResolvedAt == nil && matchesDeliveryGapQuery(g, q) {
+			deliveryIncomplete = true
+			break
+		}
+	}
+	res.Complete = !res.Sampled && len(res.SequenceGaps) == 0 && len(res.Losses) == 0 && !deliveryIncomplete
 	res.RowsScanned = len(res.Events) // rows matched/returned, consistent with the Postgres twin
 	sort.Slice(res.Events, func(i, j int) bool { return res.Events[i].At.Before(res.Events[j].At) })
 	if q.Limit > 0 && len(res.Events) > q.Limit {
