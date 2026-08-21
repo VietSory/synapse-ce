@@ -29,11 +29,7 @@ func (f *fakeTelemetryTransport) ShipTelemetry(_ context.Context, _ string, batc
 	if f.shipErr != nil {
 		return fleetclient.TelemetryShipResponse{}, f.shipErr
 	}
-	ack := fleetclient.FleetTelemetryACK{
-		Priority: batch.Manifest.Priority,
-		Epoch:    batch.Manifest.Epoch,
-		Through:  batch.Manifest.Sequence,
-	}
+	ack := fleetclient.FleetTelemetryACK{Priority: batch.Manifest.Priority, Epoch: batch.Manifest.Epoch, Through: batch.Manifest.Sequence}
 	if f.ack != nil {
 		ack = *f.ack
 	}
@@ -87,9 +83,7 @@ func TestShipTelemetryPrioritySignsAndDeletesOnlyAfterACK(t *testing.T) {
 	api := &fakeTelemetryTransport{}
 	cred := fleetclient.Credential{AgentID: agentID.String(), AssetID: "asset-server", Token: "secret"}
 	signer := testTelemetrySigner(t, cred.AgentID)
-	r := &runner{}
-
-	shipped, _, err := r.shipTelemetryPriority(context.Background(), s, api, cred, signer, fleetagent.PriorityP3)
+	shipped, _, err := (&runner{}).shipTelemetryPriority(context.Background(), s, api, cred, signer, fleetagent.PriorityP3)
 	if err != nil || !shipped {
 		t.Fatalf("ship: shipped=%t err=%v", shipped, err)
 	}
@@ -121,7 +115,6 @@ func TestShipTelemetryPriorityRetryableFailureKeepsWAL(t *testing.T) {
 	enqueueShipperRecord(t, s, 1, time.Now().UTC())
 	api := &fakeTelemetryTransport{shipErr: &fleetclient.HTTPStatusError{StatusCode: 503, RetryAfter: 2 * time.Second}}
 	cred := fleetclient.Credential{AgentID: agentID.String(), AssetID: "asset-server", Token: "secret"}
-
 	shipped, retryAfter, err := (&runner{}).shipTelemetryPriority(context.Background(), s, api, cred, testTelemetrySigner(t, cred.AgentID), fleetagent.PriorityP3)
 	if err == nil || shipped || retryAfter != 2*time.Second {
 		t.Fatalf("expected retryable 503, shipped=%t retry=%s err=%v", shipped, retryAfter, err)
