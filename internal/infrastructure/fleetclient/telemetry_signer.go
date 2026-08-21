@@ -68,9 +68,9 @@ func (s *CredentialStore) EnsureTelemetrySigner(agentID string, now time.Time) (
 	persisted := persistedTelemetrySigner{
 		PrivateKeyB64: base64.StdEncoding.EncodeToString(priv), NotBefore: key.NotBefore, NotAfter: key.NotAfter,
 	}
-	// #nosec G117 -- this is intentionally the agent's encrypted-at-rest boundary:
-	// the secret is persisted only in the agent state directory through WriteSecret
-	// below (0600) and is never serialized into an HTTP request or log entry.
+	// #nosec G117 -- this struct intentionally contains a private key. It is written
+	// only to the permission-restricted agent state file below (0600) and is never
+	// serialized into an HTTP request or log entry.
 	data, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
 		return TelemetrySigner{}, fmt.Errorf("fleetclient: marshal telemetry signer: %w", err)
