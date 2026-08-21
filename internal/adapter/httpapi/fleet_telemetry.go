@@ -97,8 +97,15 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
 		return
 	}
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
 	var batch fleetagent.SignedTelemetryBatch
-	if err := json.Unmarshal(body, &batch); err != nil {
+	if err := dec.Decode(&batch); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
+		return
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
 		return
 	}
@@ -168,12 +175,10 @@ func writeFleetTelemetryError(w http.ResponseWriter, f *fleetRouter, err error) 
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry request"})
 	case errors.Is(err, shared.ErrConflict):
 		writeJSON(w, http.StatusConflict, errorBody{Error: "telemetry conflict"})
-	case errors.Is(err, shared.ErrSaturated):
-		w.Header().Set("Retry-After", "1")
-		writeJSON(w, http.StatusTooManyRequests, errorBody{Error: "telemetry backpressure"})
 	default:
-		// Durable-store/key-registry failures are retryable server failures. Do not reflect
-		// internal details to the untrusted agent plane.
+		// The fleet-plane limiter already emits 429 + Retry-After. Runtime
+		// store/key-registry failures are 503 + Retry-After, giving A2 the two
+		// required retry classes without inventing a domain saturation sentinel.
 		f.log.Error("fleet telemetry request failed", "err", err)
 		w.Header().Set("Retry-After", "1")
 		writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "telemetry unavailable"})
