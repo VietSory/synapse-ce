@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,8 +21,6 @@ const (
 	telemetryShipBackoff    = time.Second
 )
 
-// telemetryTransport is deliberately narrower than fleetAPI so older/unit-test fakes
-// remain valid. The real *fleetclient.Client implements it.
 type telemetryTransport interface {
 	RegisterTelemetrySigningKey(context.Context, string, fleetagent.AgentSigningKey, string) error
 	ShipTelemetry(context.Context, string, fleetagent.SignedTelemetryBatch) (fleetclient.TelemetryShipResponse, error)
@@ -89,9 +86,6 @@ func (r *runner) shipTelemetryPriority(ctx context.Context, durable *spool.Spool
 	if len(records) == 0 {
 		return false, 0, nil
 	}
-	// A3 owns raw telemetry only. P2/P3 are the raw telemetry lanes, but fail
-	// closed if a future producer places another record kind there rather than
-	// accidentally signing it under the telemetry purpose.
 	if records[0].Kind != ports.SpoolRecordTelemetry {
 		return false, 0, fmt.Errorf("unexpected %s record in raw telemetry lane %s", records[0].Kind, priority)
 	}
@@ -107,8 +101,6 @@ func (r *runner) shipTelemetryPriority(ctx context.Context, durable *spool.Spool
 			if status.Retryable() {
 				return false, status.RetryAfter, err
 			}
-			// 4xx is a permanent contract/security failure for these exact bytes.
-			// Never ACK/drop them locally; operator intervention is required.
 			return false, 0, fmt.Errorf("non-retryable telemetry rejection: %w", err)
 		}
 		return false, 0, err
@@ -192,9 +184,6 @@ func buildSignedTelemetryBatch(cred fleetclient.Credential, signer fleetclient.T
 		}
 	}
 	payload = append(payload, ']')
-	// No sampling is applied by the A1→A2 adapter today. Commit the complete
-	// required policy tuple rather than an ad-hoc label so a future sampler cannot
-	// silently reuse this digest with different semantics.
 	policyDigest := fleetagent.SHA256Hex([]byte(`{"SamplingAlgorithm":"none","SamplingPolicyID":"none","Seed":"","Version":1}`))
 	manifest := fleetagent.TelemetryBatchManifest{
 		ProtocolVersion: 1, SchemaVersion: first.SchemaVersion,
@@ -226,5 +215,3 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
-
-var _ = bytes.Equal // retained as a compile-time import guard for byte-exact commitment work.
