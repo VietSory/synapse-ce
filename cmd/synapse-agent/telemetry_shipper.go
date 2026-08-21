@@ -184,7 +184,10 @@ func buildSignedTelemetryBatch(cred fleetclient.Credential, signer fleetclient.T
 		}
 	}
 	payload = append(payload, ']')
-	policyDigest := fleetagent.SHA256Hex([]byte(`{"SamplingAlgorithm":"none","SamplingPolicyID":"none","Seed":"","Version":1}`))
+	policyDigest, err := fleetagent.SamplingPolicyDigest("none", "none", "", 1)
+	if err != nil {
+		return fleetagent.SignedTelemetryBatch{}, err
+	}
 	manifest := fleetagent.TelemetryBatchManifest{
 		ProtocolVersion: 1, SchemaVersion: first.SchemaVersion,
 		AgentID: agentID, HostID: agentID, AgentSessionID: session, AssetID: assetID,
