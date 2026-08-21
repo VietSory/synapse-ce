@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 
-	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
@@ -40,4 +39,3 @@ func (s *deliveryAwareStore) Query(ctx context.Context, q ports.HuntQuery) (port
 }
 
 var _ ports.TelemetryStore = (*deliveryAwareStore)(nil)
-var _ = shared.ErrValidation // retain the package's shared-domain import boundary in architecture checks.
