@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	dtelemetry "github.com/KKloudTarus/synapse-ce/internal/domain/telemetry"
@@ -18,11 +18,11 @@ import (
 // trust boundary: authenticated agent identity, server asset binding, purpose-bound key verification,
 // exact payload commitments, then durable delivery persistence/ACK.
 type TransportService struct {
-	delivery ports.TelemetryDeliveryStore
-	keys     ports.AgentSigningKeyStore
-	bindings ports.TelemetryAssetBindingStore
-	audit    ports.AuditLogger
-	clock    ports.Clock
+	delivery  ports.TelemetryDeliveryStore
+	keys      ports.AgentSigningKeyStore
+	bindings  ports.TelemetryAssetBindingStore
+	audit     ports.AuditLogger
+	clock     ports.Clock
 	maxEvents int
 }
 
@@ -96,7 +96,7 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 		return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "payload_decode_failed", err)
 	}
 	envelopes := make([]dtelemetry.TelemetryEnvelope, 0, len(rawEvents))
-	projected := make([]detectionEventAlias, 0, len(rawEvents))
+	projected := make([]detection.Event, 0, len(rawEvents))
 	for i, raw := range rawEvents {
 		if got := fleetagent.SHA256Hex(raw); got != m.EventDigests[i] {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_digest_mismatch", fmt.Errorf("%w: telemetry event %d digest mismatch", shared.ErrValidation, i))
@@ -136,17 +136,13 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "projection_failed", err)
 		}
 		envelopes = append(envelopes, env)
-		projected = append(projected, detectionEventAlias{event: ev})
+		projected = append(projected, ev)
 	}
 
-	legacy := make([]detection.Event, len(projected))
-	for i := range projected {
-		legacy[i] = projected[i].event
-	}
 	trusted := ports.TelemetryDeliveryBatch{
 		TenantID: agent.TenantID, HostID: m.HostID, AssetID: assetID, AgentID: agent.ID,
 		AgentSessionID: wantSession, Manifest: m, KeyID: batch.KeyID,
-		Envelopes: envelopes, ProjectedEvents: legacy, ReceivedAt: now,
+		Envelopes: envelopes, ProjectedEvents: projected, ReceivedAt: now,
 	}
 	if err := trusted.Validate(); err != nil {
 		return ports.TelemetryDeliveryResult{}, err
@@ -169,10 +165,6 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 	}
 	return result, nil
 }
-
-// detectionEventAlias keeps the import list/readability around the decode loop compact while still making
-// the final trusted batch use the public detection.Event type. It has no behavior and never crosses a port.
-type detectionEventAlias struct { event detection.Event }
 
 func decodeCommittedEvents(payload []byte, want, max int) ([]json.RawMessage, error) {
 	if want <= 0 || want > max {
