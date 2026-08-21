@@ -6,15 +6,16 @@ import (
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/telemetryschema"
 )
 
 // SchemaVersion is the current canonical raw-telemetry schema version. It is stamped on every envelope so
 // the schema can evolve (A0.3, #608) without an agent-version coupling; SchemaMin..SchemaMax is the range
-// a reader accepts.
+// a reader accepts. Keep these aliases tied to telemetryschema so event and batch readers cannot drift.
 const (
-	SchemaVersion = 1
-	SchemaMin     = 1
-	SchemaMax     = 1
+	SchemaVersion = telemetryschema.Current
+	SchemaMin     = telemetryschema.MinSupported
+	SchemaMax     = telemetryschema.MaxSupported
 )
 
 // TelemetryEnvelope is the canonical unit of raw telemetry (A1, fixes D4): a class-typed observation plus
@@ -46,7 +47,7 @@ type TelemetryEnvelope struct {
 	ObservedAt     time.Time
 	ReceivedAt     time.Time
 	// Sequence is the per-stream monotonic sequence number (within one incarnation/Epoch — see #594
-	// identity conventions; the incarnation is embedded in StreamID upstream).
+	// identity conventions; the incarnation is carried by the signed A3 batch manifest).
 	Sequence        uint64
 	CoverageFlags   CoverageFlags
 	DataQuality     DataQuality
@@ -58,9 +59,12 @@ type TelemetryEnvelope struct {
 // Validate enforces a well-formed envelope: an accepted schema version, the mandatory identity, a class
 // that matches its payload, and the timestamp ordering invariant. ReceivedAt is optional (zero on the
 // agent, stamped at ingest) but, when present, must not precede ObservedAt.
+//
+// v1 remains readable for mixed fleets. v2 is the first transport-ready version and therefore requires
+// the session/boot/stream identity that lets A3 bind an event to one delivery incarnation.
 func (e TelemetryEnvelope) Validate() error {
-	if e.SchemaVersion < SchemaMin || e.SchemaVersion > SchemaMax {
-		return fmt.Errorf("%w: telemetry envelope schema version %d outside [%d,%d]", shared.ErrValidation, e.SchemaVersion, SchemaMin, SchemaMax)
+	if err := telemetryschema.Validate(e.SchemaVersion); err != nil {
+		return err
 	}
 	if e.EventID.IsZero() {
 		return fmt.Errorf("%w: telemetry envelope has no event id", shared.ErrValidation)
@@ -70,6 +74,11 @@ func (e TelemetryEnvelope) Validate() error {
 	}
 	if e.AssetID.IsZero() {
 		return fmt.Errorf("%w: telemetry envelope has no asset id", shared.ErrValidation)
+	}
+	if e.SchemaVersion >= 2 {
+		if e.AgentSessionID.IsZero() || e.BootID.IsZero() || e.StreamID.IsZero() {
+			return fmt.Errorf("%w: telemetry schema v%d requires agent-session, boot, and stream identity", shared.ErrValidation, e.SchemaVersion)
+		}
 	}
 	if e.EventClass != e.Event.Class {
 		return fmt.Errorf("%w: telemetry envelope class %q disagrees with payload class %q", shared.ErrValidation, e.EventClass, e.Event.Class)
