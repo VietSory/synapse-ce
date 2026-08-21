@@ -24,12 +24,12 @@ ALTER TABLE telemetry_events
     ADD COLUMN received_at TIMESTAMPTZ;
 
 -- The legacy writer's ON CONFLICT target is exactly
--- (tenant_id,host_id,class,seq,idx). Keep an unconditional unique index on that
--- shape so old code keeps working. A3 rows set idx=NULL; PostgreSQL's default
--- NULLS DISTINCT semantics therefore keep every A3 row outside that legacy
--- collision domain while delivery_key provides their real uniqueness.
-ALTER TABLE telemetry_events ALTER COLUMN idx DROP NOT NULL;
+-- (tenant_id,host_id,class,seq,idx). Preserve that shape as a unique index before
+-- admitting nullable idx values for A3. PostgreSQL does not permit a primary-key
+-- column to become nullable, so the old PK must be replaced first. The migration is
+-- transactional, therefore no writer can observe a window without legacy uniqueness.
 ALTER TABLE telemetry_events DROP CONSTRAINT telemetry_events_pkey;
+ALTER TABLE telemetry_events ALTER COLUMN idx DROP NOT NULL;
 ALTER TABLE telemetry_events ADD CONSTRAINT telemetry_events_pkey PRIMARY KEY (row_id);
 CREATE UNIQUE INDEX telemetry_events_legacy_delivery_uq
     ON telemetry_events (tenant_id, host_id, class, seq, idx);
