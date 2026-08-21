@@ -24,6 +24,7 @@ import (
 	clusterinventoryuc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/clusterinventory"
 	hostinventoryuc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/hostinventory"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/fleetagentuc"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
 // FleetProtoVersion is the only agent protocol version this server supports. An agent must send it
@@ -75,26 +76,34 @@ type fleetRolloutDecider interface {
 }
 
 type fleetRouter struct {
-	agents           fleetAgentService
-	work             fleetWorkService
-	clusterInv       fleetClusterInventory // optional; nil ⇒ cluster inventory ingest is not served
-	hostInv          fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
-	minAgentVersion  string                // #412 version skew: agents below this are refused work; "" = no floor
-	cpVersion        string                // control-plane version advertised to agents (min_control_plane check)
-	rollout          fleetRolloutDecider   // optional; nil ⇒ no update is ever offered (#412 req 9)
-	log              *slog.Logger
-	agentLim         *keyedLimiter // post-auth, keyed by agent id
-	ipLim            *keyedLimiter // pre-auth, keyed by client IP (throttles enrol + failed auth)
-	clientCertHeader string        // when set, a trusted proxy passes the verified client cert here
+	agents            fleetAgentService
+	work              fleetWorkService
+	clusterInv        fleetClusterInventory // optional; nil ⇒ cluster inventory ingest is not served
+	hostInv           fleetHostInventory    // optional; nil ⇒ host inventory ingest is not served
+	telemetry         fleetTelemetryTransport
+	signingKeys       ports.AgentSigningKeyStore
+	telemetryBindings ports.TelemetryAssetBindingStore
+	now               func() time.Time
+	minAgentVersion   string               // #412 version skew: agents below this are refused work; "" = no floor
+	cpVersion         string               // control-plane version advertised to agents (min_control_plane check)
+	rollout           fleetRolloutDecider  // optional; nil ⇒ no update is ever offered (#412 req 9)
+	log               *slog.Logger
+	agentLim          *keyedLimiter // post-auth, keyed by agent id
+	ipLim             *keyedLimiter // pre-auth, keyed by client IP (throttles enrol + failed auth)
+	clientCertHeader  string        // when set, a trusted proxy passes the verified client cert here
 }
 
 // SetFleet wires the untrusted agent transport plane. When nil, /api/v1/fleet is not served.
 // clientCertHeader, when non-empty, is the header a trusted mutual-TLS-terminating proxy uses to
 // pass the verified client certificate; empty disables certificate auth and uses the bearer token.
 func (rt *Router) SetFleet(agents fleetAgentService, work fleetWorkService, now func() time.Time, clientCertHeader string) {
+	if now == nil {
+		now = time.Now
+	}
 	rt.fleet = &fleetRouter{
 		agents:           agents,
 		work:             work,
+		now:              now,
 		log:              rt.log,
 		agentLim:         newKeyedLimiter(fleetRatePerMin, now),
 		ipLim:            newKeyedLimiter(fleetIPRatePerMin, now),
@@ -299,6 +308,10 @@ func fleetAgentPlaneRoutes() []fleetAgentPlaneRoute {
 			func(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.clusterInventory)) }},
 		{"POST /api/v1/fleet/inventory/host", "/api/v1/fleet/inventory/",
 			func(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.hostInventory)) }},
+		{"POST /api/v1/fleet/signing-keys", "/api/v1/fleet/signing-keys",
+			func(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.registerTelemetrySigningKey)) }},
+		{"POST /api/v1/fleet/telemetry", "/api/v1/fleet/telemetry",
+			func(f *fleetRouter) http.HandlerFunc { return f.entry(f.authed(f.ingestTelemetry)) }},
 	}
 }
 
@@ -633,6 +646,18 @@ func (f *fleetRouter) hostInventory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, f.log, err)
 		return
+	}
+	// A3 consumes the canonical asset reconciliation result. The binding is server-owned:
+	// the telemetry body can neither create nor change it. When A3 is enabled, binding
+	// durability is part of successful inventory ingestion so a returned asset id is
+	// immediately resolvable by the telemetry verifier.
+	if f.telemetryBindings != nil {
+		if err := f.telemetryBindings.BindTelemetryAsset(r.Context(), ports.TelemetryAssetBinding{
+			TenantID: agent.TenantID, AgentID: agent.ID, AssetID: res.AssetID, UpdatedAt: f.now().UTC(),
+		}); err != nil {
+			writeFleetTelemetryError(w, f, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id": res.AssetID.String(), "complete": res.Complete, "degraded": res.Degraded, "coverage_gaps": res.Coverage,
