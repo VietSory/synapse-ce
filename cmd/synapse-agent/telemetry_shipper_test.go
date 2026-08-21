@@ -129,6 +129,26 @@ func TestShipTelemetryPriorityRetryableFailureKeepsWAL(t *testing.T) {
 	}
 }
 
+func TestShipTelemetryPriorityNonRetryableFailureKeepsWAL(t *testing.T) {
+	agentID := shared.ID("agent-reject")
+	s := openShipperTestSpool(t, agentID)
+	enqueueShipperRecord(t, s, 1, time.Now().UTC())
+	api := &fakeTelemetryTransport{shipErr: &fleetclient.HTTPStatusError{StatusCode: 422}}
+	cred := fleetclient.Credential{AgentID: agentID.String(), AssetID: "asset-server", Token: "secret"}
+	shipped, retryAfter, err := (&runner{}).shipTelemetryPriority(context.Background(), s, api, cred, testTelemetrySigner(t, cred.AgentID), fleetagent.PriorityP3)
+	if err == nil || shipped || retryAfter != 0 {
+		t.Fatalf("expected terminal 422 rejection, shipped=%t retry=%s err=%v", shipped, retryAfter, err)
+	}
+	var status *fleetclient.HTTPStatusError
+	if !errors.As(err, &status) || status.Retryable() {
+		t.Fatalf("non-retryable contract lost: %v", err)
+	}
+	left, _ := s.PeekPriority(context.Background(), fleetagent.PriorityP3, ports.PeekSpoolRequest{})
+	if len(left) != 1 {
+		t.Fatalf("terminal HTTP rejection must not delete WAL record, left=%d", len(left))
+	}
+}
+
 func TestShipTelemetryPriorityRejectsForgedACK(t *testing.T) {
 	agentID := shared.ID("agent-ack")
 	s := openShipperTestSpool(t, agentID)
