@@ -37,8 +37,16 @@ func (r *runner) openTelemetrySpool(ctx context.Context, cred fleetclient.Creden
 		return nil, agentspool.SensorIdentity{}, err
 	}
 	agentID := shared.ID(strings.TrimSpace(cred.AgentID))
+	assetID := shared.ID(strings.TrimSpace(cred.AssetID))
 	if agentID.IsZero() {
 		return nil, agentspool.SensorIdentity{}, errors.New("enrolled credential has no canonical agent id")
+	}
+	if assetID.IsZero() {
+		return nil, agentspool.SensorIdentity{}, errors.New("control plane has not established the canonical telemetry asset binding")
+	}
+	session := fleetagent.CanonicalSessionID(agentID)
+	if session == "" {
+		return nil, agentspool.SensorIdentity{}, errors.New("cannot derive canonical agent session")
 	}
 	bootID, err := currentBootID()
 	if err != nil {
@@ -46,7 +54,7 @@ func (r *runner) openTelemetrySpool(ctx context.Context, cred fleetclient.Creden
 	}
 	cfg := spool.DefaultConfig()
 	cfg.Dir = r.telemetrySpoolDir()
-	cfg.Session = fleetagent.SessionID(agentID)
+	cfg.Session = session
 	cfg.Boot = fleetagent.BootID(bootID)
 	cfg.MaxBytes = r.cfg.spoolBytes
 	if cfg.MaxBytes < 1<<20 {
@@ -67,7 +75,7 @@ func (r *runner) openTelemetrySpool(ctx context.Context, cred fleetclient.Creden
 		return nil, agentspool.SensorIdentity{}, err
 	}
 	identity := agentspool.SensorIdentity{
-		AgentID: agentID, AssetID: agentID, AgentSession: agentID,
+		AgentID: agentID, AssetID: assetID, AgentSession: shared.ID(session),
 		BootID: bootID, SensorID: agentSensorID, SensorVersion: agentSensorVersion,
 	}
 	return durable, identity, nil
