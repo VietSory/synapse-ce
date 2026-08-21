@@ -199,6 +199,7 @@ CALL synapse_enable_tenant_rls('telemetry_asset_bindings');
 -- +goose Down
 -- Refuse a destructive rollback once the new transport has accepted data. There is no
 -- lossless representation of Epoch/session/ACK/gap provenance in the pre-0109 schema.
+-- +goose StatementBegin
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM telemetry_events WHERE delivery_key IS NOT NULL)
@@ -209,6 +210,7 @@ BEGIN
         RAISE EXCEPTION 'cannot roll back 0109: telemetry delivery provenance exists';
     END IF;
 END $$;
+-- +goose StatementEnd
 
 DROP TABLE telemetry_asset_bindings;
 DROP TABLE telemetry_gaps;
