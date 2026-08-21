@@ -23,14 +23,16 @@ ALTER TABLE telemetry_events
     ADD COLUMN delivery_key TEXT,
     ADD COLUMN received_at TIMESTAMPTZ;
 
+-- The legacy writer's ON CONFLICT target is exactly
+-- (tenant_id,host_id,class,seq,idx). Keep an unconditional unique index on that
+-- shape so old code keeps working. A3 rows set idx=NULL; PostgreSQL's default
+-- NULLS DISTINCT semantics therefore keep every A3 row outside that legacy
+-- collision domain while delivery_key provides their real uniqueness.
+ALTER TABLE telemetry_events ALTER COLUMN idx DROP NOT NULL;
 ALTER TABLE telemetry_events DROP CONSTRAINT telemetry_events_pkey;
 ALTER TABLE telemetry_events ADD CONSTRAINT telemetry_events_pkey PRIMARY KEY (row_id);
-
--- Legacy writes remain idempotent on their historical key. The predicate deliberately
--- excludes A3 rows, whose sequences can reset under a new Epoch.
 CREATE UNIQUE INDEX telemetry_events_legacy_delivery_uq
-    ON telemetry_events (tenant_id, host_id, class, seq, idx)
-    WHERE delivery_key IS NULL;
+    ON telemetry_events (tenant_id, host_id, class, seq, idx);
 
 -- A3's stable idempotency key includes agent/session/delivery-stream/priority/epoch/
 -- sequence/event-index. A resend is therefore a no-op while an Epoch reset is distinct.
@@ -38,18 +40,22 @@ CREATE UNIQUE INDEX telemetry_events_delivery_key_uq
     ON telemetry_events (tenant_id, delivery_key)
     WHERE delivery_key IS NOT NULL;
 
--- Replaces the useful leading-prefix lookup the old primary key provided.
+-- Replaces the useful leading-prefix lookup the old primary key provided. A3 rows
+-- deliberately store seq=0/idx=NULL in this compatibility table; true transport
+-- ordering lives in telemetry_delivery_sequences, so the old per-class gap detector
+-- cannot invent gaps when one priority lane interleaves several event classes.
 CREATE INDEX idx_telemetry_legacy_sequence
     ON telemetry_events (tenant_id, host_id, class, seq)
     WHERE delivery_key IS NULL;
 CREATE INDEX idx_telemetry_delivery_window
-    ON telemetry_events (tenant_id, delivery_stream_id, epoch, seq)
+    ON telemetry_events (tenant_id, delivery_stream_id, epoch, observed_at)
     WHERE delivery_key IS NOT NULL;
 CREATE INDEX idx_telemetry_schema_version
     ON telemetry_events (tenant_id, schema_version, observed_at);
 
 ALTER TABLE telemetry_events ADD CONSTRAINT telemetry_events_delivery_shape_check CHECK (
     (delivery_key IS NULL
+        AND idx IS NOT NULL
         AND agent_session_id IS NULL
         AND delivery_stream_id IS NULL
         AND delivery_priority IS NULL
@@ -60,6 +66,8 @@ ALTER TABLE telemetry_events ADD CONSTRAINT telemetry_events_delivery_shape_chec
         AND received_at IS NULL)
     OR
     (delivery_key IS NOT NULL
+        AND seq = 0
+        AND idx IS NULL
         AND agent_session_id IS NOT NULL
         AND delivery_stream_id IS NOT NULL
         AND delivery_priority BETWEEN 0 AND 3
@@ -216,6 +224,7 @@ DROP INDEX telemetry_events_legacy_delivery_uq;
 
 ALTER TABLE telemetry_events DROP CONSTRAINT telemetry_events_delivery_shape_check;
 ALTER TABLE telemetry_events DROP CONSTRAINT telemetry_events_pkey;
+ALTER TABLE telemetry_events ALTER COLUMN idx SET NOT NULL;
 ALTER TABLE telemetry_events ADD CONSTRAINT telemetry_events_pkey PRIMARY KEY (tenant_id, host_id, class, seq, idx);
 ALTER TABLE telemetry_events
     DROP COLUMN received_at,
