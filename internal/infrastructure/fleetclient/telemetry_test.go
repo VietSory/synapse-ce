@@ -1,6 +1,7 @@
 package fleetclient
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -70,5 +71,44 @@ func TestShipTelemetryPreservesRetryAfter(t *testing.T) {
 				t.Fatalf("retry contract lost: %+v", status)
 			}
 		})
+	}
+}
+
+func TestEnsureTelemetrySignerPersistsAcrossStoreRestart(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	first, err := NewCredentialStore(dir).EnsureTelemetrySigner("agent-persist", now)
+	if err != nil {
+		t.Fatalf("first signer: %v", err)
+	}
+	second, err := NewCredentialStore(dir).EnsureTelemetrySigner("agent-persist", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("reloaded signer: %v", err)
+	}
+	if first.Key.KeyID != second.Key.KeyID || !bytes.Equal(first.PrivateKey, second.PrivateKey) {
+		t.Fatalf("usable telemetry signer did not survive credential-store restart")
+	}
+	proof := fleetagent.ProveKeyPossession(second.PrivateKey, second.Key)
+	if err := fleetagent.VerifyKeyPossession(second.Key, proof); err != nil {
+		t.Fatalf("reloaded signer lost proof-of-possession: %v", err)
+	}
+}
+
+func TestEnsureTelemetrySignerRotatesAfterExpiry(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	first, err := NewCredentialStore(dir).EnsureTelemetrySigner("agent-rotate", now)
+	if err != nil {
+		t.Fatalf("first signer: %v", err)
+	}
+	second, err := NewCredentialStore(dir).EnsureTelemetrySigner("agent-rotate", first.Key.NotAfter.Add(time.Second))
+	if err != nil {
+		t.Fatalf("rotated signer: %v", err)
+	}
+	if first.Key.KeyID == second.Key.KeyID || bytes.Equal(first.PrivateKey, second.PrivateKey) {
+		t.Fatalf("expired telemetry signer was reused instead of rotated")
+	}
+	if !second.Key.NotAfter.After(first.Key.NotAfter) {
+		t.Fatalf("rotated signer did not advance validity window: first=%s second=%s", first.Key.NotAfter, second.Key.NotAfter)
 	}
 }
