@@ -67,12 +67,12 @@ func newTransportFixture(t *testing.T) *transportFixture {
 func (f *transportFixture) batch(t *testing.T, schema int, epoch, sequence uint64) fleetagent.SignedTelemetryBatch {
 	t.Helper()
 	session := fleetagent.CanonicalSessionID(f.agent.ID)
+	eventAt := f.now.Add(-time.Second + time.Duration(sequence)*time.Millisecond)
 	env, err := (normalize.Normalizer{}).Normalize(normalize.DecodedEvent{
 		Class: detection.ClassProcess, AgentID: f.agent.ID, AgentSessionID: shared.ID(session),
 		AssetID: f.assetID, BootID: shared.ID("boot-" + time.Unix(int64(epoch), 0).Format("150405")),
 		StreamID: shared.ID("sensor-process"), SensorID: "sensor", SensorVersion: "1",
-		Sequence: sequence, OccurredAt: f.now.Add(time.Duration(sequence) * time.Millisecond),
-		ObservedAt: f.now.Add(time.Duration(sequence) * time.Millisecond),
+		Sequence: sequence, OccurredAt: eventAt, ObservedAt: eventAt,
 		Process: &normalize.DecodedProcess{Kind: "exec", PID: int(sequence) + 10, PPID: 1, Comm: "proc", Path: "/usr/bin/proc", UID: 1000},
 	})
 	if err != nil {
@@ -192,7 +192,6 @@ func TestTransportRejectsAuthenticatedAgentMismatch(t *testing.T) {
 	batch.Manifest.AgentSessionID = session
 	batch.Manifest.StreamID = streamID
 	batch.Manifest.BatchID = fleetagent.DeriveTelemetryBatchID(other.ID, session, streamID, batch.Manifest.Epoch, batch.Manifest.Sequence, batch.Manifest.PayloadDigest)
-	// Structural validation passes; authorization must reject before key resolution.
 	if err := batch.Validate(); err != nil {
 		t.Fatalf("mismatch fixture must remain structurally valid: %v", err)
 	}
