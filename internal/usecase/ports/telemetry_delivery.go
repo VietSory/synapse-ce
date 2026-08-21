@@ -15,14 +15,14 @@ import (
 type TelemetryBatchState string
 
 const (
-	TelemetryStateReceived         TelemetryBatchState = "received"
-	TelemetryStateDurable          TelemetryBatchState = "telemetry_durable"
-	TelemetryStateAcknowledged     TelemetryBatchState = "acknowledged"
+	TelemetryStateReceived     TelemetryBatchState = "received"
+	TelemetryStateDurable      TelemetryBatchState = "telemetry_durable"
+	TelemetryStateAcknowledged TelemetryBatchState = "acknowledged"
 )
 
 // TelemetryDeliveryBatch is the trusted, decoded write handed to persistence after the use case has
 // authenticated identity, verified the purpose-bound signing key, checked schema/version commitments,
-// and stamped ReceivedAt. HostID is server-authoritative; the wire manifest does not get to choose it.
+// and stamped ReceivedAt. HostID is server-authoritative and must match the signed manifest.
 type TelemetryDeliveryBatch struct {
 	TenantID        shared.ID
 	HostID          shared.ID
@@ -42,7 +42,10 @@ func (b TelemetryDeliveryBatch) Validate() error {
 	if b.TenantID.IsZero() || b.HostID.IsZero() || b.AssetID.IsZero() || b.AgentID.IsZero() || b.AgentSessionID == "" {
 		return fmt.Errorf("%w: telemetry delivery identity is incomplete", shared.ErrValidation)
 	}
-	if b.Manifest.AgentID != b.AgentID || b.Manifest.AssetID != b.AssetID || b.Manifest.AgentSessionID != b.AgentSessionID {
+	if err := b.Manifest.Validate(); err != nil {
+		return err
+	}
+	if b.Manifest.HostID != b.HostID || b.Manifest.AgentID != b.AgentID || b.Manifest.AssetID != b.AssetID || b.Manifest.AgentSessionID != b.AgentSessionID {
 		return fmt.Errorf("%w: telemetry delivery identity disagrees with manifest", shared.ErrValidation)
 	}
 	if b.KeyID == "" || b.ReceivedAt.IsZero() {
@@ -50,6 +53,11 @@ func (b TelemetryDeliveryBatch) Validate() error {
 	}
 	if len(b.Envelopes) == 0 || len(b.Envelopes) != len(b.ProjectedEvents) || uint64(len(b.Envelopes)) != b.Manifest.KeptCount {
 		return fmt.Errorf("%w: telemetry delivery event counts disagree", shared.ErrValidation)
+	}
+	for i := range b.Envelopes {
+		if b.Envelopes[i].EventID != b.Manifest.EventIDs[i] {
+			return fmt.Errorf("%w: telemetry delivery event %d disagrees with manifest event id", shared.ErrValidation, i)
+		}
 	}
 	return nil
 }
