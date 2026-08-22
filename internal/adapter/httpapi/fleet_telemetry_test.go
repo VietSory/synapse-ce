@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,8 +12,78 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
+
+type fakeFleetTelemetryMux struct {
+	gapID      shared.ID
+	gapCalls   int
+	batchCalls int
+}
+
+func (f *fakeFleetTelemetryMux) IngestSigned(context.Context, *fleetagent.Agent, fleetagent.SignedTelemetryBatch) (ports.TelemetryDeliveryResult, error) {
+	f.batchCalls++
+	return ports.TelemetryDeliveryResult{}, nil
+}
+
+func (f *fakeFleetTelemetryMux) IngestGapSigned(context.Context, *fleetagent.Agent, fleetagent.SignedTelemetryGap) (shared.ID, error) {
+	f.gapCalls++
+	return f.gapID, nil
+}
+
+func TestIngestTelemetryDispatchesGapMediaType(t *testing.T) {
+	gapID := shared.ID("gap-http-dispatch")
+	transport := &fakeFleetTelemetryMux{gapID: gapID}
+	f := &fleetRouter{telemetry: transport, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	body, err := json.Marshal(fleetagent.SignedTelemetryGap{
+		Manifest: fleetagent.TelemetryGapManifest{GapID: gapID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/telemetry", bytes.NewReader(body))
+	req.Header.Set("Content-Type", fleetTelemetryGapContentType+"; charset=utf-8")
+	req = req.WithContext(context.WithValue(req.Context(), agentKeyCtx, &fleetagent.Agent{ID: "agent-gap-http"}))
+	rr := httptest.NewRecorder()
+
+	f.ingestTelemetry(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if transport.gapCalls != 1 || transport.batchCalls != 0 {
+		t.Fatalf("dispatch gapCalls=%d batchCalls=%d", transport.gapCalls, transport.batchCalls)
+	}
+	var response struct {
+		GapID shared.ID `json:"gap_id"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.GapID != gapID {
+		t.Fatalf("gap ACK=%q want=%q", response.GapID, gapID)
+	}
+}
+
+func TestIngestTelemetryGapRejectsUnknownJSONBeforeTransport(t *testing.T) {
+	transport := &fakeFleetTelemetryMux{gapID: "gap-should-not-run"}
+	f := &fleetRouter{telemetry: transport, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/telemetry", bytes.NewBufferString(`{"manifest":{"gap_id":"gap-strict"},"key_id":"key","signature":"","unexpected":true}`))
+	req.Header.Set("Content-Type", fleetTelemetryGapContentType)
+	req = req.WithContext(context.WithValue(req.Context(), agentKeyCtx, &fleetagent.Agent{ID: "agent-gap-strict"}))
+	rr := httptest.NewRecorder()
+
+	f.ingestTelemetry(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if transport.gapCalls != 0 || transport.batchCalls != 0 {
+		t.Fatalf("invalid gap reached transport: gapCalls=%d batchCalls=%d", transport.gapCalls, transport.batchCalls)
+	}
+}
 
 func TestFleetTelemetryErrorBackpressureContract(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
