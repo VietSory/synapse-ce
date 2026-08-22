@@ -57,6 +57,13 @@ type fleetAPI interface {
 	SendHostInventory(ctx context.Context, token string, inv any) error
 }
 
+// hostInventoryResolvedAPI is optional so the long-standing run-loop test doubles
+// remain source-compatible. The production fleet client implements it and returns
+// the canonical asset identity reconciled by the authenticated control plane.
+type hostInventoryResolvedAPI interface {
+	SendHostInventoryResolved(ctx context.Context, token string, inv any) (fleetclient.HostInventoryResponse, error)
+}
+
 type config struct {
 	baseURL       string
 	enrolToken    string
@@ -151,17 +158,29 @@ func (r *runner) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Agent-side detection engine (#422): a continuous background observer, separate from the
-	// per-work-order inventory cycle below. Best-effort — it never blocks or fails the inventory loop.
-	// It is given the enrolled credential so its events carry the canonical AgentID, not the display
-	// name (D1 fix, #606).
-	r.startDetection(ctx, cred)
+	// A0.1 requires the canonical server-provided asset binding before telemetry
+	// observation/signing starts. A persisted binding from an earlier host sync can
+	// start immediately; a first enrolment waits until its first successful host sync.
+	detectionStarted := false
+	if cred.AssetID != "" {
+		r.startDetection(ctx, cred)
+		detectionStarted = true
+	}
 	for {
 		if err := r.cycle(ctx, cred); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
 			log.Printf("cycle error (will retry): %v", err)
+		}
+		// handle may have learned and durably persisted the canonical AssetID. Reload
+		// after every cycle so the transport starts exactly once with the server binding.
+		if current, ok := r.store.Load(); ok && current.AgentID == cred.AgentID {
+			cred = current
+		}
+		if !detectionStarted && cred.AssetID != "" {
+			r.startDetection(ctx, cred)
+			detectionStarted = true
 		}
 		if r.cfg.once {
 			return nil
@@ -241,10 +260,26 @@ func (r *runner) handle(ctx context.Context, cred fleetclient.Credential, o flee
 		_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "buffer inventory: "+err.Error())
 		return
 	}
-	// Report the inventory to the control plane, which persists the host into the asset model (#446).
-	// The control plane records the coverage/degraded flags on the asset. If reporting fails the data
-	// did not land, so the order is not a clean success — fail it (the local buffer preserves the data).
-	if err := r.api.SendHostInventory(ctx, cred.Token, inv); err != nil {
+	// Production uses the resolved response path: the authenticated control plane
+	// returns the canonical host AssetID and the agent persists that exact value.
+	// Legacy fakes can keep the old void method without weakening production.
+	if resolved, ok := r.api.(hostInventoryResolvedAPI); ok {
+		resp, reportErr := resolved.SendHostInventoryResolved(ctx, cred.Token, inv)
+		if reportErr != nil {
+			log.Printf("order %s: report inventory: %v", o.ID, reportErr)
+			_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "report inventory: "+reportErr.Error())
+			return
+		}
+		if resp.AssetID == "" {
+			_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "report inventory: control plane returned no canonical asset id")
+			return
+		}
+		if _, err := r.store.PersistAssetBinding(cred, resp.AssetID); err != nil {
+			log.Printf("order %s: persist canonical asset binding: %v", o.ID, err)
+			_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "persist canonical asset binding: "+err.Error())
+			return
+		}
+	} else if err := r.api.SendHostInventory(ctx, cred.Token, inv); err != nil {
 		log.Printf("order %s: report inventory: %v", o.ID, err)
 		_ = r.api.SubmitResult(ctx, cred.Token, o.ID, "failed", "report inventory: "+err.Error())
 		return
