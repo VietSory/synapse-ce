@@ -46,7 +46,7 @@ func TestTelemetryAgentGapQueryableAcrossRestartAndNotResolvedByACKFill(t *testi
 		t.Fatalf("seed agent: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fleet_assets(id,tenant_id,kind,"key",name,attributes,created_at,updated_at)
-		VALUES($1,$2,'host',$3,$4,jsonb_build_object('reporting_agent_id',$5),$6,$6)`,
+		VALUES($1,$2,'host',$3,$4,jsonb_build_object('reporting_agent_id',$5::text),$6,$6)`,
 		asset.String(), tenant.String(), "machine/"+suffix, "host-"+suffix, agent.String(), now); err != nil {
 		t.Fatalf("seed asset: %v", err)
 	}
@@ -71,7 +71,6 @@ func TestTelemetryAgentGapQueryableAcrossRestartAndNotResolvedByACKFill(t *testi
 	if err := repo.RecordAgentGap(tenantCtx, gap); err != nil {
 		t.Fatalf("record agent gap: %v", err)
 	}
-	// Exact retry is idempotent.
 	if err := repo.RecordAgentGap(tenantCtx, gap); err != nil {
 		t.Fatalf("retry agent gap: %v", err)
 	}
@@ -98,7 +97,6 @@ func TestTelemetryAgentGapQueryableAcrossRestartAndNotResolvedByACKFill(t *testi
 		t.Fatalf("agent gap after repository restart = %+v, %v; want one", got, err)
 	}
 
-	// Advancing/filling the delivery ACK ledger must not resolve immutable local-loss provenance.
 	if err := restarted.SaveStreamState(tenantCtx, ports.TelemetryStreamState{
 		AgentID: agent, StreamID: stream, Epoch: 1, Contiguous: 10, UpdatedAt: now.Add(time.Second),
 	}); err != nil {
