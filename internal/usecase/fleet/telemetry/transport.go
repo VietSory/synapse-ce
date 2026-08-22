@@ -1,10 +1,12 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
@@ -109,7 +111,7 @@ func (s *TransportService) IngestSigned(ctx context.Context, agent *fleetagent.A
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_digest_mismatch", fmt.Errorf("%w: telemetry event %d digest mismatch", shared.ErrValidation, i))
 		}
 		var env dtelemetry.TelemetryEnvelope
-		if err := json.Unmarshal(raw, &env); err != nil {
+		if err := decodeStrictCommittedEvent(raw, &env); err != nil {
 			return ports.TelemetryDeliveryResult{}, s.reject(ctx, agent, batch, "event_decode_failed", fmt.Errorf("%w: decode telemetry event %d: %v", shared.ErrValidation, i, err))
 		}
 		if env.EventID != m.EventIDs[i] {
@@ -183,6 +185,26 @@ func decodeCommittedEvents(payload []byte, want, max int) ([]json.RawMessage, er
 		return nil, fmt.Errorf("%w: telemetry payload has %d events, manifest commits to %d", shared.ErrValidation, len(raw), want)
 	}
 	return raw, nil
+}
+
+// decodeStrictCommittedEvent preserves the signed schema boundary all the way into
+// canonical persistence. Silently ignoring a signed-but-unknown field would make the
+// wire commitment attest to bytes that the server then discards while materializing
+// the canonical envelope, so unknown fields and trailing JSON are rejected.
+func decodeStrictCommittedEvent(raw []byte, out *dtelemetry.TelemetryEnvelope) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *TransportService) reject(ctx context.Context, agent *fleetagent.Agent, batch fleetagent.SignedTelemetryBatch, reason string, cause error) error {
