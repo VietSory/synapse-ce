@@ -71,7 +71,13 @@ func (g TelemetryAgentGap) MonotonicExtensionOf(previous TelemetryAgentGap) bool
 	return g.FromSequence <= previous.FromSequence && g.ToSequence >= previous.ToSequence && g.Count >= previous.Count
 }
 
-type TelemetryAgentGapStore interface {
-	IngestAgentGap(ctx context.Context, gap TelemetryAgentGap) error
+// TelemetryAgentGapReader is the narrow retro-hunt view of durable agent-origin
+// loss. Hunt consumers do not need authority to write or mutate the evidence.
+type TelemetryAgentGapReader interface {
 	QueryAgentGaps(ctx context.Context, q HuntQuery) ([]TelemetryAgentGap, error)
+}
+
+type TelemetryAgentGapStore interface {
+	TelemetryAgentGapReader
+	IngestAgentGap(ctx context.Context, gap TelemetryAgentGap) error
 }
