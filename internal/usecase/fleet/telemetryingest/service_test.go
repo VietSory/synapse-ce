@@ -3,6 +3,7 @@ package telemetryingest
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/telemetry"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
@@ -29,6 +31,7 @@ func (k fakeKeys) ResolveSigningKey(_ context.Context, agentID shared.ID, keyID 
 }
 
 type harness struct {
+	t         *testing.T
 	svc       *Service
 	transport *memory.TelemetryTransportStore
 	priv      ed25519.PrivateKey
@@ -58,31 +61,77 @@ func newHarness(t *testing.T) *harness {
 	session := fleetagent.CanonicalSessionID("agent-1")
 	stream, err := fleetagent.TelemetryDeliveryStreamID("agent-1", session, fleetagent.PriorityP1)
 	if err != nil { t.Fatal(err) }
-	return &harness{svc: svc, transport: transport, priv: priv, key: key, audit: audit, now: now, ctx: ctx, stream: stream, session: session}
+	return &harness{t: t, svc: svc, transport: transport, priv: priv, key: key, audit: audit, now: now, ctx: ctx, stream: stream, session: session}
+}
+
+func (h *harness) canonicalEvent(version int, id shared.ID, sequence uint64) (EventPayload, fleetagent.EventRef) {
+	h.t.Helper()
+	observed := h.now.Add(time.Duration(sequence) * time.Millisecond)
+	ev := telemetry.TelemetryEvent{
+		Class: detection.ClassProcess,
+		Process: &telemetry.ProcessObservation{Kind: "exec", PID: 100 + int(sequence), EntityID: shared.ID("proc-" + id.String()), Comm: "test-proc"},
+	}
+	env := telemetry.TelemetryEnvelope{
+		SchemaVersion: version,
+		EventID: id, EventType: ev.EventType(), EventClass: detection.ClassProcess,
+		AgentID: "agent-1", AgentSessionID: shared.ID(h.session), AssetID: "asset-1",
+		BootID: "boot-1", StreamID: "sensor-stream-1", SensorID: "sensor-1", SensorVersion: "1",
+		OccurredAt: observed.Add(-time.Millisecond), ObservedAt: observed, Sequence: sequence,
+		Event: ev,
+	}
+	payload, err := json.Marshal(env)
+	if err != nil { h.t.Fatal(err) }
+	wrapped := EventPayload{EventID: id, Class: detection.ClassProcess, Payload: payload, ObservedAt: observed}
+	ref := fleetagent.EventRef{ID: id, Digest: fleetagent.TelemetryEventDigest(payload, "asset-1")}
+	return wrapped, ref
 }
 
 func (h *harness) signedBatch(epoch, seq, prev uint64, eventIDs ...shared.ID) IngestRequest {
+	return h.signedBatchVersion(telemetry.SchemaVersion, epoch, seq, prev, eventIDs...)
+}
+
+func (h *harness) signedBatchVersion(version int, epoch, seq, prev uint64, eventIDs ...shared.ID) IngestRequest {
+	h.t.Helper()
 	assetID := shared.ID("asset-1")
 	events := make([]EventPayload, len(eventIDs))
 	refs := make([]fleetagent.EventRef, len(eventIDs))
+	var minAt, maxAt time.Time
 	for i, id := range eventIDs {
-		payload := []byte("event-" + id.String())
-		events[i] = EventPayload{EventID: id, Class: detection.ClassProcess, Payload: payload, ObservedAt: h.now}
-		refs[i] = fleetagent.EventRef{ID: id, Digest: fleetagent.TelemetryEventDigest(payload, assetID)}
+		events[i], refs[i] = h.canonicalEvent(version, id, uint64(i+1))
+		at := events[i].ObservedAt.UTC()
+		if minAt.IsZero() || at.Before(minAt) { minAt = at }
+		if maxAt.IsZero() || at.After(maxAt) { maxAt = at }
 	}
 	m := fleetagent.TelemetryBatchManifest{
 		ProtocolVersion: fleetagent.TelemetryProtocolVersion,
-		SchemaVersion: 1,
+		SchemaVersion: version,
 		BatchID: shared.ID("batch-" + seqStr(epoch) + "-" + seqStr(seq)),
 		AgentID: "agent-1", HostID: "agent-1", AssetID: assetID, StreamID: h.stream,
 		Position: fleetagent.StreamPosition{Priority: fleetagent.PriorityP1, Epoch: epoch, Sequence: seq, Session: h.session, Boot: "boot-1"},
 		PreviousSequence: prev,
-		EventTimeMin: h.now, EventTimeMax: h.now.Add(time.Second),
+		EventTimeMin: minAt, EventTimeMax: maxAt,
 		ObservedCount: len(eventIDs), KeptCount: len(eventIDs), SamplingPolicyDigest: "spd",
 		Events: refs, PayloadDigest: fleetagent.TelemetryPayloadDigest(refs), KeyID: h.key.KeyID,
 	}
 	m.Signature = fleetagent.SignTelemetryManifest(h.priv, m)
 	return IngestRequest{Manifest: m, Events: events}
+}
+
+func (h *harness) resignPayload(req *IngestRequest, index int, mutate func(*telemetry.TelemetryEnvelope)) {
+	h.t.Helper()
+	var env telemetry.TelemetryEnvelope
+	if err := json.Unmarshal(req.Events[index].Payload, &env); err != nil { h.t.Fatal(err) }
+	mutate(&env)
+	payload, err := json.Marshal(env)
+	if err != nil { h.t.Fatal(err) }
+	req.Events[index].Payload = payload
+	for i := range req.Manifest.Events {
+		if req.Manifest.Events[i].ID == req.Events[index].EventID {
+			req.Manifest.Events[i].Digest = fleetagent.TelemetryEventDigest(payload, req.Manifest.AssetID)
+		}
+	}
+	req.Manifest.PayloadDigest = fleetagent.TelemetryPayloadDigest(req.Manifest.Events)
+	req.Manifest.Signature = fleetagent.SignTelemetryManifest(h.priv, req.Manifest)
 }
 
 func seqStr(u uint64) string { return string(rune('0' + int(u%10))) }
@@ -158,10 +207,50 @@ func TestIngestRejectsForgedHostSessionStreamAndAsset(t *testing.T) {
 			h := newHarness(t)
 			req := h.signedBatch(1,1,0,"e1")
 			tt.mutate(&req)
-			// Re-sign to prove rejection is identity-authority, not signature tampering.
 			req.Manifest.Signature = fleetagent.SignTelemetryManifest(h.priv, req.Manifest)
 			if _, err := h.svc.Ingest(h.ctx, "agent-1", req); !errors.Is(err, shared.ErrForbidden) { t.Fatalf("forged %s must be forbidden, got %v", tt.name, err) }
 		})
+	}
+}
+
+func TestIngestRejectsForgedCanonicalPayloadIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		mutate func(*telemetry.TelemetryEnvelope)
+		want error
+	}{
+		{"agent", func(e *telemetry.TelemetryEnvelope) { e.AgentID = "forged-agent" }, shared.ErrForbidden},
+		{"asset", func(e *telemetry.TelemetryEnvelope) { e.AssetID = "forged-asset" }, shared.ErrForbidden},
+		{"session", func(e *telemetry.TelemetryEnvelope) { e.AgentSessionID = "forged-session" }, shared.ErrForbidden},
+		{"boot", func(e *telemetry.TelemetryEnvelope) { e.BootID = "forged-boot" }, shared.ErrForbidden},
+		{"received-at", func(e *telemetry.TelemetryEnvelope) { e.ReceivedAt = e.ObservedAt.Add(time.Second) }, shared.ErrForbidden},
+		{"schema", func(e *telemetry.TelemetryEnvelope) { e.SchemaVersion = 1 }, shared.ErrValidation},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			req := h.signedBatchVersion(2, 1, 1, 0, "e1")
+			h.resignPayload(&req, 0, tt.mutate)
+			if _, err := h.svc.Ingest(h.ctx, "agent-1", req); !errors.Is(err, tt.want) {
+				t.Fatalf("forged canonical payload %s: want %v, got %v", tt.name, tt.want, err)
+			}
+		})
+	}
+}
+
+func TestIngestRejectsWrapperMetadataThatDisagreesWithSignedPayload(t *testing.T) {
+	h := newHarness(t)
+	req := h.signedBatch(1, 1, 0, "e1")
+	req.Events[0].Class = detection.ClassNetwork
+	if _, err := h.svc.Ingest(h.ctx, "agent-1", req); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("wrapper class mismatch must fail, got %v", err)
+	}
+
+	h = newHarness(t)
+	req = h.signedBatch(1, 1, 0, "e1")
+	req.Events[0].ObservedAt = req.Events[0].ObservedAt.Add(time.Second)
+	if _, err := h.svc.Ingest(h.ctx, "agent-1", req); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("wrapper observed-at mismatch must fail, got %v", err)
 	}
 }
 
@@ -169,9 +258,7 @@ func TestIngestAcceptsSchemaV1AndV2(t *testing.T) {
 	for _, version := range []int{1,2} {
 		t.Run(seqStr(uint64(version)), func(t *testing.T) {
 			h := newHarness(t)
-			req := h.signedBatch(1,1,0,"e1")
-			req.Manifest.SchemaVersion = version
-			req.Manifest.Signature = fleetagent.SignTelemetryManifest(h.priv, req.Manifest)
+			req := h.signedBatchVersion(version, 1, 1, 0, "e1")
 			if _, err := h.svc.Ingest(h.ctx, "agent-1", req); err != nil { t.Fatalf("schema v%d must ingest: %v", version, err) }
 		})
 	}
