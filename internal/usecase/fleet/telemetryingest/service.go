@@ -1,12 +1,11 @@
 // Package telemetryingest is the control-plane side of the A3 (#624) agent→control-plane telemetry
 // transport: it accepts a signed TelemetryBatchManifest plus its events, verifies the agent's identity,
-// signing key, and schema SERVER-SIDE (fail-closed), sequences the batch idempotently per stream
-// incarnation, persists transport gaps through the store, durably stores the events, and returns the
-// highest-contiguous ACK so the agent can delete acknowledged batches.
+// signing key, schema, canonical envelope attribution, and then sequences the batch idempotently.
 package telemetryingest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/telemetry"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/telemetryschema"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
@@ -112,10 +112,8 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 		s.reject(ctx, authAgentID, m, "asset_mismatch", now)
 		return IngestResult{}, fmt.Errorf("%w: manifest asset does not match the server-authoritative host binding", shared.ErrForbidden)
 	}
-	if err := verifyEventBinding(m, req.Events); err != nil {
-		s.reject(ctx, authAgentID, m, "event_binding", now)
-		return IngestResult{}, err
-	}
+
+	// Authenticate the compact manifest before parsing potentially expensive event payloads.
 	key, err := s.keys.ResolveSigningKey(ctx, m.AgentID, m.KeyID)
 	if err != nil {
 		s.reject(ctx, authAgentID, m, "key_unresolved", now)
@@ -129,6 +127,11 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 		s.reject(ctx, authAgentID, m, "schema_unsupported", now)
 		return IngestResult{}, err
 	}
+	if err := verifyEventBinding(m, req.Events); err != nil {
+		s.reject(ctx, authAgentID, m, "event_binding", now)
+		return IngestResult{}, err
+	}
+
 	maxEpoch, err := s.transport.MaxEpoch(ctx, m.AgentID, m.StreamID)
 	if err != nil {
 		return IngestResult{}, fmt.Errorf("read stream max epoch: %w", err)
@@ -148,10 +151,6 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 			s.reject(ctx, authAgentID, m, "forward_jump_too_large", now)
 			return IngestResult{}, fmt.Errorf("%w: telemetry batch sequence %d jumps more than %d ahead of the acked mark %d; let the ACK catch up", shared.ErrValidation, m.Position.Sequence, maxForwardGap, state.Contiguous)
 		}
-
-		// Claim the exact signed batch identity before asking AckLedger whether this sequence
-		// is already present. Otherwise a different signed payload reusing an acknowledged
-		// sequence would be mislabeled an idempotent replay and receive a destructive ACK.
 		if err := s.transport.CommitBatch(ctx, batch); err != nil {
 			if errors.Is(err, shared.ErrConflict) {
 				s.reject(ctx, authAgentID, m, "sequence_equivocation", now)
@@ -196,12 +195,16 @@ func verifyEventBinding(m fleetagent.TelemetryBatchManifest, events []EventPaylo
 		want[ref.ID] = ref.Digest
 	}
 	seen := make(map[shared.ID]struct{}, len(events))
+	var minObserved, maxObserved time.Time
 	for i, e := range events {
 		if e.EventID.IsZero() {
 			return fmt.Errorf("%w: shipped event[%d] has no id", shared.ErrValidation, i)
 		}
 		if !e.Class.Valid() {
 			return fmt.Errorf("%w: shipped event[%d] has an unknown class %q", shared.ErrValidation, i, e.Class)
+		}
+		if e.ObservedAt.IsZero() {
+			return fmt.Errorf("%w: shipped event[%d] has no observed-at timestamp", shared.ErrValidation, i)
 		}
 		if len(e.Payload) == 0 {
 			return fmt.Errorf("%w: shipped event[%d] has no payload", shared.ErrValidation, i)
@@ -217,9 +220,59 @@ func verifyEventBinding(m fleetagent.TelemetryBatchManifest, events []EventPaylo
 		if got := fleetagent.TelemetryEventDigest(e.Payload, m.AssetID); got != wantDigest {
 			return fmt.Errorf("%w: shipped event %q digest does not match the signed manifest", shared.ErrValidation, e.EventID)
 		}
+		if err := verifyCanonicalEnvelope(m, e); err != nil {
+			return fmt.Errorf("shipped event %q: %w", e.EventID, err)
+		}
+		at := e.ObservedAt.UTC()
+		if minObserved.IsZero() || at.Before(minObserved) {
+			minObserved = at
+		}
+		if maxObserved.IsZero() || at.After(maxObserved) {
+			maxObserved = at
+		}
 	}
 	if got := fleetagent.TelemetryPayloadDigest(m.Events); got != m.PayloadDigest {
 		return fmt.Errorf("%w: manifest payload digest does not match its event refs", shared.ErrValidation)
+	}
+	if len(events) > 0 && (!m.EventTimeMin.Equal(minObserved) || !m.EventTimeMax.Equal(maxObserved)) {
+		return fmt.Errorf("%w: manifest event-time bounds do not match the canonical shipped events", shared.ErrValidation)
+	}
+	return nil
+}
+
+func verifyCanonicalEnvelope(m fleetagent.TelemetryBatchManifest, e EventPayload) error {
+	var env telemetry.TelemetryEnvelope
+	if err := json.Unmarshal(e.Payload, &env); err != nil {
+		return fmt.Errorf("%w: payload is not a canonical telemetry envelope", shared.ErrValidation)
+	}
+	if err := env.Validate(); err != nil {
+		return err
+	}
+	if env.SchemaVersion != m.SchemaVersion {
+		return fmt.Errorf("%w: payload schema version %d does not match manifest version %d", shared.ErrValidation, env.SchemaVersion, m.SchemaVersion)
+	}
+	if env.EventID != e.EventID || env.EventClass != e.Class {
+		return fmt.Errorf("%w: payload event identity/class disagrees with the transport wrapper", shared.ErrValidation)
+	}
+	if !env.ObservedAt.Equal(e.ObservedAt) {
+		return fmt.Errorf("%w: payload observed-at disagrees with the transport wrapper", shared.ErrValidation)
+	}
+	if env.AgentID != m.AgentID || env.AssetID != m.AssetID {
+		return fmt.Errorf("%w: payload agent/asset identity disagrees with the server-authoritative manifest", shared.ErrForbidden)
+	}
+	wantSession := shared.ID(m.AgentSessionID())
+	if !env.AgentSessionID.IsZero() && env.AgentSessionID != wantSession {
+		return fmt.Errorf("%w: payload agent session disagrees with the server-authoritative manifest", shared.ErrForbidden)
+	}
+	wantBoot := shared.ID(m.Position.Boot)
+	if !env.BootID.IsZero() && env.BootID != wantBoot {
+		return fmt.Errorf("%w: payload boot id disagrees with the signed delivery incarnation", shared.ErrForbidden)
+	}
+	if env.SchemaVersion >= 2 && (env.AgentSessionID != wantSession || env.BootID != wantBoot || env.StreamID.IsZero()) {
+		return fmt.Errorf("%w: telemetry v2 payload is not bound to the signed agent incarnation", shared.ErrForbidden)
+	}
+	if !env.ReceivedAt.IsZero() {
+		return fmt.Errorf("%w: agent payload must not pre-stamp server-authoritative received-at", shared.ErrForbidden)
 	}
 	return nil
 }
