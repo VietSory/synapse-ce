@@ -4,9 +4,6 @@
 -- the exact batch commitment occupying each delivery sequence, and the current/history
 -- view of sequence gaps. telemetry_stream_positions remains the ACK source of truth.
 
--- fleet_agents.id is globally unique, but PostgreSQL requires a UNIQUE target whose
--- columns exactly match a composite FK. Materialize the tenant-scoped identity pair so
--- telemetry_asset_bindings can enforce that its tenant_id and agent_id belong together.
 ALTER TABLE fleet_agents
     ADD CONSTRAINT uq_fleet_agents_tenant_id UNIQUE (tenant_id, id);
 
@@ -61,9 +58,9 @@ CREATE TRIGGER fleet_assets_sync_telemetry_binding
 AFTER INSERT OR UPDATE OF attributes, updated_at ON fleet_assets
 FOR EACH ROW EXECUTE FUNCTION synapse_sync_telemetry_asset_binding();
 
--- One immutable signed-batch identity per delivery coordinate. This closes an equivocation
--- hole where a sequence already present in AckLedger could otherwise be ACKed as a duplicate
--- even if a later signed request reused that sequence for different event membership/content.
+-- One immutable signed-batch identity per delivery coordinate. The observed-time
+-- span and priority are derived from the already-verified canonical events and let
+-- missing neighboring sequences be materialized as coverage windows, not point markers.
 CREATE TABLE telemetry_batch_commits (
     tenant_id       TEXT NOT NULL REFERENCES tenants(id),
     agent_id        TEXT NOT NULL,
@@ -72,9 +69,12 @@ CREATE TABLE telemetry_batch_commits (
     sequence        BIGINT NOT NULL CHECK (sequence >= 1),
     batch_id        TEXT NOT NULL,
     asset_id        TEXT NOT NULL,
+    priority        INT NOT NULL CHECK (priority BETWEEN 0 AND 3),
     schema_version  INT NOT NULL CHECK (schema_version >= 1),
     payload_digest  TEXT NOT NULL,
-    event_count     INT NOT NULL CHECK (event_count >= 0),
+    event_count     INT NOT NULL CHECK (event_count >= 1),
+    event_time_min  TIMESTAMPTZ NOT NULL,
+    event_time_max  TIMESTAMPTZ NOT NULL CHECK (event_time_max >= event_time_min),
     committed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, agent_id, stream_id, epoch, sequence)
 );
@@ -85,16 +85,23 @@ CALL synapse_enable_tenant_rls('telemetry_batch_commits');
 CREATE TABLE telemetry_transport_gaps (
     tenant_id      TEXT NOT NULL REFERENCES tenants(id),
     agent_id       TEXT NOT NULL,
+    asset_id       TEXT NOT NULL,
     stream_id      TEXT NOT NULL,
+    priority       INT NOT NULL CHECK (priority BETWEEN 0 AND 3),
     epoch          BIGINT NOT NULL CHECK (epoch >= 1),
     from_sequence  BIGINT NOT NULL CHECK (from_sequence >= 1),
     to_sequence    BIGINT NOT NULL CHECK (to_sequence >= from_sequence),
+    from_at        TIMESTAMPTZ NOT NULL,
+    to_at          TIMESTAMPTZ NOT NULL CHECK (to_at >= from_at),
     detected_at    TIMESTAMPTZ NOT NULL,
     resolved_at    TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, agent_id, stream_id, epoch, from_sequence, to_sequence, detected_at)
 );
 CREATE INDEX idx_telemetry_transport_gaps_open
     ON telemetry_transport_gaps (tenant_id, agent_id, stream_id, epoch, from_sequence)
+    WHERE resolved_at IS NULL;
+CREATE INDEX idx_telemetry_transport_gaps_coverage
+    ON telemetry_transport_gaps (tenant_id, asset_id, priority, from_at, to_at)
     WHERE resolved_at IS NULL;
 CREATE UNIQUE INDEX uq_telemetry_transport_gaps_open_range
     ON telemetry_transport_gaps (tenant_id, agent_id, stream_id, epoch, from_sequence, to_sequence)
