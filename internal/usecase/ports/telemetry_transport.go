@@ -14,9 +14,8 @@ import (
 // deliberately separate from the columnar TelemetryStore: it holds per-stream delivery bookkeeping
 // (the highest-contiguous ACK snapshot) keyed by the incarnation-aware (AgentID, StreamID, Epoch), which
 // the columnar (host, class, sequence) store does not model. It is the durable home for the A0.4 AckLedger.
-// Transport gaps are NOT stored: ListGaps derives them from the same snapshot, so the ACK is the single
-// source of truth and a filled gap can never linger as a phantom. Every method is keyed by the AUTHENTICATED
-// agent id (never an agent-chosen wire field) and tenant-scoped from the ctx.
+// Every method is keyed by the AUTHENTICATED agent id (never an agent-chosen wire field) and tenant-scoped
+// from the ctx.
 type TelemetryTransportStore interface {
 	// StreamState returns the persisted delivery state for (agentID, streamID, epoch): the highest-contiguous
 	// acknowledged sequence, the received-but-not-yet-contiguous sequences, and the optimistic-concurrency
@@ -30,30 +29,30 @@ type TelemetryTransportStore interface {
 	// MaxEpoch returns the highest epoch this (agent, stream) has state for (0 if none), so ingest can reject
 	// a stale incarnation — a batch addressing an epoch below one the stream has already advanced past.
 	MaxEpoch(ctx context.Context, agentID, streamID shared.ID) (uint64, error)
-	// ListGaps returns the open transport gaps for (agent, stream), DERIVED from the persisted ACK snapshots
-	// (contiguous + pending → AckLedger.Gaps()) across all epochs, so a hunt/coverage query learns the window
-	// is lossy from the same source of truth the ACK uses — a filled gap disappears automatically.
+	// ListGaps returns the open transport gaps for (agent, stream), backed by the materialized durable gap
+	// rows reconciled from the persisted ACK snapshot. A filled hole is resolved rather than left open.
 	ListGaps(ctx context.Context, agentID, streamID shared.ID) ([]TelemetryGap, error)
-	// IngestBatchEvents durably persists the shipped raw telemetry events of one accepted batch, keyed by the
-	// incarnation-aware (agentID, streamID, epoch, sequence, eventID). Idempotent: a re-delivered batch stores
-	// each event at most once. Returns how many events were newly stored. The bytes are stored opaque +
-	// content-addressed by digest; interpretation/columnar-hunt is a later concern.
+	// IngestBatchEvents commits the exact signed batch identity for one delivery sequence and then persists
+	// its raw events. Idempotent replay is accepted only when BatchID, PayloadDigest, schema, asset and event
+	// count match the already-committed sequence; reusing a sequence for different content is ErrConflict.
 	IngestBatchEvents(ctx context.Context, batch TelemetryEventBatch) (int, error)
 	// CountBatchEvents returns how many events are stored for (agentID, streamID, epoch, sequence) — for tests
 	// and idempotency assertions.
 	CountBatchEvents(ctx context.Context, agentID, streamID shared.ID, epoch, sequence uint64) (int, error)
 }
 
-// TelemetryEventBatch is one accepted batch's raw events to persist durably, already verified against the
-// signed manifest (identity, key, schema, per-event digest) by the ingest usecase.
+// TelemetryEventBatch is one accepted batch's durable transport commitment plus its raw events, already
+// verified against the signed manifest (identity, key, schema, per-event digest) by the ingest usecase.
 type TelemetryEventBatch struct {
-	AgentID       shared.ID
-	StreamID      shared.ID
-	AssetID       shared.ID
-	Epoch         uint64
-	Sequence      uint64
-	SchemaVersion int
-	Events        []StoredTelemetryEvent
+	BatchID        shared.ID
+	PayloadDigest  string
+	AgentID        shared.ID
+	StreamID       shared.ID
+	AssetID        shared.ID
+	Epoch          uint64
+	Sequence       uint64
+	SchemaVersion  int
+	Events         []StoredTelemetryEvent
 }
 
 // StoredTelemetryEvent is one raw telemetry event persisted by the transport store: its stable id, class,
@@ -68,6 +67,9 @@ type StoredTelemetryEvent struct {
 
 // Validate checks the event batch is well-formed and internally consistent.
 func (b TelemetryEventBatch) Validate() error {
+	if b.BatchID.IsZero() || b.PayloadDigest == "" {
+		return fmt.Errorf("%w: telemetry event batch needs batch id and payload digest", shared.ErrValidation)
+	}
 	if b.AgentID.IsZero() || b.StreamID.IsZero() || b.AssetID.IsZero() {
 		return fmt.Errorf("%w: telemetry event batch needs agent, stream and asset ids", shared.ErrValidation)
 	}
@@ -132,9 +134,8 @@ func (s TelemetryStreamState) Validate() error {
 	return nil
 }
 
-// TelemetryGap is a DERIVED transport gap: a run of batch sequences that has not arrived for a stream
-// incarnation, computed on read from the ACK snapshot so a hunt over the window learns it is lossy from the
-// same source of truth the ACK uses. It is never persisted, so a gap that fills simply stops being returned.
+// TelemetryGap is a durable, queryable missing delivery-sequence range. The current open set is reconciled
+// from the ACK snapshot; resolved rows may remain in persistent history.
 type TelemetryGap struct {
 	AgentID      shared.ID
 	StreamID     shared.ID
@@ -147,8 +148,6 @@ type TelemetryGap struct {
 // sequence and recompute (Contiguous, Pending) with the exact A0.4 semantics.
 func (s TelemetryStreamState) LoadAckLedger() *fleetagent.AckLedger {
 	ledger := fleetagent.NewAckLedger()
-	// Seeding: observe every contiguous sequence [1..Contiguous] would be O(n); instead the AckLedger
-	// exposes a seed constructor. We reconstruct by observing the pending set on top of a contiguous base.
 	ledger.SeedContiguous(s.Contiguous)
 	for _, seq := range s.Pending {
 		ledger.Observe(seq)
