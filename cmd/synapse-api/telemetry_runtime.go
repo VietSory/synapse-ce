@@ -41,13 +41,15 @@ func wireFleetTelemetry(router *httpapi.Router, pool *pgxpool.Pool, audit ports.
 		agentGaps ports.TelemetryAgentGapStore
 	)
 	if pool != nil {
-		store = postgres.NewTelemetryRepository(pool, telemetryHotRetention, telemetryWarmRetention)
+		transportStore := postgres.NewTelemetryTransportRepository(pool, telemetryHotRetention, telemetryWarmRetention)
+		store = transportStore
 		keys = postgres.NewAgentSigningKeyRepository(pool)
-		agentGaps = postgres.NewTelemetryAgentGapRepository(pool)
+		agentGaps = transportStore
 	} else {
-		store = memory.NewTelemetryStore(telemetryHotRetention, telemetryWarmRetention)
+		transportStore := memory.NewTelemetryTransportStore(telemetryHotRetention, telemetryWarmRetention)
+		store = transportStore
 		keys = memory.NewAgentSigningKeyStore()
-		agentGaps = memory.NewTelemetryAgentGapStore()
+		agentGaps = transportStore
 	}
 	base, err := telemetryuc.NewTransportService(store, keys, store, audit, clock, fleetTelemetryMaxEvents)
 	if err != nil {
