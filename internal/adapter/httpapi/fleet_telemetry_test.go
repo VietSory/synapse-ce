@@ -111,3 +111,27 @@ func TestReadTelemetryRequestRejectsUnknownEncoding(t *testing.T) {
 		t.Fatal("unsupported content encoding must fail closed")
 	}
 }
+
+func TestDecodeFleetJSONRejectsUnknownFieldsAndTrailingValues(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unknown field", func(t *testing.T) {
+		var dst struct {
+			PublicKey string `json:"public_key"`
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/signing-keys", bytes.NewBufferString(`{"public_key":"abc","unexpected":true}`))
+		if err := decodeFleetJSON(httptest.NewRecorder(), req, fleetBodyCap, &dst); err == nil {
+			t.Fatal("unknown signing-key registration field must be rejected")
+		}
+	})
+
+	t.Run("trailing value", func(t *testing.T) {
+		var dst struct {
+			PublicKey string `json:"public_key"`
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/signing-keys", bytes.NewBufferString(`{"public_key":"abc"} {"public_key":"def"}`))
+		if err := decodeFleetJSON(httptest.NewRecorder(), req, fleetBodyCap, &dst); err == nil {
+			t.Fatal("multiple signing-key registration values must be rejected")
+		}
+	})
+}
