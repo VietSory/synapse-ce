@@ -1,14 +1,12 @@
 -- +goose Up
--- A3 (#624) tail: materialize two server-authoritative transport facts that cannot
+-- A3 (#624) tail: materialize server-authoritative transport facts that cannot
 -- safely live only in agent memory: the enrolled-agent -> canonical host-asset binding,
--- and the current/history view of sequence gaps. telemetry_stream_positions remains
--- the ACK source of truth; telemetry_transport_gaps is reconciled transactionally from
--- that snapshot so a filled hole is resolved rather than left as a phantom.
+-- the exact batch commitment occupying each delivery sequence, and the current/history
+-- view of sequence gaps. telemetry_stream_positions remains the ACK source of truth.
 
 -- fleet_agents.id is globally unique, but PostgreSQL requires a UNIQUE target whose
 -- columns exactly match a composite FK. Materialize the tenant-scoped identity pair so
--- telemetry_asset_bindings can enforce that its tenant_id and agent_id belong together
--- rather than combining an agent from one tenant with an independently valid tenant id.
+-- telemetry_asset_bindings can enforce that its tenant_id and agent_id belong together.
 ALTER TABLE fleet_agents
     ADD CONSTRAINT uq_fleet_agents_tenant_id UNIQUE (tenant_id, id);
 
@@ -26,8 +24,7 @@ CREATE INDEX idx_telemetry_asset_bindings_asset
 CALL synapse_enable_tenant_rls('telemetry_asset_bindings');
 
 -- Host inventory stamps reporting_agent_id from the authenticated actor, never the
--- request body. Keep the telemetry binding synchronized in the same asset transaction,
--- so ingest cannot race a successful host reconciliation and trust an agent-chosen asset.
+-- request body. Keep the telemetry binding synchronized in the same asset transaction.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION synapse_sync_telemetry_asset_binding()
 RETURNS TRIGGER
@@ -44,8 +41,6 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    -- A host has one active reporting fleet identity. Re-enrolment/replacement moves
-    -- ownership to the newly authenticated agent instead of leaving a stale sibling binding.
     DELETE FROM telemetry_asset_bindings
       WHERE tenant_id = NEW.tenant_id
         AND asset_id = NEW.id
@@ -65,6 +60,27 @@ $$;
 CREATE TRIGGER fleet_assets_sync_telemetry_binding
 AFTER INSERT OR UPDATE OF attributes, updated_at ON fleet_assets
 FOR EACH ROW EXECUTE FUNCTION synapse_sync_telemetry_asset_binding();
+
+-- One immutable signed-batch identity per delivery coordinate. This closes an equivocation
+-- hole where a sequence already present in AckLedger could otherwise be ACKed as a duplicate
+-- even if a later signed request reused that sequence for different event membership/content.
+CREATE TABLE telemetry_batch_commits (
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+    agent_id        TEXT NOT NULL,
+    stream_id       TEXT NOT NULL,
+    epoch           BIGINT NOT NULL CHECK (epoch >= 1),
+    sequence        BIGINT NOT NULL CHECK (sequence >= 1),
+    batch_id        TEXT NOT NULL,
+    asset_id        TEXT NOT NULL,
+    schema_version  INT NOT NULL CHECK (schema_version >= 1),
+    payload_digest  TEXT NOT NULL,
+    event_count     INT NOT NULL CHECK (event_count >= 0),
+    committed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, agent_id, stream_id, epoch, sequence)
+);
+CREATE INDEX idx_telemetry_batch_commits_batch
+    ON telemetry_batch_commits (tenant_id, batch_id);
+CALL synapse_enable_tenant_rls('telemetry_batch_commits');
 
 CREATE TABLE telemetry_transport_gaps (
     tenant_id      TEXT NOT NULL REFERENCES tenants(id),
@@ -97,6 +113,7 @@ BEGIN
 END $$;
 -- +goose StatementEnd
 DROP TABLE telemetry_transport_gaps;
+DROP TABLE telemetry_batch_commits;
 DROP TRIGGER fleet_assets_sync_telemetry_binding ON fleet_assets;
 DROP FUNCTION synapse_sync_telemetry_asset_binding();
 DROP TABLE telemetry_asset_bindings;
