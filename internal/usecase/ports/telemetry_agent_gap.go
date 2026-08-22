@@ -47,6 +47,30 @@ func (g TelemetryAgentGap) Validate() error {
 	return nil
 }
 
+// SameEvidence reports whether two rows represent the exact same signed loss evidence.
+// ReceivedAt is server-owned admission metadata and is deliberately excluded.
+func (g TelemetryAgentGap) SameEvidence(other TelemetryAgentGap) bool {
+	return g.TenantID == other.TenantID && g.HostID == other.HostID && g.AssetID == other.AssetID && g.AgentID == other.AgentID &&
+		g.AgentSessionID == other.AgentSessionID && g.StreamID == other.StreamID && g.Priority == other.Priority && g.Epoch == other.Epoch &&
+		g.GapID == other.GapID && g.KnownSequence == other.KnownSequence && g.FromSequence == other.FromSequence &&
+		g.ToSequence == other.ToSequence && g.Reason == other.Reason && g.Count == other.Count && g.OccurredAt.Equal(other.OccurredAt)
+}
+
+// MonotonicExtensionOf permits one stable local GapID to grow while it is being
+// coalesced concurrently with transport. Immutable attribution must match exactly;
+// evidence may only grow, never shrink or be re-pointed to another reason/lane.
+func (g TelemetryAgentGap) MonotonicExtensionOf(previous TelemetryAgentGap) bool {
+	if g.TenantID != previous.TenantID || g.HostID != previous.HostID || g.AssetID != previous.AssetID || g.AgentID != previous.AgentID ||
+		g.AgentSessionID != previous.AgentSessionID || g.StreamID != previous.StreamID || g.Priority != previous.Priority || g.Epoch != previous.Epoch ||
+		g.GapID != previous.GapID || g.KnownSequence != previous.KnownSequence || g.Reason != previous.Reason || !g.OccurredAt.Equal(previous.OccurredAt) {
+		return false
+	}
+	if !g.KnownSequence {
+		return g.FromSequence == 0 && g.ToSequence == 0 && g.Count >= previous.Count
+	}
+	return g.FromSequence <= previous.FromSequence && g.ToSequence >= previous.ToSequence && g.Count >= previous.Count
+}
+
 type TelemetryAgentGapStore interface {
 	IngestAgentGap(ctx context.Context, gap TelemetryAgentGap) error
 	QueryAgentGaps(ctx context.Context, q HuntQuery) ([]TelemetryAgentGap, error)
