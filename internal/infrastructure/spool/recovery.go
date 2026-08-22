@@ -55,7 +55,7 @@ func (s *Spool) recoverSegmentsLocked() (uint64, error) {
 	})
 
 	seen := make(map[string]struct{})
-	for _, candidate := range candidates {
+	for candidateIndex, candidate := range candidates {
 		path := filepath.Join(s.cfg.Dir, candidate.name)
 		if err := securePath(path, 0o600); err != nil {
 			return 0, fmt.Errorf("secure WAL segment: %w", err)
@@ -63,6 +63,19 @@ func (s *Spool) recoverSegmentsLocked() (uint64, error) {
 		frames, damaged, err := s.scanSegmentLocked(path, candidate.priority, candidate.epoch)
 		if err != nil {
 			return 0, err
+		}
+		if damaged {
+			var nextStart uint64
+			if candidateIndex+1 < len(candidates) {
+				next := candidates[candidateIndex+1]
+				if next.priority == candidate.priority && next.epoch == candidate.epoch {
+					nextStart = next.start
+				}
+			}
+			acked := s.state.ACK[ackKey(candidate.priority, candidate.epoch)]
+			if err := s.inferRecoveredSequenceGapsLocked(candidate.priority, candidate.epoch, candidate.start, nextStart, acked, frames); err != nil {
+				return 0, err
+			}
 		}
 		kept := frames[:0]
 		for _, frame := range frames {
@@ -115,6 +128,53 @@ func (s *Spool) recoverSegmentsLocked() (uint64, error) {
 		return 0, fmt.Errorf("sync recovered spool directory: %w", err)
 	}
 	return maxEpoch, nil
+}
+
+// inferRecoveredSequenceGapsLocked upgrades otherwise unknown corruption into exact
+// sequence loss when the surrounding durable metadata proves the coordinates. A
+// segment filename commits its first assigned sequence, surviving trusted headers
+// commit later coordinates, and the next segment filename bounds a damaged tail.
+// The original unknown corruption record remains durable provenance; this extra
+// known range exists so A3 can safely advance ACK across permanent local loss.
+func (s *Spool) inferRecoveredSequenceGapsLocked(priority fleetagent.DeliveryPriority, epoch, segmentStart, nextSegmentStart, acked uint64, frames []recoveredFrame) error {
+	if segmentStart == 0 {
+		return fmt.Errorf("invalid recovered segment start sequence 0")
+	}
+	sequences := make([]uint64, 0, len(frames))
+	for _, frame := range frames {
+		if frame.header.Sequence > acked {
+			sequences = append(sequences, frame.header.Sequence)
+		}
+	}
+	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
+
+	expected := segmentStart
+	if acked >= expected {
+		if acked == ^uint64(0) {
+			return nil
+		}
+		expected = acked + 1
+	}
+	for _, sequence := range sequences {
+		if sequence < expected {
+			continue
+		}
+		if sequence > expected {
+			if err := s.appendKnownGapLocked(priority, epoch, expected, sequence-1, ports.SpoolGapCorruptFrame); err != nil {
+				return fmt.Errorf("persist inferred recovered WAL gap: %w", err)
+			}
+		}
+		if sequence == ^uint64(0) {
+			return nil
+		}
+		expected = sequence + 1
+	}
+	if nextSegmentStart > expected {
+		if err := s.appendKnownGapLocked(priority, epoch, expected, nextSegmentStart-1, ports.SpoolGapCorruptFrame); err != nil {
+			return fmt.Errorf("persist inferred recovered WAL tail gap: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Spool) scanSegmentLocked(path string, expectedPriority fleetagent.DeliveryPriority, expectedEpoch uint64) ([]recoveredFrame, bool, error) {
