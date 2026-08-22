@@ -13,11 +13,11 @@ func TestIngestRejectsConflictingReplayAtAcknowledgedSequence(t *testing.T) {
 	if _, err := h.svc.Ingest(h.ctx, "agent-1", h.signedBatch(1, 1, 0, "e1")); err != nil {
 		t.Fatal(err)
 	}
-	beforeAudit := h.audit.n
+	beforeAudit := h.audit.count()
 	if _, err := h.svc.Ingest(h.ctx, "agent-1", h.signedBatch(1, 1, 0, "different-event")); !errors.Is(err, shared.ErrConflict) {
 		t.Fatalf("same sequence with different signed batch must conflict, got %v", err)
 	}
-	if h.audit.n <= beforeAudit {
+	if h.audit.count() <= beforeAudit {
 		t.Fatal("sequence equivocation must be audited")
 	}
 	if n, err := h.transport.CountBatchEvents(h.ctx, "agent-1", h.stream, 1, 1); err != nil || n != 1 {
