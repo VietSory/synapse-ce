@@ -29,8 +29,7 @@ CREATE TABLE telemetry_agent_gaps (
             AND count = to_sequence - from_sequence + 1)
         OR
         (NOT known_sequence AND from_sequence IS NULL AND to_sequence IS NULL)
-    ),
-    CHECK (received_at >= occurred_at)
+    )
 );
 CREATE INDEX idx_telemetry_agent_gaps_hunt
     ON telemetry_agent_gaps (tenant_id, host_id, asset_id, occurred_at);
