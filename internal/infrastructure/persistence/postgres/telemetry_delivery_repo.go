@@ -312,16 +312,61 @@ func reconcilePostgresTelemetryGaps(ctx context.Context, tx pgx.Tx, batch ports.
 		}
 	}
 	for _, rg := range remaining {
+		fromAt, toAt, err := postgresTelemetryGapBounds(ctx, tx, batch, rg)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO telemetry_gaps
 			(tenant_id,host_id,asset_id,agent_id,agent_session_id,stream_id,priority,epoch,from_sequence,to_sequence,from_at,to_at,detected_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			ON CONFLICT (tenant_id,stream_id,epoch,from_sequence,to_sequence) WHERE resolved_at IS NULL DO NOTHING`,
 			batch.TenantID.String(), batch.HostID.String(), batch.AssetID.String(), batch.AgentID.String(), string(batch.AgentSessionID), m.StreamID.String(),
-			int(m.Priority), int64(m.Epoch), int64(rg.From), int64(rg.To), m.EventTimeMin.UTC(), batch.ReceivedAt.UTC()); err != nil {
+			int(m.Priority), int64(m.Epoch), int64(rg.From), int64(rg.To), fromAt, toAt, batch.ReceivedAt.UTC()); err != nil {
 			return fmt.Errorf("persist telemetry gap: %w", err)
 		}
 	}
 	return nil
+}
+
+// postgresTelemetryGapBounds anchors a missing range to the persisted batches
+// immediately surrounding it. These conservative event-time bounds keep a hunt over
+// the missing interval incomplete, and late fills naturally tighten split ranges.
+func postgresTelemetryGapBounds(ctx context.Context, tx pgx.Tx, batch ports.TelemetryDeliveryBatch, rg fleetagent.SeqRange) (time.Time, time.Time, error) {
+	m := batch.Manifest
+	fromAt := m.EventTimeMin.UTC()
+	toAt := m.EventTimeMax.UTC()
+	if rg.From > 1 {
+		var previous time.Time
+		err := tx.QueryRow(ctx, `SELECT b.event_time_max
+			FROM telemetry_delivery_sequences s
+			JOIN telemetry_delivery_batches b ON b.tenant_id=s.tenant_id AND b.batch_id=s.batch_id
+			WHERE s.tenant_id=$1 AND s.stream_id=$2 AND s.epoch=$3 AND s.sequence=$4`,
+			batch.TenantID.String(), m.StreamID.String(), int64(m.Epoch), int64(rg.From-1)).Scan(&previous)
+		switch {
+		case err == nil:
+			fromAt = previous.UTC()
+		case errors.Is(err, pgx.ErrNoRows):
+		default:
+			return time.Time{}, time.Time{}, fmt.Errorf("read telemetry gap previous bound: %w", err)
+		}
+	}
+	var next time.Time
+	err := tx.QueryRow(ctx, `SELECT b.event_time_min
+		FROM telemetry_delivery_sequences s
+		JOIN telemetry_delivery_batches b ON b.tenant_id=s.tenant_id AND b.batch_id=s.batch_id
+		WHERE s.tenant_id=$1 AND s.stream_id=$2 AND s.epoch=$3 AND s.sequence=$4`,
+		batch.TenantID.String(), m.StreamID.String(), int64(m.Epoch), int64(rg.To+1)).Scan(&next)
+	switch {
+	case err == nil:
+		toAt = next.UTC()
+	case errors.Is(err, pgx.ErrNoRows):
+	default:
+		return time.Time{}, time.Time{}, fmt.Errorf("read telemetry gap next bound: %w", err)
+	}
+	if fromAt.After(toAt) {
+		return toAt, fromAt, nil
+	}
+	return fromAt, toAt, nil
 }
 
 type telemetryGapQuery struct {
