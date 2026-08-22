@@ -1,7 +1,7 @@
 name: Patch A3 telemetry gap OpenAPI once
 
 on:
-  push:
+  pull_request:
     paths:
       - ".github/workflows/patch-624-openapi.yml"
 
