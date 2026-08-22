@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	maxForwardGap   = 4096
+	maxForwardGap    = 4096
 	maxIngestRetries = 8
 )
 
@@ -62,9 +62,6 @@ type Service struct {
 	clock     ports.Clock
 }
 
-// NewService is fail-closed for the full #624 production trust boundary. The transport
-// implementation must also own the authoritative agent→asset binding; this keeps the
-// existing composition root source-compatible while preventing a partially wired ingest.
 func NewService(transport ports.TelemetryTransportStore, keys SigningKeyResolver, audit ports.AuditLogger, clock ports.Clock) (*Service, error) {
 	if transport == nil || keys == nil || audit == nil || clock == nil {
 		return nil, fmt.Errorf("%w: telemetry ingest service needs a transport store, signing-key store, audit log and clock", shared.ErrValidation)
@@ -76,11 +73,6 @@ func NewService(transport ports.TelemetryTransportStore, keys SigningKeyResolver
 	return &Service{transport: transport, keys: keys, bindings: bindings, audit: audit, clock: clock}, nil
 }
 
-// Ingest verifies and stores one telemetry batch. Every identity coordinate is
-// server-authoritative: authenticated AgentID/HostID, deterministic enrollment
-// SessionID, deterministic per-priority StreamID, and the canonical host AssetID
-// persisted by the host-inventory path. A signed payload cannot select a sibling
-// identity, host, stream, or asset.
 func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestRequest) (IngestResult, error) {
 	now := s.clock.Now().UTC()
 	m := req.Manifest
@@ -91,9 +83,6 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 		s.reject(ctx, authAgentID, m, "identity_mismatch", now)
 		return IngestResult{}, fmt.Errorf("%w: manifest agent %q is not the authenticated agent %q", shared.ErrForbidden, m.AgentID, authAgentID)
 	}
-	// A0.1 currently defines the VM host identity as the enrolled canonical agent
-	// identity. Hostname/machine-id remain reconciliation hints only; they cannot
-	// choose the security principal carried by a telemetry batch.
 	if m.HostID != authAgentID {
 		s.reject(ctx, authAgentID, m, "host_mismatch", now)
 		return IngestResult{}, fmt.Errorf("%w: manifest host %q is not the authenticated agent host %q", shared.ErrForbidden, m.HostID, authAgentID)
@@ -149,6 +138,7 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 		return IngestResult{}, fmt.Errorf("%w: telemetry batch epoch %d is behind the stream's current incarnation %d", shared.ErrValidation, m.Position.Epoch, maxEpoch)
 	}
 
+	batch := s.eventBatch(m, req.Events)
 	for attempt := 0; ; attempt++ {
 		state, err := s.transport.StreamState(ctx, m.AgentID, m.StreamID, m.Position.Epoch)
 		if err != nil {
@@ -158,12 +148,23 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 			s.reject(ctx, authAgentID, m, "forward_jump_too_large", now)
 			return IngestResult{}, fmt.Errorf("%w: telemetry batch sequence %d jumps more than %d ahead of the acked mark %d; let the ACK catch up", shared.ErrValidation, m.Position.Sequence, maxForwardGap, state.Contiguous)
 		}
+
+		// Claim the exact signed batch identity before asking AckLedger whether this sequence
+		// is already present. Otherwise a different signed payload reusing an acknowledged
+		// sequence would be mislabeled an idempotent replay and receive a destructive ACK.
+		if err := s.transport.CommitBatch(ctx, batch); err != nil {
+			if errors.Is(err, shared.ErrConflict) {
+				s.reject(ctx, authAgentID, m, "sequence_equivocation", now)
+			}
+			return IngestResult{}, fmt.Errorf("commit telemetry batch identity: %w", err)
+		}
+
 		ledger := state.LoadAckLedger()
 		if !ledger.Observe(m.Position.Sequence) {
 			s.record(ctx, authAgentID, m, "fleet.telemetry.replay", false, now)
 			return IngestResult{Accepted: false, Duplicate: true, ACK: ledger.HighestContiguous(), Provenance: ProvenanceAcknowledged}, nil
 		}
-		if _, err := s.transport.IngestBatchEvents(ctx, s.eventBatch(m, req.Events)); err != nil {
+		if _, err := s.transport.IngestBatchEvents(ctx, batch); err != nil {
 			return IngestResult{}, fmt.Errorf("store telemetry events: %w", err)
 		}
 		next := ports.TelemetryStreamState{
@@ -233,6 +234,7 @@ func (s *Service) eventBatch(m fleetagent.TelemetryBatchManifest, events []Event
 		}
 	}
 	return ports.TelemetryEventBatch{
+		BatchID: m.BatchID, PayloadDigest: m.PayloadDigest,
 		StreamID: m.StreamID, AgentID: m.AgentID, AssetID: m.AssetID,
 		Epoch: m.Position.Epoch, Sequence: m.Position.Sequence, SchemaVersion: m.SchemaVersion, Events: stored,
 	}
