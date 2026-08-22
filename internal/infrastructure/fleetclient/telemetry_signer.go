@@ -15,7 +15,10 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 )
 
-const telemetrySigningKeyLifetime = 30 * 24 * time.Hour
+const (
+	telemetrySigningKeyLifetime     = 30 * 24 * time.Hour
+	telemetrySigningKeyRotateBefore = 5 * time.Minute
+)
 
 type persistedTelemetrySigner struct {
 	PrivateKeyB64 string    `json:"private_key"`
@@ -30,14 +33,25 @@ type TelemetrySigner struct {
 	Key        fleetagent.AgentSigningKey
 }
 
+// NeedsRotation reports whether the signer is absent or too close to expiry to
+// safely start another transport cycle. Rotating slightly early absorbs bounded
+// agent/control-plane clock skew and prevents a long-running agent from getting
+// stuck signing forever with an already-expired key.
+func (s TelemetrySigner) NeedsRotation(now time.Time) bool {
+	if s.Key.KeyID == "" || s.Key.NotAfter.IsZero() {
+		return true
+	}
+	return !now.UTC().Add(telemetrySigningKeyRotateBefore).Before(s.Key.NotAfter)
+}
+
 func (s *CredentialStore) telemetrySignerPath() string {
 	return filepath.Join(s.dir, "telemetry-signing-key.json")
 }
 
-// EnsureTelemetrySigner loads a usable signer or creates one only when the signer
-// is absent/expired. Corrupt or not-yet-valid persisted state fails loud: silently
-// overwriting damaged key material would hide local state corruption and make audit
-// provenance needlessly ambiguous.
+// EnsureTelemetrySigner loads a usable signer or creates one when the signer is
+// absent, expired, or inside the bounded pre-expiry rotation window. Corrupt or
+// not-yet-valid persisted state fails loud: silently overwriting damaged key material
+// would hide local state corruption and make audit provenance needlessly ambiguous.
 func (s *CredentialStore) EnsureTelemetrySigner(agentID string, now time.Time) (TelemetrySigner, error) {
 	if agentID == "" {
 		return TelemetrySigner{}, fmt.Errorf("fleetclient: telemetry signer requires agent id")
@@ -47,7 +61,7 @@ func (s *CredentialStore) EnsureTelemetrySigner(agentID string, now time.Time) (
 	switch {
 	case loadErr == nil && now.Before(material.Key.NotBefore):
 		return TelemetrySigner{}, fmt.Errorf("fleetclient: persisted telemetry signer is not valid until %s", material.Key.NotBefore)
-	case loadErr == nil && now.Before(material.Key.NotAfter):
+	case loadErr == nil && !material.NeedsRotation(now):
 		return material, nil
 	case loadErr != nil && !errors.Is(loadErr, fs.ErrNotExist):
 		return TelemetrySigner{}, loadErr

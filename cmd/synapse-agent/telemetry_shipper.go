@@ -35,21 +35,32 @@ func (r *runner) startTelemetryShipper(ctx context.Context, durable *spool.Spool
 		log.Printf("telemetry transport disabled: canonical agent/asset binding is incomplete")
 		return
 	}
-	signer, err := r.store.EnsureTelemetrySigner(cred.AgentID, time.Now().UTC())
-	if err != nil {
-		log.Printf("telemetry transport signer unavailable: %v", err)
-		return
-	}
-	proof := fleetagent.ProveKeyPossession(signer.PrivateKey, signer.Key)
-	if err := api.RegisterTelemetrySigningKey(ctx, cred.Token, signer.Key, proof); err != nil {
-		log.Printf("telemetry signing-key registration failed (will not ship unsigned data): %v", err)
-		return
-	}
-	go r.telemetryShipLoop(ctx, durable, api, cred, signer)
+	// Registration is deliberately part of the background loop: a transient 429/5xx
+	// or network failure must not disable telemetry until the whole agent restarts.
+	go r.telemetryShipLoop(ctx, durable, api, cred)
 }
 
-func (r *runner) telemetryShipLoop(ctx context.Context, durable *spool.Spool, api telemetryTransport, cred fleetclient.Credential, signer fleetclient.TelemetrySigner) {
+func (r *runner) telemetryShipLoop(ctx context.Context, durable *spool.Spool, api telemetryTransport, cred fleetclient.Credential) {
+	var signer fleetclient.TelemetrySigner
 	for {
+		registered, err := r.ensureTelemetrySignerRegistered(ctx, api, cred, signer)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			retry, wait := telemetryRegistrationRetry(err)
+			if !retry {
+				log.Printf("telemetry signing-key registration rejected; transport disabled: %v", err)
+				return
+			}
+			log.Printf("telemetry signing-key registration failed (will retry): %v", err)
+			if !sleepContext(ctx, wait) {
+				return
+			}
+			continue
+		}
+		signer = registered
+
 		progress := false
 		for _, priority := range []fleetagent.DeliveryPriority{fleetagent.PriorityP2, fleetagent.PriorityP3} {
 			shipped, retryAfter, err := r.shipTelemetryPriority(ctx, durable, api, cred, signer, priority)
@@ -76,6 +87,42 @@ func (r *runner) telemetryShipLoop(ctx context.Context, durable *spool.Spool, ap
 			return
 		}
 	}
+}
+
+func (r *runner) ensureTelemetrySignerRegistered(ctx context.Context, api telemetryTransport, cred fleetclient.Credential, current fleetclient.TelemetrySigner) (fleetclient.TelemetrySigner, error) {
+	now := time.Now().UTC()
+	if !current.NeedsRotation(now) {
+		return current, nil
+	}
+	signer, err := r.store.EnsureTelemetrySigner(cred.AgentID, now)
+	if err != nil {
+		return fleetclient.TelemetrySigner{}, err
+	}
+	proof := fleetagent.ProveKeyPossession(signer.PrivateKey, signer.Key)
+	if err := api.RegisterTelemetrySigningKey(ctx, cred.Token, signer.Key, proof); err != nil {
+		return fleetclient.TelemetrySigner{}, err
+	}
+	return signer, nil
+}
+
+func telemetryRegistrationRetry(err error) (bool, time.Duration) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false, 0
+	}
+	var status *fleetclient.HTTPStatusError
+	if errors.As(err, &status) {
+		if !status.Retryable() {
+			return false, 0
+		}
+		wait := telemetryShipBackoff
+		if status.RetryAfter > wait {
+			wait = status.RetryAfter
+		}
+		return true, wait
+	}
+	// Network/transport errors do not carry an HTTP status. They are transient by
+	// default and use the bounded local backoff rather than permanently disabling A3.
+	return true, telemetryShipBackoff
 }
 
 func (r *runner) shipTelemetryPriority(ctx context.Context, durable *spool.Spool, api telemetryTransport, cred fleetclient.Credential, signer fleetclient.TelemetrySigner, priority fleetagent.DeliveryPriority) (bool, time.Duration, error) {

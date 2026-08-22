@@ -30,7 +30,9 @@ func (c *Client) SendHostInventoryResolved(ctx context.Context, token string, in
 }
 
 // RegisterTelemetrySigningKey proves possession of the private half before the
-// control plane persists the purpose-bound telemetry public key.
+// control plane persists the purpose-bound telemetry public key. Unlike generic
+// fleet requests, registration preserves 429/5xx status and Retry-After so the
+// agent can apply the same bounded retry contract as telemetry delivery.
 func (c *Client) RegisterTelemetrySigningKey(ctx context.Context, token string, key fleetagent.AgentSigningKey, proof string) error {
 	if err := key.Validate(); err != nil {
 		return err
@@ -38,12 +40,36 @@ func (c *Client) RegisterTelemetrySigningKey(ctx context.Context, token string, 
 	if key.Purpose != fleetagent.PurposeTelemetryBatch {
 		return fmt.Errorf("fleetclient: telemetry registration requires purpose %q", fleetagent.PurposeTelemetryBatch)
 	}
-	return c.do(ctx, http.MethodPost, "/api/v1/fleet/signing-keys", token, map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"public_key": base64.StdEncoding.EncodeToString(key.PublicKey),
 		"not_before": key.NotBefore,
 		"not_after":  key.NotAfter,
 		"proof":      proof,
-	}, nil)
+	})
+	if err != nil {
+		return fmt.Errorf("fleetclient: marshal telemetry signing-key registration: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/fleet/signing-keys", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("fleetclient: telemetry signing-key request: %w", err)
+	}
+	req.Header.Set(protoHeader, protoVersion)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("fleetclient: telemetry signing-key registration: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		status := telemetryHTTPStatusError(resp)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return status
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	return nil
 }
 
 // TelemetryShipResponse is the durable server acknowledgement. Through is the
@@ -80,6 +106,14 @@ func (e *HTTPStatusError) Retryable() bool {
 	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
+func telemetryHTTPStatusError(resp *http.Response) *HTTPStatusError {
+	h := &HTTPStatusError{StatusCode: resp.StatusCode}
+	if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
+		h.RetryAfter = time.Duration(seconds) * time.Second
+	}
+	return h
+}
+
 // ShipTelemetry sends the JSON wire value gzip-compressed. The signature already
 // commits to the canonical UNCOMPRESSED manifest/payload; HTTP compression is applied
 // only after signing and therefore cannot change the commitment.
@@ -114,10 +148,7 @@ func (c *Client) ShipTelemetry(ctx context.Context, token string, batch fleetage
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		h := &HTTPStatusError{StatusCode: resp.StatusCode}
-		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds > 0 {
-			h.RetryAfter = time.Duration(seconds) * time.Second
-		}
+		h := telemetryHTTPStatusError(resp)
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 		return out, h
 	}

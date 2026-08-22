@@ -74,6 +74,32 @@ func TestShipTelemetryPreservesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestRegisterTelemetrySigningKeyPreservesRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/signing-keys" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Retry-After", "9")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	signer, err := NewCredentialStore(t.TempDir()).EnsureTelemetrySigner("agent-register-retry", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	proof := fleetagent.ProveKeyPossession(signer.PrivateKey, signer.Key)
+	err = New(srv.URL, 5*time.Second).RegisterTelemetrySigningKey(context.Background(), "token", signer.Key, proof)
+	var status *HTTPStatusError
+	if !errors.As(err, &status) {
+		t.Fatalf("want HTTPStatusError, got %v", err)
+	}
+	if !status.Retryable() || status.RetryAfter != 9*time.Second || status.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("registration retry contract lost: %+v", status)
+	}
+}
+
 func TestEnsureTelemetrySignerPersistsAcrossStoreRestart(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -91,6 +117,22 @@ func TestEnsureTelemetrySignerPersistsAcrossStoreRestart(t *testing.T) {
 	proof := fleetagent.ProveKeyPossession(second.PrivateKey, second.Key)
 	if err := fleetagent.VerifyKeyPossession(second.Key, proof); err != nil {
 		t.Fatalf("reloaded signer lost proof-of-possession: %v", err)
+	}
+}
+
+func TestEnsureTelemetrySignerRotatesBeforeExpiry(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	first, err := NewCredentialStore(dir).EnsureTelemetrySigner("agent-rotate-early", now)
+	if err != nil {
+		t.Fatalf("first signer: %v", err)
+	}
+	second, err := NewCredentialStore(dir).EnsureTelemetrySigner("agent-rotate-early", first.Key.NotAfter.Add(-telemetrySigningKeyRotateBefore / 2))
+	if err != nil {
+		t.Fatalf("rotated signer: %v", err)
+	}
+	if first.Key.KeyID == second.Key.KeyID || bytes.Equal(first.PrivateKey, second.PrivateKey) {
+		t.Fatalf("near-expiry telemetry signer was reused instead of rotated")
 	}
 }
 

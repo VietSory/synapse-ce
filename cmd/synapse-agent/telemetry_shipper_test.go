@@ -15,13 +15,23 @@ import (
 )
 
 type fakeTelemetryTransport struct {
-	shipErr error
-	seen    []fleetagent.SignedTelemetryBatch
-	ack     *fleetclient.FleetTelemetryACK
+	shipErr       error
+	seen          []fleetagent.SignedTelemetryBatch
+	ack           *fleetclient.FleetTelemetryACK
+	registerErrs  []error
+	registerCalls int
+	registeredIDs []string
 }
 
-func (f *fakeTelemetryTransport) RegisterTelemetrySigningKey(context.Context, string, fleetagent.AgentSigningKey, string) error {
-	return nil
+func (f *fakeTelemetryTransport) RegisterTelemetrySigningKey(_ context.Context, _ string, key fleetagent.AgentSigningKey, _ string) error {
+	f.registerCalls++
+	f.registeredIDs = append(f.registeredIDs, key.KeyID)
+	if len(f.registerErrs) == 0 {
+		return nil
+	}
+	err := f.registerErrs[0]
+	f.registerErrs = f.registerErrs[1:]
+	return err
 }
 
 func (f *fakeTelemetryTransport) ShipTelemetry(_ context.Context, _ string, batch fleetagent.SignedTelemetryBatch) (fleetclient.TelemetryShipResponse, error) {
@@ -73,6 +83,36 @@ func testTelemetrySigner(t *testing.T, agentID string) fleetclient.TelemetrySign
 		t.Fatalf("signer: %v", err)
 	}
 	return signer
+}
+
+func TestEnsureTelemetrySignerRegisteredRetriesSamePersistedKeyAfter429(t *testing.T) {
+	dir := t.TempDir()
+	r := &runner{store: fleetclient.NewCredentialStore(dir)}
+	api := &fakeTelemetryTransport{registerErrs: []error{&fleetclient.HTTPStatusError{StatusCode: 429, RetryAfter: 3 * time.Second}, nil}}
+	cred := fleetclient.Credential{AgentID: "agent-register", AssetID: "asset-server", Token: "secret"}
+
+	_, err := r.ensureTelemetrySignerRegistered(context.Background(), api, cred, fleetclient.TelemetrySigner{})
+	if err == nil {
+		t.Fatal("first registration should surface 429")
+	}
+	retry, wait := telemetryRegistrationRetry(err)
+	if !retry || wait != 3*time.Second {
+		t.Fatalf("registration retry policy lost: retry=%t wait=%s err=%v", retry, wait, err)
+	}
+	registered, err := r.ensureTelemetrySignerRegistered(context.Background(), api, cred, fleetclient.TelemetrySigner{})
+	if err != nil {
+		t.Fatalf("second registration: %v", err)
+	}
+	if api.registerCalls != 2 || len(api.registeredIDs) != 2 || api.registeredIDs[0] != api.registeredIDs[1] || registered.Key.KeyID != api.registeredIDs[1] {
+		t.Fatalf("retry must reuse persisted key: calls=%d ids=%v registered=%s", api.registerCalls, api.registeredIDs, registered.Key.KeyID)
+	}
+}
+
+func TestTelemetryRegistrationRetryRejectsTerminal4xx(t *testing.T) {
+	retry, wait := telemetryRegistrationRetry(&fleetclient.HTTPStatusError{StatusCode: 422})
+	if retry || wait != 0 {
+		t.Fatalf("terminal registration rejection must not spin: retry=%t wait=%s", retry, wait)
+	}
 }
 
 func TestShipTelemetryPrioritySignsAndDeletesOnlyAfterACK(t *testing.T) {
