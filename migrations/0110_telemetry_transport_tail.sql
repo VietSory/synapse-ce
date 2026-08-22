@@ -5,6 +5,13 @@
 -- the ACK source of truth; telemetry_transport_gaps is reconciled transactionally from
 -- that snapshot so a filled hole is resolved rather than left as a phantom.
 
+-- fleet_agents.id is globally unique, but PostgreSQL requires a UNIQUE target whose
+-- columns exactly match a composite FK. Materialize the tenant-scoped identity pair so
+-- telemetry_asset_bindings can enforce that its tenant_id and agent_id belong together
+-- rather than combining an agent from one tenant with an independently valid tenant id.
+ALTER TABLE fleet_agents
+    ADD CONSTRAINT uq_fleet_agents_tenant_id UNIQUE (tenant_id, id);
+
 CREATE TABLE telemetry_asset_bindings (
     tenant_id  TEXT NOT NULL REFERENCES tenants(id),
     agent_id   TEXT NOT NULL,
@@ -93,3 +100,4 @@ DROP TABLE telemetry_transport_gaps;
 DROP TRIGGER fleet_assets_sync_telemetry_binding ON fleet_assets;
 DROP FUNCTION synapse_sync_telemetry_asset_binding();
 DROP TABLE telemetry_asset_bindings;
+ALTER TABLE fleet_agents DROP CONSTRAINT uq_fleet_agents_tenant_id;
