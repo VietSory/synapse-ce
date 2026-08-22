@@ -10,13 +10,11 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
-// TelemetryTransportStore persists the AGENT→CONTROL-PLANE transport sequencing state (A3, #624), kept
-// deliberately separate from the columnar TelemetryStore: it holds per-stream delivery bookkeeping
-// (the highest-contiguous ACK snapshot) keyed by the incarnation-aware (AgentID, StreamID, Epoch), which
-// the columnar (host, class, sequence) store does not model. It is the durable home for the A0.4 AckLedger.
-// Every method is keyed by the AUTHENTICATED agent id (never an agent-chosen wire field) and tenant-scoped
-// from the ctx.
+// TelemetryTransportStore persists the AGENT→CONTROL-PLANE transport sequencing state (A3, #624).
+// It is deliberately separate from the columnar TelemetryStore: this store owns delivery identity,
+// immutable per-sequence commitments, highest-contiguous ACK state, and explicit delivery gaps.
 type TelemetryTransportStore interface {
+	TelemetryDeliveryGapReader
 	StreamState(ctx context.Context, agentID, streamID shared.ID, epoch uint64) (TelemetryStreamState, error)
 	SaveStreamState(ctx context.Context, state TelemetryStreamState) error
 	MaxEpoch(ctx context.Context, agentID, streamID shared.ID) (uint64, error)
@@ -26,27 +24,44 @@ type TelemetryTransportStore interface {
 	// different BatchID/PayloadDigest/schema/asset/event-count at the same coordinate is ErrConflict.
 	CommitBatch(ctx context.Context, batch TelemetryEventBatch) error
 	// IngestBatchEvents persists the raw events after CommitBatch has fixed the sequence commitment.
-	// Re-delivery of identical event coordinates is a no-op; conflicting event content is ErrConflict.
 	IngestBatchEvents(ctx context.Context, batch TelemetryEventBatch) (int, error)
 	CountBatchEvents(ctx context.Context, agentID, streamID shared.ID, epoch, sequence uint64) (int, error)
 }
 
+// TelemetryDeliveryGapReader is the narrow coverage-honesty view consumed by retro-hunt. The filter is
+// tenant-scoped from ctx and windows gaps by observed-time OVERLAP, not by detection wall-clock.
+type TelemetryDeliveryGapReader interface {
+	QueryDeliveryGaps(ctx context.Context, q TelemetryGapQuery) ([]TelemetryGap, error)
+}
+
+// TelemetryGapQuery selects open A3 delivery gaps. AgentID is the canonical host identity for A0.1;
+// AssetID supports asset pivots. Priority is optional so class-specific hunts can map to P2/P3.
+type TelemetryGapQuery struct {
+	AgentID  shared.ID
+	AssetID  shared.ID
+	Priority *fleetagent.DeliveryPriority
+	Since    time.Time
+	Until    time.Time
+}
+
 // TelemetryEventBatch is one accepted batch's durable transport commitment plus its raw events, already
-// verified against the signed manifest (identity, key, schema, per-event digest) by the ingest usecase.
+// verified against the signed manifest by the ingest use case. EventTimeMin/Max are the signed observed-
+// time bounds used to conservatively anchor any missing neighboring delivery sequences.
 type TelemetryEventBatch struct {
 	BatchID       shared.ID
 	PayloadDigest string
 	AgentID       shared.ID
 	StreamID      shared.ID
 	AssetID       shared.ID
+	Priority      fleetagent.DeliveryPriority
 	Epoch         uint64
 	Sequence      uint64
 	SchemaVersion int
+	EventTimeMin  time.Time
+	EventTimeMax  time.Time
 	Events        []StoredTelemetryEvent
 }
 
-// StoredTelemetryEvent is one raw telemetry event persisted by the transport store: its stable id, class,
-// content digest (matched against the manifest), opaque shipped bytes, and source time.
 type StoredTelemetryEvent struct {
 	EventID    shared.ID
 	Class      detection.Class
@@ -62,11 +77,17 @@ func (b TelemetryEventBatch) Validate() error {
 	if b.AgentID.IsZero() || b.StreamID.IsZero() || b.AssetID.IsZero() {
 		return fmt.Errorf("%w: telemetry event batch needs agent, stream and asset ids", shared.ErrValidation)
 	}
+	if !b.Priority.Valid() {
+		return fmt.Errorf("%w: telemetry event batch has invalid priority %d", shared.ErrValidation, int(b.Priority))
+	}
 	if b.Epoch == 0 || b.Sequence == 0 {
 		return fmt.Errorf("%w: telemetry event batch needs a non-zero epoch and sequence", shared.ErrValidation)
 	}
 	if b.SchemaVersion < 1 {
 		return fmt.Errorf("%w: telemetry event batch schema version must be >= 1", shared.ErrValidation)
+	}
+	if b.EventTimeMin.IsZero() || b.EventTimeMax.IsZero() || b.EventTimeMax.Before(b.EventTimeMin) {
+		return fmt.Errorf("%w: telemetry event batch needs valid signed event-time bounds", shared.ErrValidation)
 	}
 	for i, e := range b.Events {
 		if e.EventID.IsZero() {
@@ -85,10 +106,6 @@ func (b TelemetryEventBatch) Validate() error {
 	return nil
 }
 
-// TelemetryStreamState is the durable AckLedger snapshot for one (AgentID, StreamID, Epoch): the highest
-// sequence with no hole beneath it (the ACK returned to the agent so it can delete acked batches), plus the
-// received sequences ABOVE the contiguous mark that are waiting for their gap to fill. Version is the
-// optimistic-concurrency token used by SaveStreamState.
 type TelemetryStreamState struct {
 	AgentID    shared.ID
 	StreamID   shared.ID
@@ -117,14 +134,20 @@ func (s TelemetryStreamState) Validate() error {
 	return nil
 }
 
-// TelemetryGap is a durable, queryable missing delivery-sequence range. The current open set is reconciled
-// from the ACK snapshot; resolved rows may remain in persistent history.
+// TelemetryGap is one durable open delivery-sequence loss window. FromAt..ToAt is conservative observed
+// time, allowing a hunt wholly inside the missing interval to remain incomplete even when neither received
+// neighboring batch itself falls inside that hunt.
 type TelemetryGap struct {
 	AgentID      shared.ID
+	AssetID      shared.ID
 	StreamID     shared.ID
+	Priority     fleetagent.DeliveryPriority
 	Epoch        uint64
 	FromSequence uint64
 	ToSequence   uint64
+	FromAt       time.Time
+	ToAt         time.Time
+	DetectedAt   time.Time
 }
 
 func (s TelemetryStreamState) LoadAckLedger() *fleetagent.AckLedger {
