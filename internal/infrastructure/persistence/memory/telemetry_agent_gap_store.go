@@ -40,10 +40,14 @@ func (s *TelemetryAgentGapStore) IngestAgentGap(ctx context.Context, gap ports.T
 		s.byTenant[tenant] = map[shared.ID]ports.TelemetryAgentGap{}
 	}
 	if existing, found := s.byTenant[tenant][gap.GapID]; found {
-		if !sameTelemetryAgentGap(existing, gap) {
-			return fmt.Errorf("%w: telemetry agent gap id %q is already bound to different evidence", shared.ErrConflict, gap.GapID)
+		if existing.SameEvidence(gap) {
+			return nil
 		}
-		return nil
+		if !gap.MonotonicExtensionOf(existing) {
+			return fmt.Errorf("%w: telemetry agent gap id %q is already bound to incompatible evidence", shared.ErrConflict, gap.GapID)
+		}
+		// Keep the first server admission time while advancing only signed evidence.
+		gap.ReceivedAt = existing.ReceivedAt
 	}
 	s.byTenant[tenant][gap.GapID] = gap
 	return nil
@@ -90,13 +94,6 @@ func (s *TelemetryAgentGapStore) QueryAgentGaps(ctx context.Context, q ports.Hun
 		return out[i].OccurredAt.Before(out[j].OccurredAt)
 	})
 	return out, nil
-}
-
-func sameTelemetryAgentGap(a, b ports.TelemetryAgentGap) bool {
-	return a.TenantID == b.TenantID && a.HostID == b.HostID && a.AssetID == b.AssetID && a.AgentID == b.AgentID &&
-		a.AgentSessionID == b.AgentSessionID && a.StreamID == b.StreamID && a.Priority == b.Priority && a.Epoch == b.Epoch &&
-		a.GapID == b.GapID && a.KnownSequence == b.KnownSequence && a.FromSequence == b.FromSequence &&
-		a.ToSequence == b.ToSequence && a.Reason == b.Reason && a.Count == b.Count && a.OccurredAt.Equal(b.OccurredAt)
 }
 
 var _ ports.TelemetryAgentGapStore = (*TelemetryAgentGapStore)(nil)
