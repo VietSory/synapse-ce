@@ -103,9 +103,14 @@ func (r *runner) shipNextTelemetryGap(ctx context.Context, durable *spool.Spool,
 	if resp.GapID.IsZero() || resp.GapID != gap.ID {
 		return false, 0, fmt.Errorf("server telemetry gap ACK id %q does not match sent gap %q", resp.GapID, gap.ID)
 	}
-	if err := durable.AckGap(ctx, gap.ID); err != nil {
+	removed, err := durable.AckGap(ctx, gap)
+	if err != nil {
 		return false, 0, fmt.Errorf("apply telemetry gap ACK: %w", err)
 	}
+	// Even when the exact snapshot was not removed, the request made progress:
+	// the same GapID grew while in flight and must be re-sent immediately so the
+	// server can monotonically advance its persisted evidence before local deletion.
+	_ = removed
 	return true, 0, nil
 }
 
