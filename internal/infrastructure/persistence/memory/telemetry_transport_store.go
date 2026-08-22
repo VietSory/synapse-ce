@@ -14,12 +14,13 @@ import (
 
 // TelemetryTransportStore is the in-memory twin of the A3 transport-sequencing store.
 type TelemetryTransportStore struct {
-	mu       sync.Mutex
-	states   map[shared.ID]map[streamEpoch]ports.TelemetryStreamState
-	commits  map[shared.ID]map[batchKey]storedBatchCommit
-	events   map[shared.ID]map[eventKey]storedTransportEvent
-	gaps     map[shared.ID]map[streamEpoch][]ports.TelemetryGap
-	bindings map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding
+	mu        sync.Mutex
+	states    map[shared.ID]map[streamEpoch]ports.TelemetryStreamState
+	commits   map[shared.ID]map[batchKey]storedBatchCommit
+	events    map[shared.ID]map[eventKey]storedTransportEvent
+	gaps      map[shared.ID]map[streamEpoch][]ports.TelemetryGap
+	agentGaps map[shared.ID]map[shared.ID]ports.TelemetryAgentGap
+	bindings  map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding
 }
 
 type streamEpoch struct {
@@ -67,11 +68,12 @@ var _ ports.TelemetryAssetBindingStore = (*TelemetryTransportStore)(nil)
 
 func NewTelemetryTransportStore() *TelemetryTransportStore {
 	return &TelemetryTransportStore{
-		states:   map[shared.ID]map[streamEpoch]ports.TelemetryStreamState{},
-		commits:  map[shared.ID]map[batchKey]storedBatchCommit{},
-		events:   map[shared.ID]map[eventKey]storedTransportEvent{},
-		gaps:     map[shared.ID]map[streamEpoch][]ports.TelemetryGap{},
-		bindings: map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding{},
+		states:    map[shared.ID]map[streamEpoch]ports.TelemetryStreamState{},
+		commits:   map[shared.ID]map[batchKey]storedBatchCommit{},
+		events:    map[shared.ID]map[eventKey]storedTransportEvent{},
+		gaps:      map[shared.ID]map[streamEpoch][]ports.TelemetryGap{},
+		agentGaps: map[shared.ID]map[shared.ID]ports.TelemetryAgentGap{},
+		bindings:  map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding{},
 	}
 }
 
@@ -129,12 +131,7 @@ func (s *TelemetryTransportStore) enrichGapLocked(tenant shared.ID, gap ports.Te
 			gap.FromAt = prev.toAt.UTC()
 		}
 	}
-	if gap.FromAt.IsZero() {
-		// No predecessor exists for a missing prefix (e.g. first observed batch is seq 4).
-		// Use a conservative lower bound so a hunt before the first received batch does not
-		// become falsely complete merely because the exact missing timestamps are unknowable.
-		gap.FromAt = time.Unix(0, 0).UTC()
-	}
+	if gap.FromAt.IsZero() { gap.FromAt = time.Unix(0, 0).UTC() }
 	if gap.FromAt.After(gap.ToAt) { gap.FromAt, gap.ToAt = gap.ToAt, gap.FromAt }
 	return gap, true
 }
@@ -159,9 +156,45 @@ func (s *TelemetryTransportStore) ListGaps(ctx context.Context, agentID, streamI
 	return out, nil
 }
 
+func agentGapCompatibleExtension(current, next ports.TelemetryAgentGap) bool {
+	if current.GapID != next.GapID || current.AgentID != next.AgentID || current.AssetID != next.AssetID ||
+		current.StreamID != next.StreamID || current.Priority != next.Priority || current.Epoch != next.Epoch ||
+		current.KnownSequence != next.KnownSequence || current.Reason != next.Reason || next.Count < current.Count ||
+		next.FromAt.After(current.FromAt) || next.ToAt.Before(current.ToAt) {
+		return false
+	}
+	if current.KnownSequence {
+		return next.FromSequence <= current.FromSequence && next.ToSequence >= current.ToSequence
+	}
+	return next.FromSequence == 0 && next.ToSequence == 0
+}
+
+func (s *TelemetryTransportStore) RecordAgentGap(ctx context.Context, gap ports.TelemetryAgentGap) error {
+	if err := gap.Validate(); err != nil { return err }
+	tenant, err := requireTelemetryTenant(ctx)
+	if err != nil { return err }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agentGaps[tenant] == nil { s.agentGaps[tenant] = map[shared.ID]ports.TelemetryAgentGap{} }
+	current, ok := s.agentGaps[tenant][gap.GapID]
+	if !ok {
+		s.agentGaps[tenant][gap.GapID] = gap
+		return nil
+	}
+	if !agentGapCompatibleExtension(current, gap) {
+		return fmt.Errorf("%w: telemetry agent gap id is already committed to incompatible or larger evidence", shared.ErrConflict)
+	}
+	gap.FirstReportedAt = current.FirstReportedAt
+	if gap.UpdatedAt.Before(current.UpdatedAt) { gap.UpdatedAt = current.UpdatedAt }
+	s.agentGaps[tenant][gap.GapID] = gap
+	return nil
+}
+
 func (s *TelemetryTransportStore) QueryDeliveryGaps(ctx context.Context, q ports.TelemetryGapQuery) ([]ports.TelemetryGap, error) {
 	tenant, err := requireTelemetryTenant(ctx)
 	if err != nil { return nil, err }
+	if q.Priority != nil && !q.Priority.Valid() { return nil, fmt.Errorf("%w: invalid telemetry gap priority", shared.ErrValidation) }
+	if !q.Since.IsZero() && !q.Until.IsZero() && q.Until.Before(q.Since) { return nil, fmt.Errorf("%w: telemetry gap query until precedes since", shared.ErrValidation) }
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []ports.TelemetryGap
@@ -177,8 +210,23 @@ func (s *TelemetryTransportStore) QueryDeliveryGaps(ctx context.Context, q ports
 			out = append(out, gap)
 		}
 	}
+	for _, source := range s.agentGaps[tenant] {
+		if !q.AgentID.IsZero() && source.AgentID != q.AgentID { continue }
+		if !q.AssetID.IsZero() && source.AssetID != q.AssetID { continue }
+		if q.Priority != nil && source.Priority != *q.Priority { continue }
+		if !q.Since.IsZero() && source.ToAt.Before(q.Since.UTC()) { continue }
+		if !q.Until.IsZero() && source.FromAt.After(q.Until.UTC()) { continue }
+		out = append(out, ports.TelemetryGap{
+			AgentID: source.AgentID, AssetID: source.AssetID, StreamID: source.StreamID, Priority: source.Priority,
+			Epoch: source.Epoch, FromSequence: source.FromSequence, ToSequence: source.ToSequence,
+			FromAt: source.FromAt, ToAt: source.ToAt, DetectedAt: source.FirstReportedAt,
+		})
+	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].FromAt.Equal(out[j].FromAt) { return out[i].FromSequence < out[j].FromSequence }
+		if out[i].FromAt.Equal(out[j].FromAt) {
+			if out[i].Epoch != out[j].Epoch { return out[i].Epoch < out[j].Epoch }
+			return out[i].FromSequence < out[j].FromSequence
+		}
 		return out[i].FromAt.Before(out[j].FromAt)
 	})
 	return out, nil
