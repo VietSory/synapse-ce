@@ -68,11 +68,12 @@ func (r *runner) telemetryShipLoop(ctx context.Context, durable *spool.Spool, ap
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				log.Printf("telemetry %s ship failed: %v", priority, err)
-				wait := telemetryShipBackoff
-				if retryAfter > wait {
-					wait = retryAfter
+				retry, wait := telemetryDeliveryRetry(err, retryAfter)
+				if !retry {
+					log.Printf("telemetry %s rejected by control plane; transport disabled with WAL retained: %v", priority, err)
+					return
 				}
+				log.Printf("telemetry %s ship failed (will retry): %v", priority, err)
 				if !sleepContext(ctx, wait) {
 					return
 				}
@@ -123,6 +124,21 @@ func telemetryRegistrationRetry(err error) (bool, time.Duration) {
 	// Network/transport errors do not carry an HTTP status. They are transient by
 	// default and use the bounded local backoff rather than permanently disabling A3.
 	return true, telemetryShipBackoff
+}
+
+func telemetryDeliveryRetry(err error, retryAfter time.Duration) (bool, time.Duration) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false, 0
+	}
+	var status *fleetclient.HTTPStatusError
+	if errors.As(err, &status) && !status.Retryable() {
+		return false, 0
+	}
+	wait := telemetryShipBackoff
+	if retryAfter > wait {
+		wait = retryAfter
+	}
+	return true, wait
 }
 
 func (r *runner) shipTelemetryPriority(ctx context.Context, durable *spool.Spool, api telemetryTransport, cred fleetclient.Credential, signer fleetclient.TelemetrySigner, priority fleetagent.DeliveryPriority) (bool, time.Duration, error) {
