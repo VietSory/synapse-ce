@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/telemetryingest"
 )
@@ -20,11 +21,10 @@ const (
 	fleetTelemetryDecodedCap = 32 << 20
 )
 
-// fleetTelemetryIngest is the narrow agent-plane telemetry ingest surface the handler consumes. The
-// usecase (telemetryingest.Service) satisfies it; defined here (consumer side) so the adapter depends on
-// a minimal contract, not the whole service.
+// fleetTelemetryIngest is the narrow agent-plane telemetry ingest surface the handler consumes.
 type fleetTelemetryIngest interface {
 	Ingest(ctx context.Context, authAgentID shared.ID, req telemetryingest.IngestRequest) (telemetryingest.IngestResult, error)
+	IngestGap(ctx context.Context, authAgentID shared.ID, report fleetagent.TelemetryGapReport) (telemetryingest.GapIngestResult, error)
 }
 
 // ingestTelemetry is the agent-plane endpoint (POST /api/v1/fleet/telemetry). The HTTP layer accepts
@@ -61,6 +61,40 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 		"ack":        res.ACK,
 		"provenance": res.Provenance,
 		"gap_open":   res.GapOpen,
+	})
+}
+
+// ingestTelemetryGap is the durable-loss companion endpoint. A successful response
+// acknowledges the exact stable GapID only after the signed report has passed the
+// server-authoritative trust boundary and been durably persisted.
+func (f *fleetRouter) ingestTelemetryGap(w http.ResponseWriter, r *http.Request) {
+	if f.telemetry == nil {
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "telemetry ingest not enabled"})
+		return
+	}
+	agent, ok := agentFrom(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorBody{Error: "unauthenticated"})
+		return
+	}
+	body, err := readFleetTelemetryBody(w, r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry gap body"})
+		return
+	}
+	var report fleetagent.TelemetryGapReport
+	if err := decodeStrictFleetTelemetry(body, &report); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry gap body"})
+		return
+	}
+	res, err := f.telemetry.IngestGap(r.Context(), agent.ID, report)
+	if err != nil {
+		writeError(w, f.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"acknowledged": true,
+		"gap_id":       res.GapID,
 	})
 }
 
