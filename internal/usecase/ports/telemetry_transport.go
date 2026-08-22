@@ -12,23 +12,23 @@ import (
 
 // TelemetryTransportStore persists the AGENT→CONTROL-PLANE transport sequencing state (A3, #624).
 // It is deliberately separate from the columnar TelemetryStore: this store owns delivery identity,
-// immutable per-sequence commitments, highest-contiguous ACK state, and explicit delivery gaps.
+// immutable per-sequence commitments, highest-contiguous ACK state, explicit delivery gaps, and
+// first-class agent-origin loss reports from the durable spool.
 type TelemetryTransportStore interface {
 	TelemetryDeliveryGapReader
+	TelemetryAgentGapStore
 	StreamState(ctx context.Context, agentID, streamID shared.ID, epoch uint64) (TelemetryStreamState, error)
 	SaveStreamState(ctx context.Context, state TelemetryStreamState) error
 	MaxEpoch(ctx context.Context, agentID, streamID shared.ID) (uint64, error)
 	ListGaps(ctx context.Context, agentID, streamID shared.ID) ([]TelemetryGap, error)
-	// CommitBatch durably claims one delivery coordinate for the exact signed batch identity before the
-	// use case decides whether the sequence is fresh or a replay. The same commitment is idempotent; a
-	// different BatchID/PayloadDigest/schema/asset/event-count at the same coordinate is ErrConflict.
 	CommitBatch(ctx context.Context, batch TelemetryEventBatch) error
 	IngestBatchEvents(ctx context.Context, batch TelemetryEventBatch) (int, error)
 	CountBatchEvents(ctx context.Context, agentID, streamID shared.ID, epoch, sequence uint64) (int, error)
 }
 
 // TelemetryDeliveryGapReader is the narrow coverage-honesty view consumed by retro-hunt. The filter is
-// tenant-scoped from ctx and windows gaps by observed-time OVERLAP, not by detection wall-clock.
+// tenant-scoped from ctx and windows gaps by observed-time OVERLAP, not by detection wall-clock. It
+// includes both open delivery holes and durable agent-origin loss records.
 type TelemetryDeliveryGapReader interface {
 	QueryDeliveryGaps(ctx context.Context, q TelemetryGapQuery) ([]TelemetryGap, error)
 }
@@ -41,9 +41,6 @@ type TelemetryGapQuery struct {
 	Until    time.Time
 }
 
-// TelemetryEventBatch is one accepted batch's durable transport commitment plus its verified raw events.
-// CommitBatch derives the delivery priority and observed-time bounds from Events, so those gap anchors
-// cannot disagree with the event metadata already checked against the signed canonical envelopes.
 type TelemetryEventBatch struct {
 	BatchID       shared.ID
 	PayloadDigest string
@@ -128,9 +125,8 @@ func (s TelemetryStreamState) Validate() error {
 	return nil
 }
 
-// TelemetryGap is one durable open delivery-sequence loss window. FromAt..ToAt is conservative observed
-// time, allowing a hunt wholly inside the missing interval to remain incomplete even when neither received
-// neighboring batch itself falls inside that hunt.
+// TelemetryGap is a coverage window surfaced to retro-hunt. For inferred delivery holes it carries
+// FromSequence..ToSequence; for unknown-coordinate agent-origin loss these sequence fields remain zero.
 type TelemetryGap struct {
 	AgentID      shared.ID
 	AssetID      shared.ID
