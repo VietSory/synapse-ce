@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	telemetryHotRetention  = 7 * 24 * time.Hour
-	telemetryWarmRetention = 30 * 24 * time.Hour
+	telemetryHotRetention   = 7 * 24 * time.Hour
+	telemetryWarmRetention  = 30 * 24 * time.Hour
 	fleetTelemetryMaxEvents = 4096
 )
 
@@ -28,28 +28,34 @@ type telemetryRuntimeStore interface {
 }
 
 // wireFleetTelemetry composes the live A3 transport onto the already-enabled
-// agent plane. Postgres deployments use the same RLS-scoped telemetry repository
-// for raw rows, delivery ACK/gaps and authoritative asset bindings; memory mode
-// uses its contract-equivalent store. Signing-key lifecycle persistence follows
-// the same backend selection. No endpoint is enabled with a partial dependency set.
+// agent plane. Postgres deployments use RLS-scoped telemetry repositories for
+// rows, ACK/gaps, authoritative bindings, and agent-origin spool loss; memory mode
+// uses contract-equivalent stores. No endpoint is enabled with a partial dependency set.
 func wireFleetTelemetry(router *httpapi.Router, pool *pgxpool.Pool, audit ports.AuditLogger, clock ports.Clock, log *slog.Logger) error {
 	if router == nil || audit == nil || clock == nil {
 		return fmt.Errorf("telemetry runtime requires router, audit and clock")
 	}
 	var (
-		store telemetryRuntimeStore
-		keys  ports.AgentSigningKeyStore
+		store     telemetryRuntimeStore
+		keys      ports.AgentSigningKeyStore
+		agentGaps ports.TelemetryAgentGapStore
 	)
 	if pool != nil {
 		store = postgres.NewTelemetryRepository(pool, telemetryHotRetention, telemetryWarmRetention)
 		keys = postgres.NewAgentSigningKeyRepository(pool)
+		agentGaps = postgres.NewTelemetryAgentGapRepository(pool)
 	} else {
 		store = memory.NewTelemetryStore(telemetryHotRetention, telemetryWarmRetention)
 		keys = memory.NewAgentSigningKeyStore()
+		agentGaps = memory.NewTelemetryAgentGapStore()
 	}
-	transport, err := telemetryuc.NewTransportService(store, keys, store, audit, clock, fleetTelemetryMaxEvents)
+	base, err := telemetryuc.NewTransportService(store, keys, store, audit, clock, fleetTelemetryMaxEvents)
 	if err != nil {
 		return fmt.Errorf("construct telemetry transport: %w", err)
+	}
+	transport, err := telemetryuc.NewGapTransportService(base, agentGaps)
+	if err != nil {
+		return fmt.Errorf("construct telemetry gap transport: %w", err)
 	}
 	router.SetFleetTelemetry(transport, keys, store)
 	if log != nil {
