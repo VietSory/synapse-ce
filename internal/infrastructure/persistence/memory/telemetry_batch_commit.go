@@ -26,7 +26,9 @@ func memoryBatchCommit(batch ports.TelemetryEventBatch) (storedBatchCommit, erro
 		} else if p != priority {
 			return storedBatchCommit{}, fmt.Errorf("%w: telemetry batch crosses delivery-priority lanes", shared.ErrValidation)
 		}
-		at := event.ObservedAt.UTC()
+		// Keep the in-memory tier byte-for-byte aligned with PostgreSQL's
+		// timestamptz precision so replay and gap-window semantics do not differ by adapter.
+		at := event.ObservedAt.UTC().Truncate(time.Microsecond)
 		if minAt.IsZero() || at.Before(minAt) { minAt = at }
 		if maxAt.IsZero() || at.After(maxAt) { maxAt = at }
 	}
