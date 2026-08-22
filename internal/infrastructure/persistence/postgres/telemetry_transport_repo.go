@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
@@ -114,9 +118,67 @@ func (r *TelemetryTransportRepository) SaveStreamState(ctx context.Context, stat
 	})
 }
 
+type postgresGapCoverage struct {
+	assetID  shared.ID
+	priority fleetagent.DeliveryPriority
+	fromAt   time.Time
+	toAt     time.Time
+}
+
+// postgresGapCoverageFor derives a conservative observed-time span from the received
+// batch immediately before and after a missing sequence range. The successor is required:
+// AckLedger can only know a gap once a later sequence arrived. Missing-prefix gaps have no
+// predecessor, so Unix epoch is used as a conservative lower bound rather than a point
+// timestamp that could let an earlier hunt falsely report Complete=true.
+func postgresGapCoverageFor(ctx context.Context, tx pgx.Tx, tenant shared.ID, state ports.TelemetryStreamState, gap ports.TelemetryGap) (postgresGapCoverage, bool, error) {
+	var nextAsset string
+	var nextPriority int
+	var nextFrom time.Time
+	err := tx.QueryRow(ctx, `SELECT asset_id,priority,event_time_min FROM telemetry_batch_commits
+		WHERE tenant_id=$1 AND agent_id=$2 AND stream_id=$3 AND epoch=$4 AND sequence=$5`,
+		tenant.String(), state.AgentID.String(), state.StreamID.String(), int64(state.Epoch), int64(gap.ToSequence+1)).
+		Scan(&nextAsset, &nextPriority, &nextFrom)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return postgresGapCoverage{}, false, nil
+	}
+	if err != nil {
+		return postgresGapCoverage{}, false, fmt.Errorf("read telemetry gap successor commitment: %w", err)
+	}
+	if !fleetagent.DeliveryPriority(nextPriority).Valid() {
+		return postgresGapCoverage{}, false, fmt.Errorf("%w: stored telemetry batch priority %d is invalid", shared.ErrValidation, nextPriority)
+	}
+	coverage := postgresGapCoverage{
+		assetID: shared.ID(nextAsset), priority: fleetagent.DeliveryPriority(nextPriority),
+		fromAt: time.Unix(0, 0).UTC(), toAt: nextFrom.UTC(),
+	}
+	if gap.FromSequence > 1 {
+		var prevAsset string
+		var prevPriority int
+		var prevTo time.Time
+		err := tx.QueryRow(ctx, `SELECT asset_id,priority,event_time_max FROM telemetry_batch_commits
+			WHERE tenant_id=$1 AND agent_id=$2 AND stream_id=$3 AND epoch=$4 AND sequence=$5`,
+			tenant.String(), state.AgentID.String(), state.StreamID.String(), int64(state.Epoch), int64(gap.FromSequence-1)).
+			Scan(&prevAsset, &prevPriority, &prevTo)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// A repaired/imported ACK state may lack the predecessor commitment. Keep
+			// the conservative Unix lower bound rather than inventing a precise span.
+		case err != nil:
+			return postgresGapCoverage{}, false, fmt.Errorf("read telemetry gap predecessor commitment: %w", err)
+		case prevAsset == nextAsset && prevPriority == nextPriority:
+			coverage.fromAt = prevTo.UTC()
+		}
+	}
+	if coverage.fromAt.After(coverage.toAt) {
+		coverage.fromAt, coverage.toAt = coverage.toAt, coverage.fromAt
+	}
+	return coverage, true, nil
+}
+
 func reconcileTransportGaps(ctx context.Context, tx pgx.Tx, tenant shared.ID, state ports.TelemetryStreamState) error {
 	wanted := map[[2]uint64]ports.TelemetryGap{}
 	for _, g := range state.GapsFrom() {
+		g.DetectedAt = state.UpdatedAt.UTC()
 		wanted[[2]uint64{g.FromSequence, g.ToSequence}] = g
 	}
 	rows, err := tx.Query(ctx, `SELECT from_sequence,to_sequence FROM telemetry_transport_gaps
@@ -139,24 +201,57 @@ func reconcileTransportGaps(ctx context.Context, tx pgx.Tx, tenant shared.ID, st
 		return err
 	}
 	rows.Close()
+
 	for _, key := range open {
-		if _, ok := wanted[key]; ok {
-			delete(wanted, key)
+		gap, stillOpen := wanted[key]
+		if !stillOpen {
+			if _, err := tx.Exec(ctx, `UPDATE telemetry_transport_gaps SET resolved_at=$1
+				WHERE tenant_id=$2 AND agent_id=$3 AND stream_id=$4 AND epoch=$5
+				  AND from_sequence=$6 AND to_sequence=$7 AND resolved_at IS NULL`,
+				state.UpdatedAt.UTC(), tenant.String(), state.AgentID.String(), state.StreamID.String(), int64(state.Epoch), int64(key[0]), int64(key[1])); err != nil {
+				return fmt.Errorf("resolve telemetry gap: %w", err)
+			}
 			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE telemetry_transport_gaps SET resolved_at=$1
-			WHERE tenant_id=$2 AND agent_id=$3 AND stream_id=$4 AND epoch=$5
-			  AND from_sequence=$6 AND to_sequence=$7 AND resolved_at IS NULL`,
-			state.UpdatedAt.UTC(), tenant.String(), state.AgentID.String(), state.StreamID.String(), int64(state.Epoch), int64(key[0]), int64(key[1])); err != nil {
-			return fmt.Errorf("resolve telemetry gap: %w", err)
+
+		coverage, ok, err := postgresGapCoverageFor(ctx, tx, tenant, state, gap)
+		if err != nil {
+			return err
 		}
+		if ok {
+			if _, err := tx.Exec(ctx, `UPDATE telemetry_transport_gaps
+				SET asset_id=$1,priority=$2,from_at=$3,to_at=$4
+				WHERE tenant_id=$5 AND agent_id=$6 AND stream_id=$7 AND epoch=$8
+				  AND from_sequence=$9 AND to_sequence=$10 AND resolved_at IS NULL`,
+				coverage.assetID.String(), int(coverage.priority), coverage.fromAt, coverage.toAt,
+				tenant.String(), state.AgentID.String(), state.StreamID.String(), int64(state.Epoch), int64(key[0]), int64(key[1])); err != nil {
+				return fmt.Errorf("enrich telemetry gap coverage: %w", err)
+			}
+		}
+		delete(wanted, key)
 	}
-	for _, g := range wanted {
+
+	for _, gap := range wanted {
+		coverage, ok, err := postgresGapCoverageFor(ctx, tx, tenant, state, gap)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if _, err := tx.Exec(ctx, `INSERT INTO telemetry_transport_gaps
+				(tenant_id,agent_id,asset_id,stream_id,priority,epoch,from_sequence,to_sequence,from_at,to_at,detected_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
+				tenant.String(), state.AgentID.String(), coverage.assetID.String(), state.StreamID.String(), int(coverage.priority),
+				int64(state.Epoch), int64(gap.FromSequence), int64(gap.ToSequence), coverage.fromAt, coverage.toAt, state.UpdatedAt.UTC()); err != nil {
+				return fmt.Errorf("materialize telemetry gap coverage: %w", err)
+			}
+			continue
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO telemetry_transport_gaps
 			(tenant_id,agent_id,stream_id,epoch,from_sequence,to_sequence,detected_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
-			tenant.String(), g.AgentID.String(), g.StreamID.String(), int64(g.Epoch), int64(g.FromSequence), int64(g.ToSequence), state.UpdatedAt.UTC()); err != nil {
-			return fmt.Errorf("materialize telemetry gap: %w", err)
+			tenant.String(), state.AgentID.String(), state.StreamID.String(), int64(state.Epoch),
+			int64(gap.FromSequence), int64(gap.ToSequence), state.UpdatedAt.UTC()); err != nil {
+			return fmt.Errorf("materialize sequence-only telemetry gap: %w", err)
 		}
 	}
 	return nil
@@ -182,6 +277,31 @@ func (r *TelemetryTransportRepository) MaxEpoch(ctx context.Context, agentID, st
 	return highest, err
 }
 
+func scanPostgresTelemetryGap(rows pgx.Rows, fallbackAgent, fallbackStream shared.ID) (ports.TelemetryGap, error) {
+	var (
+		agentID, streamID             string
+		assetID                       pgtype.Text
+		priority                      pgtype.Int4
+		epoch, fromSequence, toSequence int64
+		fromAt, toAt                  pgtype.Timestamptz
+		detectedAt                     time.Time
+	)
+	if err := rows.Scan(&agentID, &assetID, &streamID, &priority, &epoch, &fromSequence, &toSequence, &fromAt, &toAt, &detectedAt); err != nil {
+		return ports.TelemetryGap{}, err
+	}
+	gap := ports.TelemetryGap{
+		AgentID: shared.ID(agentID), StreamID: shared.ID(streamID), Epoch: uint64(epoch),
+		FromSequence: uint64(fromSequence), ToSequence: uint64(toSequence), DetectedAt: detectedAt.UTC(),
+	}
+	if gap.AgentID.IsZero() { gap.AgentID = fallbackAgent }
+	if gap.StreamID.IsZero() { gap.StreamID = fallbackStream }
+	if assetID.Valid { gap.AssetID = shared.ID(assetID.String) }
+	if priority.Valid { gap.Priority = fleetagent.DeliveryPriority(priority.Int32) }
+	if fromAt.Valid { gap.FromAt = fromAt.Time.UTC() }
+	if toAt.Valid { gap.ToAt = toAt.Time.UTC() }
+	return gap, nil
+}
+
 func (r *TelemetryTransportRepository) ListGaps(ctx context.Context, agentID, streamID shared.ID) ([]ports.TelemetryGap, error) {
 	if err := requireTransportTenant(ctx); err != nil {
 		return nil, err
@@ -189,7 +309,8 @@ func (r *TelemetryTransportRepository) ListGaps(ctx context.Context, agentID, st
 	var gaps []ports.TelemetryGap
 	err := WithContextTenant(ctx, r.pool, func(tx pgx.Tx) error {
 		tenant, _ := shared.TenantFrom(ctx)
-		rows, err := tx.Query(ctx, `SELECT epoch,from_sequence,to_sequence FROM telemetry_transport_gaps
+		rows, err := tx.Query(ctx, `SELECT agent_id,asset_id,stream_id,priority,epoch,from_sequence,to_sequence,from_at,to_at,detected_at
+			FROM telemetry_transport_gaps
 			WHERE tenant_id=$1 AND agent_id=$2 AND stream_id=$3 AND resolved_at IS NULL
 			ORDER BY epoch,from_sequence`, tenant.String(), agentID.String(), streamID.String())
 		if err != nil {
@@ -197,11 +318,11 @@ func (r *TelemetryTransportRepository) ListGaps(ctx context.Context, agentID, st
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var epoch, from, to int64
-			if err := rows.Scan(&epoch, &from, &to); err != nil {
+			gap, err := scanPostgresTelemetryGap(rows, agentID, streamID)
+			if err != nil {
 				return fmt.Errorf("scan telemetry gap: %w", err)
 			}
-			gaps = append(gaps, ports.TelemetryGap{AgentID: agentID, StreamID: streamID, Epoch: uint64(epoch), FromSequence: uint64(from), ToSequence: uint64(to)})
+			gaps = append(gaps, gap)
 		}
 		return rows.Err()
 	})
@@ -214,6 +335,47 @@ func (r *TelemetryTransportRepository) ListGaps(ctx context.Context, agentID, st
 		}
 		return gaps[i].FromSequence < gaps[j].FromSequence
 	})
+	return gaps, nil
+}
+
+func (r *TelemetryTransportRepository) QueryDeliveryGaps(ctx context.Context, q ports.TelemetryGapQuery) ([]ports.TelemetryGap, error) {
+	if err := requireTransportTenant(ctx); err != nil {
+		return nil, err
+	}
+	if q.Priority != nil && !q.Priority.Valid() {
+		return nil, fmt.Errorf("%w: telemetry gap query has invalid priority %d", shared.ErrValidation, int(*q.Priority))
+	}
+	if !q.Since.IsZero() && !q.Until.IsZero() && q.Until.Before(q.Since) {
+		return nil, fmt.Errorf("%w: telemetry gap query until precedes since", shared.ErrValidation)
+	}
+	var gaps []ports.TelemetryGap
+	err := WithContextTenant(ctx, r.pool, func(tx pgx.Tx) error {
+		tenant, _ := shared.TenantFrom(ctx)
+		args := []any{tenant.String()}
+		conds := []string{"tenant_id=$1", "resolved_at IS NULL", "asset_id IS NOT NULL", "priority IS NOT NULL", "from_at IS NOT NULL", "to_at IS NOT NULL"}
+		add := func(format string, value any) {
+			args = append(args, value)
+			conds = append(conds, fmt.Sprintf(format, len(args)))
+		}
+		if !q.AgentID.IsZero() { add("agent_id=$%d", q.AgentID.String()) }
+		if !q.AssetID.IsZero() { add("asset_id=$%d", q.AssetID.String()) }
+		if q.Priority != nil { add("priority=$%d", int(*q.Priority)) }
+		if !q.Since.IsZero() { add("to_at >= $%d", q.Since.UTC()) }
+		if !q.Until.IsZero() { add("from_at <= $%d", q.Until.UTC()) }
+		rows, err := tx.Query(ctx, `SELECT agent_id,asset_id,stream_id,priority,epoch,from_sequence,to_sequence,from_at,to_at,detected_at
+			FROM telemetry_transport_gaps WHERE `+strings.Join(conds, " AND ")+` ORDER BY from_at,epoch,from_sequence`, args...)
+		if err != nil {
+			return fmt.Errorf("query telemetry delivery gaps: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			gap, err := scanPostgresTelemetryGap(rows, q.AgentID, "")
+			if err != nil { return fmt.Errorf("scan telemetry delivery gap: %w", err) }
+			gaps = append(gaps, gap)
+		}
+		return rows.Err()
+	})
+	if err != nil { return nil, err }
 	return gaps, nil
 }
 
