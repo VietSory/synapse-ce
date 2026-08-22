@@ -74,7 +74,7 @@ func (h *harness) signedBatch(epoch, seq, prev uint64, eventIDs ...shared.ID) In
 		ProtocolVersion: fleetagent.TelemetryProtocolVersion,
 		SchemaVersion: 1,
 		BatchID: shared.ID("batch-" + seqStr(epoch) + "-" + seqStr(seq)),
-		AgentID: "agent-1", AssetID: assetID, StreamID: h.stream,
+		AgentID: "agent-1", HostID: "agent-1", AssetID: assetID, StreamID: h.stream,
 		Position: fleetagent.StreamPosition{Priority: fleetagent.PriorityP1, Epoch: epoch, Sequence: seq, Session: h.session, Boot: "boot-1"},
 		PreviousSequence: prev,
 		EventTimeMin: h.now, EventTimeMax: h.now.Add(time.Second),
@@ -146,8 +146,9 @@ func TestIngestIdentityMismatchForbidden(t *testing.T) {
 	if _, err := h.svc.Ingest(h.ctx, "agent-2", h.signedBatch(1, 1, 0, "e1")); !errors.Is(err, shared.ErrForbidden) { t.Fatalf("identity mismatch must be forbidden, got %v", err) }
 }
 
-func TestIngestRejectsForgedSessionStreamAndAsset(t *testing.T) {
+func TestIngestRejectsForgedHostSessionStreamAndAsset(t *testing.T) {
 	tests := []struct{name string; mutate func(*IngestRequest)}{
+		{"host", func(r *IngestRequest){ r.Manifest.HostID = "forged-host" }},
 		{"session", func(r *IngestRequest){ r.Manifest.Position.Session = "forged-session" }},
 		{"stream", func(r *IngestRequest){ r.Manifest.StreamID = "forged-stream" }},
 		{"asset", func(r *IngestRequest){ r.Manifest.AssetID = "forged-asset" }},
