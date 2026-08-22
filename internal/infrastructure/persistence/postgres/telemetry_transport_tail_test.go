@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
@@ -51,7 +53,7 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 
 	t.Cleanup(func() {
 		bg := context.Background()
-		for _, table := range []string{"telemetry_transport_gaps", "telemetry_stream_positions", "telemetry_asset_bindings"} {
+		for _, table := range []string{"telemetry_transport_gaps", "telemetry_batch_events", "telemetry_batch_commits", "telemetry_stream_positions", "telemetry_asset_bindings"} {
 			_, _ = pool.Exec(bg, `DELETE FROM `+table+` WHERE tenant_id IN ($1,$2)`, tenant.String(), otherTenant.String())
 		}
 		_, _ = pool.Exec(bg, `DELETE FROM fleet_assets WHERE tenant_id IN ($1,$2)`, tenant.String(), otherTenant.String())
@@ -59,9 +61,6 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 		_, _ = pool.Exec(bg, `DELETE FROM tenants WHERE id IN ($1,$2)`, tenant.String(), otherTenant.String())
 	})
 
-	// Host reconciliation is the authority that establishes the telemetry asset binding.
-	// reporting_agent_id is server-authored by the host-inventory use case; the trigger must
-	// materialize exactly that tenant-scoped agent -> asset relationship.
 	if _, err := pool.Exec(ctx, `INSERT INTO fleet_assets(id,tenant_id,kind,"key",name,attributes,created_at,updated_at)
 		VALUES($1,$2,'host',$3,$4,jsonb_build_object('reporting_agent_id',$5),$6,$6)`,
 		asset.String(), tenant.String(), "machine/"+suffix, "host-"+suffix, agent.String(), now); err != nil {
@@ -78,15 +77,36 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 		t.Fatalf("cross-tenant asset binding must be invisible, got %v", err)
 	}
 
-	// The composite FK must reject a tenant/agent pair assembled from two individually
-	// valid rows. This is the invariant that a plain REFERENCES fleet_agents(id) would miss.
 	if _, err := pool.Exec(ctx, `INSERT INTO telemetry_asset_bindings(tenant_id,agent_id,asset_id,updated_at) VALUES($1,$2,$3,$4)`,
 		tenant.String(), otherAgent.String(), asset.String(), now); err == nil {
 		t.Fatal("cross-tenant agent/tenant binding unexpectedly satisfied the composite FK")
 	}
 
-	// Materialize a missing delivery window [2,3]. ListGaps must read durable rows,
-	// not derive an ephemeral answer from this repository instance's memory.
+	beforeAt := now.Add(-10 * time.Minute)
+	afterAt := now.Add(10 * time.Minute)
+	before := ports.TelemetryEventBatch{
+		BatchID: "batch-before-" + suffix, PayloadDigest: "payload-before-" + suffix,
+		AgentID: agent, StreamID: stream, AssetID: asset, Epoch: 1, Sequence: 1, SchemaVersion: 2,
+		Events: []ports.StoredTelemetryEvent{{
+			EventID: "event-before-" + suffix, Class: detection.ClassProcess, Digest: "digest-before-" + suffix,
+			Payload: []byte("before"), ObservedAt: beforeAt,
+		}},
+	}
+	after := ports.TelemetryEventBatch{
+		BatchID: "batch-after-" + suffix, PayloadDigest: "payload-after-" + suffix,
+		AgentID: agent, StreamID: stream, AssetID: asset, Epoch: 1, Sequence: 4, SchemaVersion: 2,
+		Events: []ports.StoredTelemetryEvent{{
+			EventID: "event-after-" + suffix, Class: detection.ClassProcess, Digest: "digest-after-" + suffix,
+			Payload: []byte("after"), ObservedAt: afterAt,
+		}},
+	}
+	if err := repo.CommitBatch(tenantCtx, before); err != nil {
+		t.Fatalf("commit predecessor batch: %v", err)
+	}
+	if err := repo.CommitBatch(tenantCtx, after); err != nil {
+		t.Fatalf("commit successor batch: %v", err)
+	}
+
 	state := ports.TelemetryStreamState{
 		AgentID: agent, StreamID: stream, Epoch: 1,
 		Contiguous: 1, Pending: []uint64{4}, UpdatedAt: now,
@@ -98,16 +118,37 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 	if err != nil || len(gaps) != 1 || gaps[0].FromSequence != 2 || gaps[0].ToSequence != 3 {
 		t.Fatalf("persisted gap = %+v, %v; want [2,3]", gaps, err)
 	}
+	if gaps[0].AssetID != asset || gaps[0].Priority != fleetagent.PriorityP3 || !gaps[0].FromAt.Equal(beforeAt) || !gaps[0].ToAt.Equal(afterAt) {
+		t.Fatalf("gap coverage metadata = %+v; want asset=%s priority=P3 span=%s..%s", gaps[0], asset, beforeAt, afterAt)
+	}
 
-	// A fresh repository over the same database must observe the same gap, proving it
-	// survives process restart and is queryable from persisted state.
+	// A hunt window wholly INSIDE the missing interval must still see the gap even
+	// though neither neighboring received batch lies inside that query window.
+	priority := fleetagent.PriorityP3
+	inside := ports.TelemetryGapQuery{
+		AgentID: agent, AssetID: asset, Priority: &priority,
+		Since: now.Add(-time.Minute), Until: now.Add(time.Minute),
+	}
+	coverage, err := repo.QueryDeliveryGaps(tenantCtx, inside)
+	if err != nil || len(coverage) != 1 || coverage[0].FromSequence != 2 || coverage[0].ToSequence != 3 {
+		t.Fatalf("delivery-gap overlap query = %+v, %v; want persisted [2,3]", coverage, err)
+	}
+
 	restarted := NewTelemetryTransportRepository(pool)
 	gaps, err = restarted.ListGaps(tenantCtx, agent, stream)
 	if err != nil || len(gaps) != 1 || gaps[0].FromSequence != 2 || gaps[0].ToSequence != 3 {
 		t.Fatalf("gap after repository restart = %+v, %v; want [2,3]", gaps, err)
 	}
-	if gaps, err := restarted.ListGaps(shared.WithTenant(ctx, otherTenant), agent, stream); err != nil || len(gaps) != 0 {
+	coverage, err = restarted.QueryDeliveryGaps(tenantCtx, inside)
+	if err != nil || len(coverage) != 1 {
+		t.Fatalf("coverage gap after repository restart = %+v, %v; want one", coverage, err)
+	}
+	otherCtx := shared.WithTenant(ctx, otherTenant)
+	if gaps, err := restarted.ListGaps(otherCtx, agent, stream); err != nil || len(gaps) != 0 {
 		t.Fatalf("cross-tenant gap visibility = %+v, %v; want none", gaps, err)
+	}
+	if gaps, err := restarted.QueryDeliveryGaps(otherCtx, inside); err != nil || len(gaps) != 0 {
+		t.Fatalf("cross-tenant delivery-gap visibility = %+v, %v; want none", gaps, err)
 	}
 
 	current, err := restarted.StreamState(tenantCtx, agent, stream, 1)
@@ -122,6 +163,9 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 	}
 	if gaps, err := restarted.ListGaps(tenantCtx, agent, stream); err != nil || len(gaps) != 0 {
 		t.Fatalf("filled gap still open: %+v, %v", gaps, err)
+	}
+	if gaps, err := restarted.QueryDeliveryGaps(tenantCtx, inside); err != nil || len(gaps) != 0 {
+		t.Fatalf("resolved gap still affects hunt coverage: %+v, %v", gaps, err)
 	}
 
 	var resolvedHistory int
