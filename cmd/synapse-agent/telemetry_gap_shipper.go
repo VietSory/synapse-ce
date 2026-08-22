@@ -18,19 +18,24 @@ type telemetryGapTransport interface {
 	ShipTelemetryGap(context.Context, string, fleetagent.SignedTelemetryGap) (fleetclient.TelemetryGapShipResponse, error)
 }
 
-func (r *runner) startTelemetryGapShipper(ctx context.Context, durable *spool.Spool, cred fleetclient.Credential) {
+func (r *runner) startTelemetryGapShipper(ctx context.Context, durable *spool.Spool, cred fleetclient.Credential) <-chan struct{} {
 	base, ok := r.api.(telemetryTransport)
 	if !ok {
-		return
+		return closedTelemetryWorker()
 	}
 	gapAPI, ok := r.api.(telemetryGapTransport)
 	if !ok {
-		return
+		return closedTelemetryWorker()
 	}
 	if cred.AgentID == "" || cred.AssetID == "" {
-		return
+		return closedTelemetryWorker()
 	}
-	go r.telemetryGapShipLoop(ctx, durable, base, gapAPI, cred)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.telemetryGapShipLoop(ctx, durable, base, gapAPI, cred)
+	}()
+	return done
 }
 
 func (r *runner) telemetryGapShipLoop(ctx context.Context, durable *spool.Spool, base telemetryTransport, gapAPI telemetryGapTransport, cred fleetclient.Credential) {

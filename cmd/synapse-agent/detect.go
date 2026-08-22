@@ -36,93 +36,107 @@ func detectionIdentity(cred fleetclient.Credential) (host, agent shared.ID, ok b
 	return id, id, true
 }
 
-// startDetection launches the agent-side detection engine (#422) in the background when configured. It
-// is strictly best-effort and isolated from the inventory loop: on a host where the eBPF sensor cannot
-// run (non-Linux, no root, missing kernel features) it logs the reason and returns, leaving the agent's
-// normal work untouched. Detection is OFF unless -detect-classes / SYNAPSE_DETECT_CLASSES is set.
+// startDetection owns the process-lifetime telemetry WAL/transport and optionally
+// attaches the eBPF detection producer. Transport lifetime is deliberately independent
+// from detection: disabling detection must still drain a recovered WAL, and a sensor
+// failure must not strand already-durable telemetry until the whole agent restarts.
 func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential) {
 	classes, err := parseDetectClasses(r.cfg.detectClasses)
 	if err != nil {
-		log.Printf("detection: %v; detection engine disabled", err)
-		return
+		log.Printf("detection: %v; detection producer disabled", err)
+		classes = nil
 	}
-	if len(classes) == 0 {
-		return // off by default
+	if len(classes) == 0 && !r.telemetrySpoolExists() {
+		return // no producer requested and no durable backlog to drain
 	}
 
 	host, agent, ok := detectionIdentity(cred)
 	if !ok {
-		log.Print("detection: enrolled credential has no canonical agent id; detection engine disabled")
+		log.Print("telemetry: enrolled credential has no canonical agent id; transport disabled")
 		return
 	}
 	durable, identity, err := r.openTelemetrySpool(ctx, cred)
 	if err != nil {
-		log.Printf("detection: open durable telemetry spool: %v; detection engine disabled", err)
+		log.Printf("telemetry: open durable spool: %v; transport disabled", err)
 		return
-	}
-	rawSensor := ebpf.NewSensor(host, agent, classes)
-	sensor, err := agentspool.NewDurableSensor(rawSensor, durable, identity)
-	if err != nil {
-		log.Printf("detection: wire durable telemetry sensor: %v; detection engine disabled", err)
-		_ = durable.Close()
-		return
-	}
-	sink, err := agentspool.NewDetectionSink(durable)
-	if err != nil {
-		log.Printf("detection: wire durable detection sink: %v; detection engine disabled", err)
-		_ = durable.Close()
-		return
-	}
-	eng, err := detectuc.NewEngine(sensor, sink, host, agent, detectuc.Options{
-		Classes:       classes,
-		CPUCeilingPct: r.cfg.detectCeiling,
-	})
-	if err != nil {
-		log.Printf("detection: %v; detection engine disabled", err)
-		_ = durable.Close()
-		return
-	}
-	runCtx, cancelRun := context.WithCancel(ctx)
-	// The shippers and sensor own exactly the same WAL lifecycle. If the engine
-	// stops, runCtx is cancelled before the shared spool is closed, so no shipper
-	// goroutine can spin forever against a closed WAL.
-	r.startTelemetryShipper(runCtx, durable, cred)
-	r.startTelemetryGapShipper(runCtx, durable, cred)
-	if err := r.startSpoolMetrics(runCtx, durable); err != nil {
-		log.Printf("detection: agent metrics listener unavailable: %v", err)
 	}
 
-	log.Printf("detection engine starting: classes=%s ceiling=%.0f%% durable_spool=%s", r.cfg.detectClasses, r.cfg.detectCeiling, r.telemetrySpoolDir())
-	// One-shot coverage report shortly after start, so the operator can see which classes actually came
-	// up on this host and which are gaps — never silently assume a class is observing.
-	coverageDone := make(chan struct{})
-	go func() {
-		defer close(coverageDone)
-		timer := time.NewTimer(3 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-runCtx.Done():
-		case <-timer.C:
-			coverage := eng.Coverage()
-			log.Printf("detection coverage: %s", formatCoverage(coverage))
-			if err := agentspool.RecordCoverage(runCtx, durable, coverage, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("detection: persist coverage/sensor state: %v", err)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	shipDone := r.startTelemetryShipper(runCtx, durable, cred)
+	gapDone := r.startTelemetryGapShipper(runCtx, durable, cred)
+	metricsDone := closedTelemetryWorker()
+	if done, metricsErr := r.startSpoolMetrics(runCtx, durable); metricsErr != nil {
+		log.Printf("telemetry: agent metrics listener unavailable: %v", metricsErr)
+	} else {
+		metricsDone = done
+	}
+	workers := []<-chan struct{}{shipDone, gapDone, metricsDone}
+
+	if len(classes) == 0 {
+		log.Printf("telemetry transport resuming durable backlog with detection disabled: spool=%s", r.telemetrySpoolDir())
+	} else {
+		rawSensor := ebpf.NewSensor(host, agent, classes)
+		sensor, sensorErr := agentspool.NewDurableSensor(rawSensor, durable, identity)
+		if sensorErr != nil {
+			log.Printf("detection: wire durable telemetry sensor: %v; detection producer disabled", sensorErr)
+		} else {
+			sink, sinkErr := agentspool.NewDetectionSink(durable)
+			if sinkErr != nil {
+				log.Printf("detection: wire durable detection sink: %v; detection producer disabled", sinkErr)
+			} else {
+				eng, engineErr := detectuc.NewEngine(sensor, sink, host, agent, detectuc.Options{
+					Classes:       classes,
+					CPUCeilingPct: r.cfg.detectCeiling,
+				})
+				if engineErr != nil {
+					log.Printf("detection: %v; detection producer disabled", engineErr)
+				} else {
+					log.Printf("detection engine starting: classes=%s ceiling=%.0f%% durable_spool=%s", r.cfg.detectClasses, r.cfg.detectCeiling, r.telemetrySpoolDir())
+
+					coverageDone := make(chan struct{})
+					go func() {
+						defer close(coverageDone)
+						timer := time.NewTimer(3 * time.Second)
+						defer timer.Stop()
+						select {
+						case <-runCtx.Done():
+						case <-timer.C:
+							coverage := eng.Coverage()
+							log.Printf("detection coverage: %s", formatCoverage(coverage))
+							if err := agentspool.RecordCoverage(runCtx, durable, coverage, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+								log.Printf("detection: persist coverage/sensor state: %v", err)
+							}
+						}
+					}()
+					workers = append(workers, coverageDone)
+
+					engineDone := make(chan struct{})
+					go func() {
+						defer close(engineDone)
+						if err := eng.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+							// Do not cancel runCtx here. A dead producer cannot be allowed to
+							// strand records or gap evidence that were already fsynced.
+							log.Printf("detection engine stopped; telemetry transport remains active: %v", err)
+						}
+					}()
+					workers = append(workers, engineDone)
+				}
 			}
 		}
-	}()
-	go func() {
-		err := eng.Run(runCtx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("detection engine stopped: %v", err)
-		}
+	}
+
+	// The WAL is process-owned. Cancel every user first and wait for all of them
+	// before Close, so shutdown cannot race a shipper, metrics scrape, or producer.
+	go func(done []<-chan struct{}) {
+		<-ctx.Done()
 		cancelRun()
-		// A timer that fired concurrently may still be persisting coverage. Wait
-		// for it before closing the shared spool so no operation races Close.
-		<-coverageDone
-		if closeErr := durable.Close(); closeErr != nil {
-			log.Printf("detection: close durable spool: %v", closeErr)
+		for _, worker := range done {
+			<-worker
 		}
-	}()
+		if closeErr := durable.Close(); closeErr != nil {
+			log.Printf("telemetry: close durable spool: %v", closeErr)
+		}
+	}(append([]<-chan struct{}(nil), workers...))
 }
 
 // parseDetectClasses turns the comma-separated config into validated classes. An unknown class is a

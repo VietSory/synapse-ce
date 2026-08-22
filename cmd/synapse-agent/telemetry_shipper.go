@@ -26,18 +26,29 @@ type telemetryTransport interface {
 	ShipTelemetry(context.Context, string, fleetagent.SignedTelemetryBatch) (fleetclient.TelemetryShipResponse, error)
 }
 
-func (r *runner) startTelemetryShipper(ctx context.Context, durable *spool.Spool, cred fleetclient.Credential) {
+func closedTelemetryWorker() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func (r *runner) startTelemetryShipper(ctx context.Context, durable *spool.Spool, cred fleetclient.Credential) <-chan struct{} {
 	api, ok := r.api.(telemetryTransport)
 	if !ok {
-		return
+		return closedTelemetryWorker()
 	}
 	if cred.AgentID == "" || cred.AssetID == "" {
 		log.Printf("telemetry transport disabled: canonical agent/asset binding is incomplete")
-		return
+		return closedTelemetryWorker()
 	}
 	// Registration is deliberately part of the background loop: a transient 429/5xx
 	// or network failure must not disable telemetry until the whole agent restarts.
-	go r.telemetryShipLoop(ctx, durable, api, cred)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.telemetryShipLoop(ctx, durable, api, cred)
+	}()
+	return done
 }
 
 func (r *runner) telemetryShipLoop(ctx context.Context, durable *spool.Spool, api telemetryTransport, cred fleetclient.Credential) {
