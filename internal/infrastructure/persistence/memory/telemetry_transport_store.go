@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -10,14 +11,15 @@ import (
 )
 
 // TelemetryTransportStore is the in-memory twin of the A3 transport-sequencing store: per-stream ACK
-// state (with an optimistic-concurrency version) and the durable raw batch events — tenant-bucketed and
-// keyed by the authenticated agent id, upholding the same contract as the Postgres tier. Transport gaps
-// are derived on read from the ACK snapshot, never stored. Reached only through
-// ports.TelemetryTransportStore.
+// state (with an optimistic-concurrency version), durable raw batch events, authoritative agent->asset
+// bindings, and a materialized current-gap view. The ACK snapshot remains the source of truth; gaps are
+// reconciled when that snapshot changes so a filled hole cannot linger as a phantom.
 type TelemetryTransportStore struct {
-	mu     sync.Mutex
-	states map[shared.ID]map[streamEpoch]ports.TelemetryStreamState
-	events map[shared.ID]map[eventKey]storedTransportEvent
+	mu       sync.Mutex
+	states   map[shared.ID]map[streamEpoch]ports.TelemetryStreamState
+	events   map[shared.ID]map[eventKey]storedTransportEvent
+	gaps     map[shared.ID]map[streamEpoch][]ports.TelemetryGap
+	bindings map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding
 }
 
 // streamEpoch and eventKey carry agent so an agent-chosen StreamID can never address another agent's
@@ -45,12 +47,15 @@ type storedTransportEvent struct {
 }
 
 var _ ports.TelemetryTransportStore = (*TelemetryTransportStore)(nil)
+var _ ports.TelemetryAssetBindingStore = (*TelemetryTransportStore)(nil)
 
 // NewTelemetryTransportStore constructs an empty in-memory transport store.
 func NewTelemetryTransportStore() *TelemetryTransportStore {
 	return &TelemetryTransportStore{
-		states: map[shared.ID]map[streamEpoch]ports.TelemetryStreamState{},
-		events: map[shared.ID]map[eventKey]storedTransportEvent{},
+		states:   map[shared.ID]map[streamEpoch]ports.TelemetryStreamState{},
+		events:   map[shared.ID]map[eventKey]storedTransportEvent{},
+		gaps:     map[shared.ID]map[streamEpoch][]ports.TelemetryGap{},
+		bindings: map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding{},
 	}
 }
 
@@ -67,7 +72,6 @@ func (s *TelemetryTransportStore) StreamState(ctx context.Context, agentID, stre
 	if st, ok := s.states[tenant][streamEpoch{agentID, streamID, epoch}]; ok {
 		return cloneStreamState(st), nil
 	}
-	// A stream/epoch never seen is a zero state (Version 0), not an error.
 	return ports.TelemetryStreamState{AgentID: agentID, StreamID: streamID, Epoch: epoch}, nil
 }
 
@@ -84,9 +88,10 @@ func (s *TelemetryTransportStore) SaveStreamState(ctx context.Context, state por
 	if s.states[tenant] == nil {
 		s.states[tenant] = map[streamEpoch]ports.TelemetryStreamState{}
 	}
+	if s.gaps[tenant] == nil {
+		s.gaps[tenant] = map[streamEpoch][]ports.TelemetryGap{}
+	}
 	key := streamEpoch{state.AgentID, state.StreamID, state.Epoch}
-	// Optimistic concurrency: accept the write only if the stored version still matches the one the caller
-	// read; otherwise a concurrent batch advanced the stream and the caller must retry.
 	if cur, ok := s.states[tenant][key]; ok {
 		if cur.Version != state.Version {
 			return shared.ErrConflict
@@ -97,6 +102,9 @@ func (s *TelemetryTransportStore) SaveStreamState(ctx context.Context, state por
 	next := cloneStreamState(state)
 	next.Version = state.Version + 1
 	s.states[tenant][key] = next
+	// Materialize after the CAS succeeds. In memory this is the queryable twin of
+	// the Postgres gap table; the state snapshot remains authoritative.
+	s.gaps[tenant][key] = append([]ports.TelemetryGap(nil), next.GapsFrom()...)
 	return nil
 }
 
@@ -124,9 +132,9 @@ func (s *TelemetryTransportStore) ListGaps(ctx context.Context, agentID, streamI
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []ports.TelemetryGap
-	for key, st := range s.states[tenant] {
+	for key, materialized := range s.gaps[tenant] {
 		if key.agent == agentID && key.stream == streamID {
-			out = append(out, st.GapsFrom()...)
+			out = append(out, materialized...)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -154,8 +162,13 @@ func (s *TelemetryTransportStore) IngestBatchEvents(ctx context.Context, batch p
 	stored := 0
 	for _, e := range batch.Events {
 		key := eventKey{batch.AgentID, batch.StreamID, batch.Epoch, batch.Sequence, e.EventID}
-		if _, exists := s.events[tenant][key]; exists {
-			continue // idempotent
+		if existing, exists := s.events[tenant][key]; exists {
+			// Idempotency is content-preserving, not merely key-preserving. A caller
+			// attempting to reuse an event coordinate for different content conflicts.
+			if existing.asset != batch.AssetID || existing.class != string(e.Class) || existing.digest != e.Digest || existing.schemaVersion != batch.SchemaVersion || string(existing.payload) != string(e.Payload) {
+				return 0, fmt.Errorf("%w: telemetry event coordinate is already committed to different content", shared.ErrConflict)
+			}
+			continue
 		}
 		s.events[tenant][key] = storedTransportEvent{
 			asset: batch.AssetID, class: string(e.Class),
@@ -180,6 +193,46 @@ func (s *TelemetryTransportStore) CountBatchEvents(ctx context.Context, agentID,
 		}
 	}
 	return n, nil
+}
+
+func (s *TelemetryTransportStore) BindTelemetryAsset(ctx context.Context, binding ports.TelemetryAssetBinding) error {
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	tenant, err := requireTelemetryTenant(ctx)
+	if err != nil {
+		return err
+	}
+	if tenant != binding.TenantID {
+		return fmt.Errorf("%w: telemetry asset binding tenant disagrees with context", shared.ErrForbidden)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bindings[tenant] == nil {
+		s.bindings[tenant] = map[shared.ID]ports.TelemetryAssetBinding{}
+	}
+	if current, ok := s.bindings[tenant][binding.AgentID]; ok && binding.UpdatedAt.Before(current.UpdatedAt) {
+		return fmt.Errorf("%w: stale telemetry asset binding update", shared.ErrConflict)
+	}
+	s.bindings[tenant][binding.AgentID] = binding
+	return nil
+}
+
+func (s *TelemetryTransportStore) ResolveTelemetryAsset(ctx context.Context, agentID shared.ID) (shared.ID, error) {
+	tenant, err := requireTelemetryTenant(ctx)
+	if err != nil {
+		return "", err
+	}
+	if agentID.IsZero() {
+		return "", fmt.Errorf("%w: telemetry asset resolution requires agent id", shared.ErrValidation)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	binding, ok := s.bindings[tenant][agentID]
+	if !ok || binding.AssetID.IsZero() {
+		return "", shared.ErrNotFound
+	}
+	return binding.AssetID, nil
 }
 
 func cloneStreamState(s ports.TelemetryStreamState) ports.TelemetryStreamState {
