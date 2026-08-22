@@ -1,0 +1,45 @@
+name: One-shot #624 telemetry OpenAPI contract fix
+
+on:
+  push:
+    branches: [feat/624-telemetry-transport]
+    paths: [.github/workflows/624-openapi-contract-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/624-telemetry-transport
+          fetch-depth: 0
+      - name: Tighten telemetry OpenAPI constants
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("api/openapi.yaml")
+          source = path.read_text()
+          replacements = {
+              "purpose: {type: string, const: telemetry_batch}": "purpose: {type: string, const: telemetry-batch}",
+              "schema_version: {type: integer, minimum: 1}": "schema_version: {type: integer, enum: [1, 2]}",
+              "priority: {type: integer, minimum: 0}": "priority: {type: integer, minimum: 0, maximum: 3}",
+          }
+          for old, new in replacements.items():
+              if old not in source:
+                  if new in source:
+                      continue
+                  raise SystemExit(f"missing expected OpenAPI contract anchor: {old}")
+              source = source.replace(old, new)
+          path.write_text(source)
+      - name: Commit corrected API contract
+        run: |
+          if git diff --quiet -- api/openapi.yaml; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/openapi.yaml
+          git diff --cached --check
+          git commit -m "docs(api): align telemetry wire constants"
+          git push origin HEAD:feat/624-telemetry-transport
