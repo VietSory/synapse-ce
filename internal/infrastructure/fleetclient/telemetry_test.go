@@ -102,7 +102,7 @@ func TestShipTelemetryGapUsesDistinctMediaTypeAndDecodesACK(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	resp, err := New(srv.URL, 5*time.Second).ShipTelemetry(context.Background(), "token", fleetagent.SignedTelemetryGap{
+	resp, err := New(srv.URL, 5*time.Second).ShipTelemetryGap(context.Background(), "token", fleetagent.SignedTelemetryGap{
 		Manifest: fleetagent.TelemetryGapManifest{GapID: gapID},
 	})
 	if err != nil {
