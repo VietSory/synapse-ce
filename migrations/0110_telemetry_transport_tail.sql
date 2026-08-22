@@ -18,6 +18,47 @@ CREATE INDEX idx_telemetry_asset_bindings_asset
     ON telemetry_asset_bindings (tenant_id, asset_id);
 CALL synapse_enable_tenant_rls('telemetry_asset_bindings');
 
+-- Host inventory stamps reporting_agent_id from the authenticated actor, never the
+-- request body. Keep the telemetry binding synchronized in the same asset transaction,
+-- so ingest cannot race a successful host reconciliation and trust an agent-chosen asset.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION synapse_sync_telemetry_asset_binding()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    reporting_agent TEXT;
+BEGIN
+    IF NEW.kind <> 'host' THEN
+        RETURN NEW;
+    END IF;
+    reporting_agent := NULLIF(btrim(NEW.attributes ->> 'reporting_agent_id'), '');
+    IF reporting_agent IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- A host has one active reporting fleet identity. Re-enrolment/replacement moves
+    -- ownership to the newly authenticated agent instead of leaving a stale sibling binding.
+    DELETE FROM telemetry_asset_bindings
+      WHERE tenant_id = NEW.tenant_id
+        AND asset_id = NEW.id
+        AND agent_id <> reporting_agent;
+
+    INSERT INTO telemetry_asset_bindings (tenant_id, agent_id, asset_id, updated_at)
+    VALUES (NEW.tenant_id, reporting_agent, NEW.id, NEW.updated_at)
+    ON CONFLICT (tenant_id, agent_id) DO UPDATE
+      SET asset_id = EXCLUDED.asset_id,
+          updated_at = EXCLUDED.updated_at
+      WHERE telemetry_asset_bindings.updated_at <= EXCLUDED.updated_at;
+    RETURN NEW;
+END;
+$$;
+-- +goose StatementEnd
+
+CREATE TRIGGER fleet_assets_sync_telemetry_binding
+AFTER INSERT OR UPDATE OF attributes, updated_at ON fleet_assets
+FOR EACH ROW EXECUTE FUNCTION synapse_sync_telemetry_asset_binding();
+
 CREATE TABLE telemetry_transport_gaps (
     tenant_id      TEXT NOT NULL REFERENCES tenants(id),
     agent_id       TEXT NOT NULL,
@@ -38,7 +79,17 @@ CREATE UNIQUE INDEX uq_telemetry_transport_gaps_open_range
 CALL synapse_enable_tenant_rls('telemetry_transport_gaps');
 
 -- +goose Down
--- Bindings are reconstructible from a new authenticated host inventory. Gap history is
--- transport provenance, but rollback is allowed before release just like migration 0109.
+-- Gap rows are provenance. Refuse a destructive rollback once the live transport has
+-- materialized any; operators must explicitly preserve/migrate that evidence first.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM telemetry_transport_gaps) THEN
+        RAISE EXCEPTION 'cannot roll back 0110: telemetry transport gap provenance exists';
+    END IF;
+END $$;
+-- +goose StatementEnd
 DROP TABLE telemetry_transport_gaps;
+DROP TRIGGER fleet_assets_sync_telemetry_binding ON fleet_assets;
+DROP FUNCTION synapse_sync_telemetry_asset_binding();
 DROP TABLE telemetry_asset_bindings;
