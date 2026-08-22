@@ -15,7 +15,9 @@ on:
       - "internal/infrastructure/spool/**"
       - "internal/usecase/fleet/telemetry/**"
       - "internal/usecase/ports/telemetry_delivery.go"
+      - "internal/usecase/ports/telemetry_agent_gap.go"
       - "migrations/0109_telemetry_delivery.sql"
+      - "migrations/0110_telemetry_agent_gaps.sql"
       - ".github/workflows/telemetry-transport-race.yml"
   workflow_dispatch:
 
