@@ -23,7 +23,6 @@ type TelemetryTransportStore interface {
 	// use case decides whether the sequence is fresh or a replay. The same commitment is idempotent; a
 	// different BatchID/PayloadDigest/schema/asset/event-count at the same coordinate is ErrConflict.
 	CommitBatch(ctx context.Context, batch TelemetryEventBatch) error
-	// IngestBatchEvents persists the raw events after CommitBatch has fixed the sequence commitment.
 	IngestBatchEvents(ctx context.Context, batch TelemetryEventBatch) (int, error)
 	CountBatchEvents(ctx context.Context, agentID, streamID shared.ID, epoch, sequence uint64) (int, error)
 }
@@ -34,8 +33,6 @@ type TelemetryDeliveryGapReader interface {
 	QueryDeliveryGaps(ctx context.Context, q TelemetryGapQuery) ([]TelemetryGap, error)
 }
 
-// TelemetryGapQuery selects open A3 delivery gaps. AgentID is the canonical host identity for A0.1;
-// AssetID supports asset pivots. Priority is optional so class-specific hunts can map to P2/P3.
 type TelemetryGapQuery struct {
 	AgentID  shared.ID
 	AssetID  shared.ID
@@ -44,21 +41,18 @@ type TelemetryGapQuery struct {
 	Until    time.Time
 }
 
-// TelemetryEventBatch is one accepted batch's durable transport commitment plus its raw events, already
-// verified against the signed manifest by the ingest use case. EventTimeMin/Max are the signed observed-
-// time bounds used to conservatively anchor any missing neighboring delivery sequences.
+// TelemetryEventBatch is one accepted batch's durable transport commitment plus its verified raw events.
+// CommitBatch derives the delivery priority and observed-time bounds from Events, so those gap anchors
+// cannot disagree with the event metadata already checked against the signed canonical envelopes.
 type TelemetryEventBatch struct {
 	BatchID       shared.ID
 	PayloadDigest string
 	AgentID       shared.ID
 	StreamID      shared.ID
 	AssetID       shared.ID
-	Priority      fleetagent.DeliveryPriority
 	Epoch         uint64
 	Sequence      uint64
 	SchemaVersion int
-	EventTimeMin  time.Time
-	EventTimeMax  time.Time
 	Events        []StoredTelemetryEvent
 }
 
@@ -77,17 +71,14 @@ func (b TelemetryEventBatch) Validate() error {
 	if b.AgentID.IsZero() || b.StreamID.IsZero() || b.AssetID.IsZero() {
 		return fmt.Errorf("%w: telemetry event batch needs agent, stream and asset ids", shared.ErrValidation)
 	}
-	if !b.Priority.Valid() {
-		return fmt.Errorf("%w: telemetry event batch has invalid priority %d", shared.ErrValidation, int(b.Priority))
-	}
 	if b.Epoch == 0 || b.Sequence == 0 {
 		return fmt.Errorf("%w: telemetry event batch needs a non-zero epoch and sequence", shared.ErrValidation)
 	}
 	if b.SchemaVersion < 1 {
 		return fmt.Errorf("%w: telemetry event batch schema version must be >= 1", shared.ErrValidation)
 	}
-	if b.EventTimeMin.IsZero() || b.EventTimeMax.IsZero() || b.EventTimeMax.Before(b.EventTimeMin) {
-		return fmt.Errorf("%w: telemetry event batch needs valid signed event-time bounds", shared.ErrValidation)
+	if len(b.Events) == 0 {
+		return fmt.Errorf("%w: telemetry event batch needs at least one event", shared.ErrValidation)
 	}
 	for i, e := range b.Events {
 		if e.EventID.IsZero() {
@@ -101,6 +92,9 @@ func (b TelemetryEventBatch) Validate() error {
 		}
 		if len(e.Payload) == 0 {
 			return fmt.Errorf("%w: telemetry event[%d] has no payload", shared.ErrValidation, i)
+		}
+		if e.ObservedAt.IsZero() {
+			return fmt.Errorf("%w: telemetry event[%d] has no observed-at", shared.ErrValidation, i)
 		}
 	}
 	return nil
