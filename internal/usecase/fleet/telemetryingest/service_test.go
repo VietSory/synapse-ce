@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,8 +22,21 @@ const tenant = shared.ID("tenant-1")
 type fakeClock struct{ now time.Time }
 func (c fakeClock) Now() time.Time { return c.now }
 
-type fakeAudit struct{ n int }
-func (a *fakeAudit) Record(context.Context, ports.AuditEntry) error { a.n++; return nil }
+type fakeAudit struct {
+	mu sync.Mutex
+	n  int
+}
+func (a *fakeAudit) Record(context.Context, ports.AuditEntry) error {
+	a.mu.Lock()
+	a.n++
+	a.mu.Unlock()
+	return nil
+}
+func (a *fakeAudit) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.n
+}
 
 type fakeKeys struct{ key fleetagent.AgentSigningKey }
 func (k fakeKeys) ResolveSigningKey(_ context.Context, agentID shared.ID, keyID string) (fleetagent.AgentSigningKey, error) {
