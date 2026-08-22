@@ -53,7 +53,7 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 
 	t.Cleanup(func() {
 		bg := context.Background()
-		for _, table := range []string{"telemetry_transport_gaps", "telemetry_batch_events", "telemetry_batch_commits", "telemetry_stream_positions", "telemetry_asset_bindings"} {
+		for _, table := range []string{"telemetry_agent_gaps", "telemetry_transport_gaps", "telemetry_batch_events", "telemetry_batch_commits", "telemetry_stream_positions", "telemetry_asset_bindings"} {
 			_, _ = pool.Exec(bg, `DELETE FROM `+table+` WHERE tenant_id IN ($1,$2)`, tenant.String(), otherTenant.String())
 		}
 		_, _ = pool.Exec(bg, `DELETE FROM fleet_assets WHERE tenant_id IN ($1,$2)`, tenant.String(), otherTenant.String())
@@ -85,18 +85,18 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 	beforeAt := now.Add(-10 * time.Minute)
 	afterAt := now.Add(10 * time.Minute)
 	before := ports.TelemetryEventBatch{
-		BatchID: "batch-before-" + suffix, PayloadDigest: "payload-before-" + suffix,
+		BatchID: shared.ID("batch-before-" + suffix), PayloadDigest: "payload-before-" + suffix,
 		AgentID: agent, StreamID: stream, AssetID: asset, Epoch: 1, Sequence: 1, SchemaVersion: 2,
 		Events: []ports.StoredTelemetryEvent{{
-			EventID: "event-before-" + suffix, Class: detection.ClassProcess, Digest: "digest-before-" + suffix,
+			EventID: shared.ID("event-before-" + suffix), Class: detection.ClassProcess, Digest: "digest-before-" + suffix,
 			Payload: []byte("before"), ObservedAt: beforeAt,
 		}},
 	}
 	after := ports.TelemetryEventBatch{
-		BatchID: "batch-after-" + suffix, PayloadDigest: "payload-after-" + suffix,
+		BatchID: shared.ID("batch-after-" + suffix), PayloadDigest: "payload-after-" + suffix,
 		AgentID: agent, StreamID: stream, AssetID: asset, Epoch: 1, Sequence: 4, SchemaVersion: 2,
 		Events: []ports.StoredTelemetryEvent{{
-			EventID: "event-after-" + suffix, Class: detection.ClassProcess, Digest: "digest-after-" + suffix,
+			EventID: shared.ID("event-after-" + suffix), Class: detection.ClassProcess, Digest: "digest-after-" + suffix,
 			Payload: []byte("after"), ObservedAt: afterAt,
 		}},
 	}
@@ -122,8 +122,6 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 		t.Fatalf("gap coverage metadata = %+v; want asset=%s priority=P3 span=%s..%s", gaps[0], asset, beforeAt, afterAt)
 	}
 
-	// A hunt window wholly INSIDE the missing interval must still see the gap even
-	// though neither neighboring received batch lies inside that query window.
 	priority := fleetagent.PriorityP3
 	inside := ports.TelemetryGapQuery{
 		AgentID: agent, AssetID: asset, Priority: &priority,
