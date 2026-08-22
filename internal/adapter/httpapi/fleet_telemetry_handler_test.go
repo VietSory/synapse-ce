@@ -71,7 +71,7 @@ func signedRequest(agentID shared.ID, keyID string, priv ed25519.PrivateKey) tel
 	stream, _ := fleetagent.TelemetryDeliveryStreamID(agentID, session, fleetagent.PriorityP1)
 	m := fleetagent.TelemetryBatchManifest{
 		ProtocolVersion: fleetagent.TelemetryProtocolVersion, SchemaVersion: 1,
-		BatchID: "batch-1", AgentID: agentID, AssetID: asset, StreamID: stream,
+		BatchID: "batch-1", AgentID: agentID, HostID: agentID, AssetID: asset, StreamID: stream,
 		Position: fleetagent.StreamPosition{Priority: fleetagent.PriorityP1, Epoch: 1, Sequence: 1, Session: session, Boot: "boot-1"},
 		PreviousSequence: 0,
 		EventTimeMin: time.Unix(1_700_000_000, 0).UTC(), EventTimeMax: time.Unix(1_700_000_001, 0).UTC(),
@@ -100,6 +100,16 @@ func TestIngestTelemetryEndpointIdentityMismatch403(t *testing.T) {
 	req := signedRequest("someone-else", keyID, priv)
 	w := fleetCall(h, http.MethodPost, "/api/v1/fleet/telemetry", token, req, true)
 	if w.Code != http.StatusForbidden { t.Fatalf("identity mismatch should be 403, got %d (%s)", w.Code, w.Body.String()) }
+}
+
+func TestIngestTelemetryEndpointHostMismatch403(t *testing.T) {
+	h, agentSvc, priv, keyOf := setupFleetWithTelemetry(t, true)
+	token, agentID := enrolAgent(t, h, agentSvc)
+	req := signedRequest(agentID, keyOf(agentID), priv)
+	req.Manifest.HostID = "someone-else"
+	req.Manifest.Signature = fleetagent.SignTelemetryManifest(priv, req.Manifest)
+	w := fleetCall(h, http.MethodPost, "/api/v1/fleet/telemetry", token, req, true)
+	if w.Code != http.StatusForbidden { t.Fatalf("host mismatch should be 403, got %d (%s)", w.Code, w.Body.String()) }
 }
 
 func TestIngestTelemetryEndpointNotEnabled404(t *testing.T) {
