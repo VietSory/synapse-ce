@@ -21,7 +21,7 @@ func TestTransportRejectsSignedUnknownEventField(t *testing.T) {
 		t.Fatalf("unexpected fixture payload: %s", batch.Payload)
 	}
 	raw := append([]byte(nil), events[0][:len(events[0])-1]...)
-	raw = append(raw, []byte(`,"unknown_transport_field":true}`)...)
+	raw = append(raw, []byte(`,"unknown_transport_field":true}`)[1:]...)
 	payload := append([]byte{'['}, raw...)
 	payload = append(payload, ']')
 
