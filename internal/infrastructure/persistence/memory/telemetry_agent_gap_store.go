@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
@@ -53,6 +54,14 @@ func (s *TelemetryAgentGapStore) QueryAgentGaps(ctx context.Context, q ports.Hun
 	if !ok || tenant.IsZero() {
 		return nil, fmt.Errorf("%w: telemetry agent gap query requires tenant context", shared.ErrValidation)
 	}
+	var priority *fleetagent.DeliveryPriority
+	if q.Class != "" {
+		p, err := fleetagent.TelemetryPriority(q.Class)
+		if err != nil {
+			return nil, err
+		}
+		priority = &p
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]ports.TelemetryAgentGap, 0)
@@ -61,6 +70,9 @@ func (s *TelemetryAgentGapStore) QueryAgentGaps(ctx context.Context, q ports.Hun
 			continue
 		}
 		if q.AssetID != "" && q.AssetID != gap.AssetID {
+			continue
+		}
+		if priority != nil && *priority != gap.Priority {
 			continue
 		}
 		if !q.Since.IsZero() && gap.OccurredAt.Before(q.Since) {
