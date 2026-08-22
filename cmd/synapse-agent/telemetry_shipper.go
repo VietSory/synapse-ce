@@ -169,12 +169,16 @@ func (r *runner) shipTelemetryPriority(ctx context.Context, durable *spool.Spool
 		return false, 0, err
 	}
 	ackPriority, ackEpoch, through := resp.Ack()
+	first := batchRecords[0].Position
 	last := batchRecords[len(batchRecords)-1].Position
 	if ackPriority != priority || ackEpoch != last.Epoch {
 		return false, 0, fmt.Errorf("server ACK coordinates do not match sent lane: got %s/%d want %s/%d", ackPriority, ackEpoch, priority, last.Epoch)
 	}
-	if through == 0 || through > last.Sequence {
-		return false, 0, fmt.Errorf("server ACK through=%d is outside sent durable range ending at %d", through, last.Sequence)
+	// Treat the ACK as untrusted network input. A successful response must advance
+	// into the range just sent: accepting an ACK at/before PreviousSequence would
+	// report false progress and can turn a stale server ledger into a hot resend loop.
+	if through < first.Sequence || through > last.Sequence {
+		return false, 0, fmt.Errorf("server ACK through=%d is outside sent durable range %d..%d", through, first.Sequence, last.Sequence)
 	}
 	if _, err := durable.Ack(ctx, ports.SpoolACK{Priority: ackPriority, Epoch: ackEpoch, Through: through}); err != nil {
 		return false, 0, fmt.Errorf("apply telemetry ACK: %w", err)
