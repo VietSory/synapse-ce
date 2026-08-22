@@ -125,8 +125,19 @@ func WriteSecret(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	if !SecretModeEnforced() {
+		// Windows does not implement Unix permission bits: os.Chmod only toggles the read-only
+		// attribute, so the mode above is NOT the protection it looks like. Verifying it here would
+		// fail on a platform where the guarantee simply does not exist, and asserting it anyway would
+		// be worse — it would read as "the credential is 0600" when nothing enforces that.
+		//
+		// What actually protects the credential on Windows is the ACL on the state directory. That is
+		// a real gap, not a rounding error: see docs/guide/fleet-agent-packaging.md.
 		return nil
 	}
+	// On Unix the mode is a real guarantee, so it is CHECKED rather than assumed. A umask, an
+	// overlay filesystem or a pre-existing file can all leave a credential more permissive than the
+	// mode we asked for, and a silently-wrong permission on a bearer credential is exactly the kind
+	// of thing nobody notices until it matters.
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -138,10 +149,24 @@ func WriteSecret(path string, data []byte, mode os.FileMode) error {
 }
 
 // SecretModeEnforced reports whether this platform enforces Unix permission bits on a file.
+//
+// It is false on Windows, where os.Chmod only toggles the read-only attribute. Callers use it to
+// state the guarantee they actually have rather than the one they wrote down.
 func SecretModeEnforced() bool { return runtime.GOOS != "windows" }
 
 // ReadEnrolTokenFile reads a one-time enrolment token from path, treating an ABSENT file as "no token
 // supplied" rather than as an error.
+//
+// The distinction is the whole point. An enrolment token is consumed on first use, after which the
+// agent holds a long-lived credential and the token is dead weight — so an operator deleting the
+// consumed secret is doing the right thing. If a missing file were fatal, that correct hygiene would
+// mean the agent could never restart, which is how a Kubernetes deployment ends up unable to come back
+// after its Secret is cleaned up. EnsureEnrolled already decides correctly from here: a stored
+// credential wins, and only "no credential AND no token" is an error.
+//
+// Every OTHER read failure stays an error. A file that exists but cannot be read — wrong mode, a
+// directory, a broken mount — is a misconfiguration, and silently treating it as "no token" would
+// convert it into a confusing enrolment failure somewhere further away.
 func ReadEnrolTokenFile(path string) (string, error) {
 	if path == "" {
 		return "", nil
