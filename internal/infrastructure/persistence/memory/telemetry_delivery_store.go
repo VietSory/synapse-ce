@@ -129,7 +129,7 @@ func (s *TelemetryStore) IngestDelivery(ctx context.Context, batch ports.Telemet
 		state = ports.TelemetryStateAcknowledged
 	}
 	lane.batches[m.BatchID] = memoryDeliveryBatch{manifest: m, state: state}
-	currentGaps := s.reconcileMemoryDeliveryGapsLocked(tenant, batch, epoch.sequences, batch.ReceivedAt)
+	currentGaps := s.reconcileMemoryDeliveryGapsLocked(tenant, batch, lane, epoch, batch.ReceivedAt)
 
 	return ports.TelemetryDeliveryResult{
 		ACK: ports.TelemetryDeliveryACK{Priority: m.Priority, Epoch: m.Epoch, Through: ack},
@@ -168,9 +168,9 @@ func memoryMissingRanges(sequences map[uint64]memoryDeliverySequence) []fleetage
 	return out
 }
 
-func (s *TelemetryStore) reconcileMemoryDeliveryGapsLocked(tenant shared.ID, batch ports.TelemetryDeliveryBatch, sequences map[uint64]memoryDeliverySequence, now time.Time) []ports.TelemetryGap {
+func (s *TelemetryStore) reconcileMemoryDeliveryGapsLocked(tenant shared.ID, batch ports.TelemetryDeliveryBatch, lane *memoryDeliveryLane, epoch *memoryDeliveryEpoch, now time.Time) []ports.TelemetryGap {
 	m := batch.Manifest
-	ranges := memoryMissingRanges(sequences)
+	ranges := memoryMissingRanges(epoch.sequences)
 	wanted := make(map[string]fleetagent.SeqRange, len(ranges))
 	for _, r := range ranges {
 		wanted[gapRangeKey(r.From, r.To)] = r
@@ -189,16 +189,42 @@ func (s *TelemetryStore) reconcileMemoryDeliveryGapsLocked(tenant shared.ID, bat
 		g.ResolvedAt = &resolved
 	}
 	for _, r := range wanted {
+		fromAt, toAt := memoryTelemetryGapBounds(lane, epoch, r, m)
 		gap := ports.TelemetryGap{
 			TenantID: batch.TenantID, HostID: batch.HostID, AssetID: batch.AssetID, AgentID: batch.AgentID,
 			AgentSessionID: batch.AgentSessionID, StreamID: m.StreamID, Priority: m.Priority, Epoch: m.Epoch,
-			FromSequence: r.From, ToSequence: r.To, FromAt: m.EventTimeMin.UTC(), ToAt: m.EventTimeMax.UTC(), DetectedAt: now.UTC(),
+			FromSequence: r.From, ToSequence: r.To, FromAt: fromAt, ToAt: toAt, DetectedAt: now.UTC(),
 		}
 		if gap.Validate() == nil {
 			s.deliveryGaps[tenant] = append(s.deliveryGaps[tenant], gap)
 		}
 	}
 	return currentMemoryGaps(s.deliveryGaps[tenant], m.StreamID, m.Epoch)
+}
+
+// memoryTelemetryGapBounds uses the persisted events immediately surrounding a
+// missing sequence range. This keeps hunt completeness conservative and stable:
+// detecting a gap with seq5 after seq1 spans seq1's event time through seq5's,
+// while a late seq3 naturally splits that window into seq1..seq3 and seq3..seq5.
+func memoryTelemetryGapBounds(lane *memoryDeliveryLane, epoch *memoryDeliveryEpoch, r fleetagent.SeqRange, fallback fleetagent.TelemetryBatchManifest) (time.Time, time.Time) {
+	fromAt := fallback.EventTimeMin.UTC()
+	toAt := fallback.EventTimeMax.UTC()
+	if r.From > 1 {
+		if previous, ok := epoch.sequences[r.From-1]; ok {
+			if stored, ok := lane.batches[previous.batchID]; ok {
+				fromAt = stored.manifest.EventTimeMax.UTC()
+			}
+		}
+	}
+	if next, ok := epoch.sequences[r.To+1]; ok {
+		if stored, ok := lane.batches[next.batchID]; ok {
+			toAt = stored.manifest.EventTimeMin.UTC()
+		}
+	}
+	if fromAt.After(toAt) {
+		return toAt, fromAt
+	}
+	return fromAt, toAt
 }
 
 func currentMemoryGaps(gaps []ports.TelemetryGap, stream shared.ID, epoch uint64) []ports.TelemetryGap {
