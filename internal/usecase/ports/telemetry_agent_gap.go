@@ -9,6 +9,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
+const maxTelemetryAgentGapInteger = uint64(1<<63 - 1)
+
 // TelemetryAgentGap is durable agent-origin loss evidence. Unlike a delivery gap,
 // KnownSequence may be false when local corruption destroyed the coordinate itself.
 type TelemetryAgentGap struct {
@@ -37,9 +39,15 @@ func (g TelemetryAgentGap) Validate() error {
 	if !g.Priority.Valid() || g.Epoch == 0 || g.Reason == "" || g.Count == 0 || g.OccurredAt.IsZero() || g.ReceivedAt.IsZero() {
 		return fmt.Errorf("%w: telemetry agent gap metadata is incomplete", shared.ErrValidation)
 	}
+	if g.Epoch > maxTelemetryAgentGapInteger || g.Count > maxTelemetryAgentGapInteger {
+		return fmt.Errorf("%w: telemetry agent gap epoch/count exceeds durable integer range", shared.ErrValidation)
+	}
 	if g.KnownSequence {
 		if g.FromSequence == 0 || g.ToSequence < g.FromSequence || g.Count != g.ToSequence-g.FromSequence+1 {
 			return fmt.Errorf("%w: telemetry agent gap range/count is invalid", shared.ErrValidation)
+		}
+		if g.FromSequence > maxTelemetryAgentGapInteger || g.ToSequence > maxTelemetryAgentGapInteger {
+			return fmt.Errorf("%w: telemetry agent gap sequence exceeds durable integer range", shared.ErrValidation)
 		}
 	} else if g.FromSequence != 0 || g.ToSequence != 0 {
 		return fmt.Errorf("%w: unknown-coordinate telemetry agent gap cannot claim a range", shared.ErrValidation)
