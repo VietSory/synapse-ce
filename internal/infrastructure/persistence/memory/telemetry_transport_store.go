@@ -11,12 +11,13 @@ import (
 )
 
 // TelemetryTransportStore is the in-memory twin of the A3 transport-sequencing store: per-stream ACK
-// state (with an optimistic-concurrency version), durable raw batch events, authoritative agent->asset
-// bindings, and a materialized current-gap view. The ACK snapshot remains the source of truth; gaps are
-// reconciled when that snapshot changes so a filled hole cannot linger as a phantom.
+// state (with an optimistic-concurrency version), durable raw batch events, per-sequence batch commitments,
+// authoritative agent->asset bindings, and a materialized current-gap view. The ACK snapshot remains the
+// source of truth; gaps are reconciled when that snapshot changes so a filled hole cannot linger as a phantom.
 type TelemetryTransportStore struct {
 	mu       sync.Mutex
 	states   map[shared.ID]map[streamEpoch]ports.TelemetryStreamState
+	commits  map[shared.ID]map[batchKey]storedBatchCommit
 	events   map[shared.ID]map[eventKey]storedTransportEvent
 	gaps     map[shared.ID]map[streamEpoch][]ports.TelemetryGap
 	bindings map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding
@@ -30,12 +31,27 @@ type streamEpoch struct {
 	epoch  uint64
 }
 
+type batchKey struct {
+	agent    shared.ID
+	stream   shared.ID
+	epoch    uint64
+	sequence uint64
+}
+
 type eventKey struct {
 	agent    shared.ID
 	stream   shared.ID
 	epoch    uint64
 	sequence uint64
 	eventID  shared.ID
+}
+
+type storedBatchCommit struct {
+	batchID       shared.ID
+	payloadDigest string
+	asset         shared.ID
+	schemaVersion int
+	eventCount    int
 }
 
 type storedTransportEvent struct {
@@ -53,6 +69,7 @@ var _ ports.TelemetryAssetBindingStore = (*TelemetryTransportStore)(nil)
 func NewTelemetryTransportStore() *TelemetryTransportStore {
 	return &TelemetryTransportStore{
 		states:   map[shared.ID]map[streamEpoch]ports.TelemetryStreamState{},
+		commits:  map[shared.ID]map[batchKey]storedBatchCommit{},
 		events:   map[shared.ID]map[eventKey]storedTransportEvent{},
 		gaps:     map[shared.ID]map[streamEpoch][]ports.TelemetryGap{},
 		bindings: map[shared.ID]map[shared.ID]ports.TelemetryAssetBinding{},
@@ -156,25 +173,47 @@ func (s *TelemetryTransportStore) IngestBatchEvents(ctx context.Context, batch p
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.commits[tenant] == nil {
+		s.commits[tenant] = map[batchKey]storedBatchCommit{}
+	}
 	if s.events[tenant] == nil {
 		s.events[tenant] = map[eventKey]storedTransportEvent{}
 	}
+
+	coord := batchKey{batch.AgentID, batch.StreamID, batch.Epoch, batch.Sequence}
+	wantCommit := storedBatchCommit{
+		batchID: batch.BatchID, payloadDigest: batch.PayloadDigest, asset: batch.AssetID,
+		schemaVersion: batch.SchemaVersion, eventCount: len(batch.Events),
+	}
+	if existing, ok := s.commits[tenant][coord]; ok && existing != wantCommit {
+		return 0, fmt.Errorf("%w: telemetry delivery sequence is already committed to a different batch", shared.ErrConflict)
+	}
+
+	// Validate every event collision before mutating either the commitment or event map. This keeps the
+	// in-memory implementation transaction-like: a conflicting replay cannot leave a partial new batch.
 	stored := 0
 	for _, e := range batch.Events {
 		key := eventKey{batch.AgentID, batch.StreamID, batch.Epoch, batch.Sequence, e.EventID}
 		if existing, exists := s.events[tenant][key]; exists {
-			// Idempotency is content-preserving, not merely key-preserving. A caller
-			// attempting to reuse an event coordinate for different content conflicts.
 			if existing.asset != batch.AssetID || existing.class != string(e.Class) || existing.digest != e.Digest || existing.schemaVersion != batch.SchemaVersion || string(existing.payload) != string(e.Payload) {
 				return 0, fmt.Errorf("%w: telemetry event coordinate is already committed to different content", shared.ErrConflict)
 			}
+			continue
+		}
+		stored++
+	}
+	if _, ok := s.commits[tenant][coord]; !ok {
+		s.commits[tenant][coord] = wantCommit
+	}
+	for _, e := range batch.Events {
+		key := eventKey{batch.AgentID, batch.StreamID, batch.Epoch, batch.Sequence, e.EventID}
+		if _, exists := s.events[tenant][key]; exists {
 			continue
 		}
 		s.events[tenant][key] = storedTransportEvent{
 			asset: batch.AssetID, class: string(e.Class),
 			digest: e.Digest, payload: append([]byte(nil), e.Payload...), schemaVersion: batch.SchemaVersion,
 		}
-		stored++
 	}
 	return stored, nil
 }
