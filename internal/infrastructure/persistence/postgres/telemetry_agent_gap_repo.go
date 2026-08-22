@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -48,12 +47,20 @@ func (r *TelemetryAgentGapRepository) IngestAgentGap(ctx context.Context, gap po
 		}
 		existing, err := scanTelemetryAgentGap(tx.QueryRow(ctx, `SELECT tenant_id,gap_id,host_id,asset_id,agent_id,agent_session_id,
 			stream_id,priority,epoch,known_sequence,from_sequence,to_sequence,reason,count,occurred_at,received_at
-			FROM telemetry_agent_gaps WHERE agent_id=$1 AND gap_id=$2`, gap.AgentID.String(), gap.GapID.String()))
+			FROM telemetry_agent_gaps WHERE agent_id=$1 AND gap_id=$2 FOR UPDATE`, gap.AgentID.String(), gap.GapID.String()))
 		if err != nil {
 			return fmt.Errorf("read telemetry agent gap collision: %w", err)
 		}
-		if !samePersistedAgentGap(existing, gap) {
-			return fmt.Errorf("%w: telemetry agent gap id %q is already bound to different evidence", shared.ErrConflict, gap.GapID)
+		if existing.SameEvidence(gap) {
+			return nil
+		}
+		if !gap.MonotonicExtensionOf(existing) {
+			return fmt.Errorf("%w: telemetry agent gap id %q is already bound to incompatible evidence", shared.ErrConflict, gap.GapID)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE telemetry_agent_gaps
+			SET from_sequence=$1,to_sequence=$2,count=$3
+			WHERE agent_id=$4 AND gap_id=$5`, from, to, int64(gap.Count), gap.AgentID.String(), gap.GapID.String()); err != nil {
+			return fmt.Errorf("advance telemetry agent gap evidence: %w", err)
 		}
 		return nil
 	})
@@ -112,8 +119,12 @@ func scanTelemetryAgentGap(row rowScanner) (ports.TelemetryAgentGap, error) {
 	g.TenantID, g.GapID, g.HostID, g.AssetID, g.AgentID = shared.ID(tenant), shared.ID(gapID), shared.ID(host), shared.ID(asset), shared.ID(agent)
 	g.AgentSessionID, g.StreamID = fleetagent.SessionID(session), shared.ID(stream)
 	g.Priority, g.Epoch, g.Count = fleetagent.DeliveryPriority(priority), uint64(epoch), uint64(count)
-	if from != nil { g.FromSequence = uint64(*from) }
-	if to != nil { g.ToSequence = uint64(*to) }
+	if from != nil {
+		g.FromSequence = uint64(*from)
+	}
+	if to != nil {
+		g.ToSequence = uint64(*to)
+	}
 	if err := g.Validate(); err != nil {
 		return ports.TelemetryAgentGap{}, fmt.Errorf("stored telemetry agent gap is corrupt: %w", err)
 	}
@@ -127,12 +138,4 @@ func nullableAgentGapRange(g ports.TelemetryAgentGap) (any, any) {
 	return int64(g.FromSequence), int64(g.ToSequence)
 }
 
-func samePersistedAgentGap(a, b ports.TelemetryAgentGap) bool {
-	return a.TenantID == b.TenantID && a.GapID == b.GapID && a.HostID == b.HostID && a.AssetID == b.AssetID &&
-		a.AgentID == b.AgentID && a.AgentSessionID == b.AgentSessionID && a.StreamID == b.StreamID && a.Priority == b.Priority &&
-		a.Epoch == b.Epoch && a.KnownSequence == b.KnownSequence && a.FromSequence == b.FromSequence &&
-		a.ToSequence == b.ToSequence && a.Reason == b.Reason && a.Count == b.Count && a.OccurredAt.Equal(b.OccurredAt)
-}
-
 var _ ports.TelemetryAgentGapStore = (*TelemetryAgentGapRepository)(nil)
-var _ = time.Time{}
