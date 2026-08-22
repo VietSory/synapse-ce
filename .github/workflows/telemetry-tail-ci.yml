@@ -44,6 +44,8 @@ jobs:
         run: >-
           go vet
           ./internal/domain/fleetagent
+          ./internal/domain/telemetry
+          ./internal/usecase/fleet/telemetry
           ./internal/usecase/fleet/telemetryingest
           ./internal/infrastructure/fleetclient
           ./internal/infrastructure/persistence/memory
@@ -55,6 +57,8 @@ jobs:
         run: >-
           go test -count=1
           ./internal/domain/fleetagent
+          ./internal/domain/telemetry
+          ./internal/usecase/fleet/telemetry
           ./internal/usecase/fleet/telemetryingest
           ./internal/infrastructure/fleetclient
           ./internal/infrastructure/persistence/memory
@@ -62,10 +66,13 @@ jobs:
           ./internal/adapter/httpapi
           ./cmd/synapse-agent
       - name: PostgreSQL telemetry acceptance
-        run: go test -count=1 ./internal/infrastructure/persistence/postgres -run '^TestTelemetryTransportRepository$'
+        run: >-
+          go test -count=1 ./internal/infrastructure/persistence/postgres
+          -run '^(TestTelemetryTransportRepository|TestTelemetryTransportTailBindingAndDurableGaps)$'
       - name: Race gate
         run: >-
           go test -race -count=1
+          ./internal/usecase/fleet/telemetry
           ./internal/usecase/fleet/telemetryingest
           ./internal/infrastructure/spool
           ./cmd/synapse-agent
@@ -82,4 +89,11 @@ jobs:
       - name: Build all Go packages
         run: go build ./...
       - name: Focused tests
-        run: go test -count=1 ./internal/domain/fleetagent ./internal/usecase/fleet/telemetryingest ./internal/infrastructure/fleetclient ./cmd/synapse-agent
+        run: >-
+          go test -count=1
+          ./internal/domain/fleetagent
+          ./internal/domain/telemetry
+          ./internal/usecase/fleet/telemetry
+          ./internal/usecase/fleet/telemetryingest
+          ./internal/infrastructure/fleetclient
+          ./cmd/synapse-agent
