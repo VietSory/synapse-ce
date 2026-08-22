@@ -166,6 +166,44 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 		t.Fatalf("resolved gap still affects hunt coverage: %+v, %v", gaps, err)
 	}
 
+	// Agent-origin spool loss is durable provenance, not an inferred delivery hole.
+	// Persist it idempotently, query it through the same coverage reader used by hunts,
+	// then advance the ACK ledger again and prove that reconciliation does not erase it.
+	agentGap := ports.TelemetryAgentGap{
+		GapID: shared.ID("agent-gap-" + suffix), AgentID: agent, AssetID: asset, StreamID: stream,
+		Priority: fleetagent.PriorityP3, Epoch: 1, Count: 2, Reason: fleetagent.TelemetryGapQuotaEviction,
+		FromAt: now.Add(-30 * time.Second), ToAt: now.Add(30 * time.Second),
+		FirstReportedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second),
+	}
+	if err := restarted.RecordAgentGap(tenantCtx, agentGap); err != nil {
+		t.Fatalf("record agent-origin gap: %v", err)
+	}
+	if err := restarted.RecordAgentGap(tenantCtx, agentGap); err != nil {
+		t.Fatalf("idempotent agent-origin gap retry: %v", err)
+	}
+	combined := ports.CombinedTelemetryGapReader{Delivery: restarted, Agent: restarted}
+	coverage, err = combined.QueryDeliveryGaps(tenantCtx, inside)
+	if err != nil || len(coverage) != 1 || coverage[0].FromSequence != 0 || coverage[0].ToSequence != 0 {
+		t.Fatalf("combined agent-origin coverage = %+v, %v; want one unknown-coordinate gap", coverage, err)
+	}
+
+	latest, err := restarted.StreamState(tenantCtx, agent, stream, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest.UpdatedAt = now.Add(3 * time.Second)
+	if err := restarted.SaveStreamState(tenantCtx, latest); err != nil {
+		t.Fatalf("resave ACK state after agent gap: %v", err)
+	}
+	restartedAgain := NewTelemetryTransportRepository(pool)
+	agentCoverage, err := restartedAgain.QueryAgentGaps(tenantCtx, inside)
+	if err != nil || len(agentCoverage) != 1 || agentCoverage[0].FromSequence != 0 || agentCoverage[0].ToSequence != 0 {
+		t.Fatalf("agent-origin gap after ACK reconciliation/restart = %+v, %v; want one", agentCoverage, err)
+	}
+	if crossTenant, err := restartedAgain.QueryAgentGaps(otherCtx, inside); err != nil || len(crossTenant) != 0 {
+		t.Fatalf("cross-tenant agent-origin gap visibility = %+v, %v; want none", crossTenant, err)
+	}
+
 	var resolvedHistory int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM telemetry_transport_gaps
 		WHERE tenant_id=$1 AND agent_id=$2 AND stream_id=$3 AND epoch=1 AND from_sequence=2 AND to_sequence=3 AND resolved_at IS NOT NULL`,
