@@ -85,16 +85,27 @@ CALL synapse_enable_tenant_rls('telemetry_batch_commits');
 CREATE TABLE telemetry_transport_gaps (
     tenant_id      TEXT NOT NULL REFERENCES tenants(id),
     agent_id       TEXT NOT NULL,
-    asset_id       TEXT NOT NULL,
+    -- Coverage metadata is nullable for low-level ACK-state repair/import paths that
+    -- do not yet have the neighboring batch commitments. The live ingest path always
+    -- commits the received batch first, so production gaps are enriched immediately.
+    asset_id       TEXT,
     stream_id      TEXT NOT NULL,
-    priority       INT NOT NULL CHECK (priority BETWEEN 0 AND 3),
+    priority       INT CHECK (priority BETWEEN 0 AND 3),
     epoch          BIGINT NOT NULL CHECK (epoch >= 1),
     from_sequence  BIGINT NOT NULL CHECK (from_sequence >= 1),
     to_sequence    BIGINT NOT NULL CHECK (to_sequence >= from_sequence),
-    from_at        TIMESTAMPTZ NOT NULL,
-    to_at          TIMESTAMPTZ NOT NULL CHECK (to_at >= from_at),
+    from_at        TIMESTAMPTZ,
+    to_at          TIMESTAMPTZ,
     detected_at    TIMESTAMPTZ NOT NULL,
     resolved_at    TIMESTAMPTZ,
+    CONSTRAINT telemetry_transport_gaps_time_pair CHECK (
+        (from_at IS NULL AND to_at IS NULL) OR
+        (from_at IS NOT NULL AND to_at IS NOT NULL AND to_at >= from_at)
+    ),
+    CONSTRAINT telemetry_transport_gaps_coverage_pair CHECK (
+        (asset_id IS NULL AND priority IS NULL AND from_at IS NULL AND to_at IS NULL) OR
+        (asset_id IS NOT NULL AND priority IS NOT NULL AND from_at IS NOT NULL AND to_at IS NOT NULL)
+    ),
     PRIMARY KEY (tenant_id, agent_id, stream_id, epoch, from_sequence, to_sequence, detected_at)
 );
 CREATE INDEX idx_telemetry_transport_gaps_open
@@ -102,7 +113,7 @@ CREATE INDEX idx_telemetry_transport_gaps_open
     WHERE resolved_at IS NULL;
 CREATE INDEX idx_telemetry_transport_gaps_coverage
     ON telemetry_transport_gaps (tenant_id, asset_id, priority, from_at, to_at)
-    WHERE resolved_at IS NULL;
+    WHERE resolved_at IS NULL AND asset_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_telemetry_transport_gaps_open_range
     ON telemetry_transport_gaps (tenant_id, agent_id, stream_id, epoch, from_sequence, to_sequence)
     WHERE resolved_at IS NULL;
