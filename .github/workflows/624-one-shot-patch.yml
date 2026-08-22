@@ -6,12 +6,22 @@ on:
       - feat/624-telemetry-transport
     paths:
       - .github/workflows/624-one-shot-patch.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/624-one-shot-patch.yml
 
 permissions:
   contents: write
 
+concurrency:
+  group: telemetry-624-one-shot
+  cancel-in-progress: true
+
 jobs:
   patch:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +39,13 @@ jobs:
 
           main = Path("cmd/synapse-api/main.go")
           text = main.read_text()
-          old = "\t\trouter.SetFleet(agentSvc, workSvc, clock.Now, cfg.FleetClientCertHeader)\n\t\trouter.SetFleetAdmin(agentSvc)\n\n\t\t// Operator-controlled update rollout"
-          new = "\t\trouter.SetFleet(agentSvc, workSvc, clock.Now, cfg.FleetClientCertHeader)\n\t\trouter.SetFleetAdmin(agentSvc)\n\t\tif terr := wireFleetTelemetry(router, databasePool, auditLog, clock, log); terr != nil {\n\t\t\tlog.Error(\"fleet telemetry transport init failed\", \"err\", terr)\n\t\t\tos.Exit(1)\n\t\t}\n\n\t\t// Operator-controlled update rollout"
-          if old not in text:
-              raise SystemExit("main.go fleet composition anchor changed; refusing broad rewrite")
-          main.write_text(text.replace(old, new, 1))
+          if "wireFleetTelemetry(router, databasePool, auditLog, clock, log)" not in text:
+              old = "\t\trouter.SetFleet(agentSvc, workSvc, clock.Now, cfg.FleetClientCertHeader)\n\t\trouter.SetFleetAdmin(agentSvc)\n\n\t\t// Operator-controlled update rollout"
+              new = "\t\trouter.SetFleet(agentSvc, workSvc, clock.Now, cfg.FleetClientCertHeader)\n\t\trouter.SetFleetAdmin(agentSvc)\n\t\tif terr := wireFleetTelemetry(router, databasePool, auditLog, clock, log); terr != nil {\n\t\t\tlog.Error(\"fleet telemetry transport init failed\", \"err\", terr)\n\t\t\tos.Exit(1)\n\t\t}\n\n\t\t// Operator-controlled update rollout"
+              if old not in text:
+                  raise SystemExit("main.go fleet composition anchor changed; refusing broad rewrite")
+              text = text.replace(old, new, 1)
+              main.write_text(text)
 
           spec = Path("api/openapi.yaml")
           text = spec.read_text()
@@ -175,7 +187,7 @@ jobs:
                   new_events: {type: integer, minimum: 0}
                   gaps:
                     type: array
-                    description: Newly/currently observed durable sequence gaps. Gap objects retain legacy Go field casing on this response.
+                    description: Durable sequence gaps; gap objects currently retain legacy Go field casing.
                     items:
                       type: object
                       properties:
