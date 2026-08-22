@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
@@ -19,6 +20,8 @@ const (
 	telemetrySigningKeyLifetime     = 30 * 24 * time.Hour
 	telemetrySigningKeyRotateBefore = 5 * time.Minute
 )
+
+var telemetrySignerMu sync.Mutex
 
 type persistedTelemetrySigner struct {
 	PrivateKeyB64 string    `json:"private_key"`
@@ -49,10 +52,12 @@ func (s *CredentialStore) telemetrySignerPath() string {
 }
 
 // EnsureTelemetrySigner loads a usable signer or creates one when the signer is
-// absent, expired, or inside the bounded pre-expiry rotation window. Corrupt or
-// not-yet-valid persisted state fails loud: silently overwriting damaged key material
-// would hide local state corruption and make audit provenance needlessly ambiguous.
+// absent, expired, or inside the bounded pre-expiry rotation window. Creation and
+// rotation are serialized because batch and gap shippers may start concurrently.
 func (s *CredentialStore) EnsureTelemetrySigner(agentID string, now time.Time) (TelemetrySigner, error) {
+	telemetrySignerMu.Lock()
+	defer telemetrySignerMu.Unlock()
+
 	if agentID == "" {
 		return TelemetrySigner{}, fmt.Errorf("fleetclient: telemetry signer requires agent id")
 	}
