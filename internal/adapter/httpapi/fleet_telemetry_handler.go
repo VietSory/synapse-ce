@@ -19,6 +19,7 @@ import (
 const (
 	fleetTelemetryWireCap    = 8 << 20
 	fleetTelemetryDecodedCap = 32 << 20
+	fleetTelemetryGapMediaType = "application/vnd.synapse.telemetry-gap+json"
 )
 
 // fleetTelemetryIngest is the narrow agent-plane telemetry ingest surface the handler consumes.
@@ -27,10 +28,15 @@ type fleetTelemetryIngest interface {
 	IngestGap(ctx context.Context, authAgentID shared.ID, report fleetagent.TelemetryGapReport) (telemetryingest.GapIngestResult, error)
 }
 
-// ingestTelemetry is the agent-plane endpoint (POST /api/v1/fleet/telemetry). The HTTP layer accepts
-// raw or gzip JSON, bounds both compressed and decoded sizes, and rejects trailing/unknown fields before
-// the use case reaches the identity/signature/schema trust boundary.
+// ingestTelemetry is the agent-plane endpoint (POST /api/v1/fleet/telemetry). Batch JSON and signed
+// durable-loss reports share the authenticated endpoint but use distinct media types and domain-separated
+// signatures. The HTTP layer accepts raw or gzip JSON, bounds both compressed and decoded sizes, and
+// rejects trailing/unknown fields before the use case reaches the trust boundary.
 func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
+	if requestMediaType(r) == fleetTelemetryGapMediaType {
+		f.ingestTelemetryGap(w, r)
+		return
+	}
 	if f.telemetry == nil {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "telemetry ingest not enabled"})
 		return
@@ -64,9 +70,9 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ingestTelemetryGap is the durable-loss companion endpoint. A successful response
-// acknowledges the exact stable GapID only after the signed report has passed the
-// server-authoritative trust boundary and been durably persisted.
+// ingestTelemetryGap handles the gap-report media type. A successful response acknowledges the exact
+// stable GapID only after the signed report has passed the server-authoritative trust boundary and been
+// durably persisted.
 func (f *fleetRouter) ingestTelemetryGap(w http.ResponseWriter, r *http.Request) {
 	if f.telemetry == nil {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "telemetry ingest not enabled"})
@@ -96,6 +102,14 @@ func (f *fleetRouter) ingestTelemetryGap(w http.ResponseWriter, r *http.Request)
 		"acknowledged": true,
 		"gap_id":       res.GapID,
 	})
+}
+
+func requestMediaType(r *http.Request) string {
+	mediaType := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Type")))
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:i])
+	}
+	return mediaType
 }
 
 func readFleetTelemetryBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
