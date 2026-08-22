@@ -9,7 +9,11 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
-const telemetryGapSignatureContext = "synapse-telemetry-gap:v1"
+const (
+	telemetryGapSignatureContext = "synapse-telemetry-gap:v1"
+	maxTelemetryGapInteger       = uint64(1<<63 - 1)
+	maxTelemetryGapIDBytes       = 128
+)
 
 // TelemetryGapManifest is the signed A2->A3 loss evidence emitted by the durable
 // agent spool. It is deliberately separate from sequence holes inferred by the
@@ -45,12 +49,21 @@ func (m TelemetryGapManifest) Validate() error {
 	if m.GapID.IsZero() || m.AgentID.IsZero() || m.HostID.IsZero() || m.AssetID.IsZero() || m.StreamID.IsZero() || m.AgentSessionID == "" {
 		return fmt.Errorf("%w: telemetry gap identity is incomplete", shared.ErrValidation)
 	}
+	if len(m.GapID.String()) > maxTelemetryGapIDBytes {
+		return fmt.Errorf("%w: telemetry gap id exceeds %d bytes", shared.ErrValidation, maxTelemetryGapIDBytes)
+	}
 	if !m.Priority.Valid() || m.Epoch == 0 || m.Count == 0 || m.Reason == "" || m.OccurredAt.IsZero() {
 		return fmt.Errorf("%w: telemetry gap coordinates/reason are incomplete", shared.ErrValidation)
+	}
+	if m.Epoch > maxTelemetryGapInteger || m.Count > maxTelemetryGapInteger {
+		return fmt.Errorf("%w: telemetry gap epoch/count exceeds durable integer range", shared.ErrValidation)
 	}
 	if m.KnownSequence {
 		if m.FromSequence == 0 || m.ToSequence < m.FromSequence || m.Count != m.ToSequence-m.FromSequence+1 {
 			return fmt.Errorf("%w: telemetry gap sequence range/count is invalid", shared.ErrValidation)
+		}
+		if m.FromSequence > maxTelemetryGapInteger || m.ToSequence > maxTelemetryGapInteger {
+			return fmt.Errorf("%w: telemetry gap sequence exceeds durable integer range", shared.ErrValidation)
 		}
 	} else if m.FromSequence != 0 || m.ToSequence != 0 {
 		return fmt.Errorf("%w: unknown-coordinate telemetry gap cannot claim a sequence range", shared.ErrValidation)
@@ -107,7 +120,11 @@ func telemetryGapCommitment(m TelemetryGapManifest, keyID string) []byte {
 	writeCommitString(&buf, m.StreamID.String())
 	writeCommitUint64(&buf, uint64(m.Priority))
 	writeCommitUint64(&buf, m.Epoch)
-	if m.KnownSequence { writeCommitUint64(&buf, 1) } else { writeCommitUint64(&buf, 0) }
+	if m.KnownSequence {
+		writeCommitUint64(&buf, 1)
+	} else {
+		writeCommitUint64(&buf, 0)
+	}
 	writeCommitUint64(&buf, m.FromSequence)
 	writeCommitUint64(&buf, m.ToSequence)
 	writeCommitString(&buf, m.Reason)
