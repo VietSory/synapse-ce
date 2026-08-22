@@ -20,12 +20,17 @@ import (
 )
 
 const (
-	fleetTelemetryWireCap    = 8 << 20
-	fleetTelemetryDecodedCap = 32 << 20
+	fleetTelemetryWireCap        = 8 << 20
+	fleetTelemetryDecodedCap     = 32 << 20
+	fleetTelemetryGapContentType = "application/vnd.synapse.telemetry-gap+json"
 )
 
 type fleetTelemetryTransport interface {
 	IngestSigned(context.Context, *fleetagent.Agent, fleetagent.SignedTelemetryBatch) (ports.TelemetryDeliveryResult, error)
+}
+
+type fleetTelemetryGapTransport interface {
+	IngestGapSigned(context.Context, *fleetagent.Agent, fleetagent.SignedTelemetryGap) (shared.ID, error)
 }
 
 func (rt *Router) SetFleetTelemetry(transport fleetTelemetryTransport, keys ports.AgentSigningKeyStore, bindings ports.TelemetryAssetBindingStore) {
@@ -92,18 +97,31 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := readTelemetryRequest(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry body"})
 		return
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	if mediaType == fleetTelemetryGapContentType {
+		gapTransport, ok := f.telemetry.(fleetTelemetryGapTransport)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, errorBody{Error: "telemetry gap ingest not enabled"})
+			return
+		}
+		var gap fleetagent.SignedTelemetryGap
+		if err := decodeStrictTelemetryValue(body, &gap); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry gap body"})
+			return
+		}
+		gapID, err := gapTransport.IngestGapSigned(r.Context(), agent, gap)
+		if err != nil {
+			writeFleetTelemetryError(w, f, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"gap_id": gapID})
+		return
+	}
 	var batch fleetagent.SignedTelemetryBatch
-	if err := dec.Decode(&batch); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
-		return
-	}
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+	if err := decodeStrictTelemetryValue(body, &batch); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
 		return
 	}
@@ -115,6 +133,22 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ack": result.ACK, "new_events": result.NewEvents, "gaps": result.Gaps,
 	})
+}
+
+func decodeStrictTelemetryValue(body []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func readTelemetryRequest(w http.ResponseWriter, r *http.Request) ([]byte, error) {
