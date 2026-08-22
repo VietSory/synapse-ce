@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	maxForwardGap = 4096
+	maxForwardGap   = 4096
 	maxIngestRetries = 8
 )
 
@@ -63,7 +63,7 @@ type Service struct {
 }
 
 // NewService is fail-closed for the full #624 production trust boundary. The transport
-// implementation must also own the authoritative agent->asset binding; this keeps the
+// implementation must also own the authoritative agent→asset binding; this keeps the
 // existing composition root source-compatible while preventing a partially wired ingest.
 func NewService(transport ports.TelemetryTransportStore, keys SigningKeyResolver, audit ports.AuditLogger, clock ports.Clock) (*Service, error) {
 	if transport == nil || keys == nil || audit == nil || clock == nil {
@@ -77,9 +77,10 @@ func NewService(transport ports.TelemetryTransportStore, keys SigningKeyResolver
 }
 
 // Ingest verifies and stores one telemetry batch. Every identity coordinate is
-// server-authoritative: authenticated AgentID, deterministic enrollment SessionID,
-// deterministic per-priority StreamID, and the canonical host AssetID persisted by
-// the host-inventory path. A signed payload cannot select a sibling identity/stream.
+// server-authoritative: authenticated AgentID/HostID, deterministic enrollment
+// SessionID, deterministic per-priority StreamID, and the canonical host AssetID
+// persisted by the host-inventory path. A signed payload cannot select a sibling
+// identity, host, stream, or asset.
 func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestRequest) (IngestResult, error) {
 	now := s.clock.Now().UTC()
 	m := req.Manifest
@@ -89,6 +90,13 @@ func (s *Service) Ingest(ctx context.Context, authAgentID shared.ID, req IngestR
 	if authAgentID.IsZero() || m.AgentID != authAgentID {
 		s.reject(ctx, authAgentID, m, "identity_mismatch", now)
 		return IngestResult{}, fmt.Errorf("%w: manifest agent %q is not the authenticated agent %q", shared.ErrForbidden, m.AgentID, authAgentID)
+	}
+	// A0.1 currently defines the VM host identity as the enrolled canonical agent
+	// identity. Hostname/machine-id remain reconciliation hints only; they cannot
+	// choose the security principal carried by a telemetry batch.
+	if m.HostID != authAgentID {
+		s.reject(ctx, authAgentID, m, "host_mismatch", now)
+		return IngestResult{}, fmt.Errorf("%w: manifest host %q is not the authenticated agent host %q", shared.ErrForbidden, m.HostID, authAgentID)
 	}
 	wantSession := fleetagent.CanonicalSessionID(authAgentID)
 	if m.AgentSessionID() != wantSession {
@@ -245,7 +253,7 @@ func (s *Service) reject(ctx context.Context, actor shared.ID, m fleetagent.Tele
 	_ = s.audit.Record(ctx, ports.AuditEntry{
 		Actor: actor.String(), Action: "fleet.telemetry.reject", Target: m.StreamID.String(), At: at,
 		Metadata: map[string]string{
-			"batch_id": m.BatchID.String(), "manifest_agent_id": m.AgentID.String(),
+			"batch_id": m.BatchID.String(), "manifest_agent_id": m.AgentID.String(), "manifest_host_id": m.HostID.String(),
 			"epoch": fmt.Sprintf("%d", m.Position.Epoch), "sequence": fmt.Sprintf("%d", m.Position.Sequence),
 			"reason": reason,
 		},
