@@ -79,6 +79,31 @@ func TestReadTelemetryRequestAcceptsGzipAndEnforcesDecodedCap(t *testing.T) {
 	}
 }
 
+func TestReadTelemetryRequestEnforcesWireCap(t *testing.T) {
+	body := bytes.Repeat([]byte{'x'}, fleetTelemetryWireCap+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/telemetry", bytes.NewReader(body))
+	if _, err := readTelemetryRequest(httptest.NewRecorder(), req); err == nil {
+		t.Fatal("wire body over cap must be rejected")
+	}
+}
+
+func TestReadTelemetryRequestRejectsEmptyAndCorruptGzip(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/telemetry", http.NoBody)
+		if _, err := readTelemetryRequest(httptest.NewRecorder(), req); err == nil {
+			t.Fatal("empty telemetry body must be rejected")
+		}
+	})
+
+	t.Run("corrupt gzip", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/telemetry", bytes.NewBufferString("not-gzip"))
+		req.Header.Set("Content-Encoding", "gzip")
+		if _, err := readTelemetryRequest(httptest.NewRecorder(), req); err == nil {
+			t.Fatal("corrupt gzip body must be rejected")
+		}
+	})
+}
+
 func TestReadTelemetryRequestRejectsUnknownEncoding(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/telemetry", bytes.NewBufferString("{}"))
 	req.Header.Set("Content-Encoding", "br")
