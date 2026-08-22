@@ -85,7 +85,10 @@ func (s *GapTransportService) IngestGapSigned(ctx context.Context, agent *fleeta
 	}
 	if err := s.audit.Record(ctx, ports.AuditEntry{
 		Actor: agent.ID.String(), Action: "telemetry.agent_gap_ingested", Target: m.GapID.String(), At: now,
-		Metadata: map[string]string{"tenant_id": agent.TenantID.String(), "asset_id": assetID.String(), "reason": m.Reason, "count": fmt.Sprint(m.Count)},
+		Metadata: map[string]string{
+			"tenant_id": agent.TenantID.String(), "asset_id": assetID.String(),
+			"reason": m.Reason, "count": fmt.Sprint(m.Count),
+		},
 	}); err != nil {
 		return m.GapID, fmt.Errorf("%w: telemetry agent gap became durable but ingest audit failed: %v", shared.ErrSaturated, err)
 	}
@@ -95,10 +98,16 @@ func (s *GapTransportService) IngestGapSigned(ctx context.Context, agent *fleeta
 func (s *GapTransportService) rejectGap(ctx context.Context, agent *fleetagent.Agent, signed fleetagent.SignedTelemetryGap, reason string, cause error) error {
 	now := s.clock.Now().UTC()
 	target := signed.Manifest.GapID.String()
-	if target == "" { target = "uncommitted" }
+	if target == "" {
+		target = "uncommitted"
+	}
 	meta := map[string]string{"reason": reason, "agent_id": agent.ID.String(), "tenant_id": agent.TenantID.String()}
-	if signed.KeyID != "" { meta["key_id"] = signed.KeyID }
-	if err := s.audit.Record(ctx, ports.AuditEntry{Actor: agent.ID.String(), Action: "telemetry.agent_gap_rejected", Target: target, Metadata: meta, At: now}); err != nil {
+	if signed.KeyID != "" {
+		meta["key_id"] = signed.KeyID
+	}
+	if err := s.audit.Record(ctx, ports.AuditEntry{
+		Actor: agent.ID.String(), Action: "telemetry.agent_gap_rejected", Target: target, Metadata: meta, At: now,
+	}); err != nil {
 		return errors.Join(cause, fmt.Errorf("telemetry gap rejection audit failed: %w", err))
 	}
 	return cause
