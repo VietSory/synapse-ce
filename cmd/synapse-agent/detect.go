@@ -18,16 +18,6 @@ import (
 	detectuc "github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/detect"
 )
 
-// detectionIdentity derives the canonical (host, agent) identity the detection engine tags its events
-// and detections with, from the ENROLLED credential — never from the mutable display name (cfg.name).
-//
-// This is the D1 fix (#606): the server issues a canonical AgentID at enrolment and resolves the asset
-// binding from it, so renaming an agent must not forge a new data-plane identity, two hosts sharing a
-// display name must not collide, and signing-key lookup by enrolled AgentID must not miss. The agent
-// runs one detection sensor for its own host, so that single canonical AgentID is the identity for both
-// the host and agent tags here; the control plane remains authoritative and binds the asset on ingest.
-// Returns ok=false when the credential carries no AgentID, so detection fails closed rather than
-// starting under an empty or attacker-influenced identity.
 func detectionIdentity(cred fleetclient.Credential) (host, agent shared.ID, ok bool) {
 	id := shared.ID(strings.TrimSpace(cred.AgentID))
 	if id == "" {
@@ -37,9 +27,8 @@ func detectionIdentity(cred fleetclient.Credential) (host, agent shared.ID, ok b
 }
 
 // startDetection owns the process-lifetime telemetry WAL/transport and optionally
-// attaches the eBPF detection producer. Transport lifetime is deliberately independent
-// from detection: disabling detection must still drain a recovered WAL, and a sensor
-// failure must not strand already-durable telemetry until the whole agent restarts.
+// attaches the eBPF detection producer. Batch and durable-gap shippers are both
+// process-owned users of the same spool and finish before Close.
 func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential) {
 	classes, err := parseDetectClasses(r.cfg.detectClasses)
 	if err != nil {
@@ -47,7 +36,7 @@ func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential
 		classes = nil
 	}
 	if len(classes) == 0 && !r.telemetrySpoolExists() {
-		return // no producer requested and no durable backlog to drain
+		return
 	}
 
 	host, agent, ok := detectionIdentity(cred)
@@ -63,13 +52,14 @@ func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	shipDone := r.startTelemetryShipper(runCtx, durable, cred)
+	gapShipDone := r.startTelemetryGapShipper(runCtx, durable, cred)
 	metricsDone := closedTelemetryWorker()
 	if done, metricsErr := r.startSpoolMetrics(runCtx, durable); metricsErr != nil {
 		log.Printf("telemetry: agent metrics listener unavailable: %v", metricsErr)
 	} else {
 		metricsDone = done
 	}
-	workers := []<-chan struct{}{shipDone, metricsDone}
+	workers := []<-chan struct{}{shipDone, gapShipDone, metricsDone}
 
 	if len(classes) == 0 {
 		log.Printf("telemetry transport resuming durable backlog with detection disabled: spool=%s", r.telemetrySpoolDir())
@@ -113,8 +103,6 @@ func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential
 					go func() {
 						defer close(engineDone)
 						if err := eng.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
-							// A dead producer cannot be allowed to strand records already
-							// fsynced in the WAL; the transport stays alive until process shutdown.
 							log.Printf("detection engine stopped; telemetry transport remains active: %v", err)
 						}
 					}()
@@ -124,8 +112,6 @@ func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential
 		}
 	}
 
-	// The WAL is process-owned. Cancel every user first and wait for all of them
-	// before Close, so shutdown cannot race a shipper, metrics scrape, or producer.
 	go func(done []<-chan struct{}) {
 		<-ctx.Done()
 		cancelRun()
@@ -138,8 +124,6 @@ func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential
 	}(append([]<-chan struct{}(nil), workers...))
 }
 
-// parseDetectClasses turns the comma-separated config into validated classes. An unknown class is a
-// configuration error (the whole engine stays off) rather than a silently-ignored typo.
 func parseDetectClasses(s string) ([]detection.Class, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -160,8 +144,6 @@ func parseDetectClasses(s string) ([]detection.Class, error) {
 	return out, nil
 }
 
-// parseCeiling reads the CPU-ceiling percent from the environment; a missing or invalid value disables
-// load shedding (0), which is the safe default (shed only on a deliberate, valid setting).
 func parseCeiling(s string) float64 {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -169,15 +151,12 @@ func parseCeiling(s string) float64 {
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil || v < 0 {
-		// The raw value is operator-controlled (an environment variable), so it is deliberately kept
-		// out of the log line to prevent log injection.
 		log.Print("detection: ignoring invalid SYNAPSE_DETECT_CPU_CEIL_PCT (want a non-negative number)")
 		return 0
 	}
 	return v
 }
 
-// formatCoverage renders a per-class coverage line: active classes and, explicitly, the gaps.
 func formatCoverage(cov []detection.ClassCoverage) string {
 	parts := make([]string, 0, len(cov))
 	for _, c := range cov {
