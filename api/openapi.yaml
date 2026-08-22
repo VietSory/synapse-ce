@@ -108,7 +108,7 @@ paths:
                 required: [key_id, purpose, not_before, not_after]
                 properties:
                   key_id: {type: string}
-                  purpose: {type: string, const: telemetry_batch}
+                  purpose: {type: string, const: telemetry-batch}
                   not_before: {type: string, format: date-time}
                   not_after: {type: string, format: date-time}
         "400": {$ref: "#/components/responses/BadRequest"}
@@ -147,14 +147,14 @@ paths:
                   required: [protocol_version, schema_version, batch_id, agent_id, host_id, agent_session_id, asset_id, stream_id, priority, epoch, sequence, previous_sequence, event_time_min, event_time_max, observed_count, kept_count, sampled_out_count, truncated_count, dropped_count, sampling_policy_digest, event_ids, event_digests, payload_digest]
                   properties:
                     protocol_version: {type: integer, const: 1}
-                    schema_version: {type: integer, minimum: 1}
+                    schema_version: {type: integer, enum: [1, 2]}
                     batch_id: {type: string, minLength: 1}
                     agent_id: {type: string, minLength: 1}
                     host_id: {type: string, minLength: 1}
                     agent_session_id: {type: string, minLength: 1}
                     asset_id: {type: string, minLength: 1}
                     stream_id: {type: string, minLength: 1}
-                    priority: {type: integer, minimum: 0}
+                    priority: {type: integer, minimum: 0, maximum: 3}
                     epoch: {type: integer, minimum: 1}
                     sequence: {type: integer, minimum: 1}
                     previous_sequence: {type: integer, minimum: 0}
@@ -185,7 +185,7 @@ paths:
                     type: object
                     required: [priority, epoch, through]
                     properties:
-                      priority: {type: integer, minimum: 0}
+                      priority: {type: integer, minimum: 0, maximum: 3}
                       epoch: {type: integer, minimum: 1}
                       through: {type: integer, minimum: 0}
                   new_events: {type: integer, minimum: 0}
