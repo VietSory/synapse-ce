@@ -205,6 +205,30 @@ func TestShipTelemetryPriorityRejectsForgedACK(t *testing.T) {
 	}
 }
 
+func TestShipTelemetryPriorityRejectsStaleNoProgressACK(t *testing.T) {
+	agentID := shared.ID("agent-stale-ack")
+	s := openShipperTestSpool(t, agentID)
+	at := time.Now().UTC()
+	first := enqueueShipperRecord(t, s, 1, at)
+	second := enqueueShipperRecord(t, s, 1, at.Add(time.Millisecond))
+	if _, err := s.Ack(context.Background(), ports.SpoolACK{Priority: fleetagent.PriorityP3, Epoch: first.Epoch, Through: first.Sequence}); err != nil {
+		t.Fatalf("prime local ACK: %v", err)
+	}
+	api := &fakeTelemetryTransport{ack: &fleetclient.FleetTelemetryACK{Priority: fleetagent.PriorityP3, Epoch: second.Epoch, Through: first.Sequence}}
+	cred := fleetclient.Credential{AgentID: agentID.String(), AssetID: "asset-server", Token: "secret"}
+	shipped, _, err := (&runner{}).shipTelemetryPriority(context.Background(), s, api, cred, testTelemetrySigner(t, cred.AgentID), fleetagent.PriorityP3)
+	if err == nil || shipped {
+		t.Fatalf("stale no-progress ACK must fail closed, shipped=%t err=%v", shipped, err)
+	}
+	left, peekErr := s.PeekPriority(context.Background(), fleetagent.PriorityP3, ports.PeekSpoolRequest{})
+	if peekErr != nil {
+		t.Fatal(peekErr)
+	}
+	if len(left) != 1 || left[0].Position.Sequence != second.Sequence {
+		t.Fatalf("stale ACK must retain unacked WAL tail: %+v", left)
+	}
+}
+
 func TestContiguousTelemetryPrefixStopsAtSchemaBoundary(t *testing.T) {
 	agentID := shared.ID("agent-schema")
 	s := openShipperTestSpool(t, agentID)
