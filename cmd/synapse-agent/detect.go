@@ -83,10 +83,11 @@ func (r *runner) startDetection(ctx context.Context, cred fleetclient.Credential
 		return
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
-	// The shipper and sensor own exactly the same WAL lifecycle. If the engine
+	// The shippers and sensor own exactly the same WAL lifecycle. If the engine
 	// stops, runCtx is cancelled before the shared spool is closed, so no shipper
 	// goroutine can spin forever against a closed WAL.
 	r.startTelemetryShipper(runCtx, durable, cred)
+	r.startTelemetryGapShipper(runCtx, durable, cred)
 	if err := r.startSpoolMetrics(runCtx, durable); err != nil {
 		log.Printf("detection: agent metrics listener unavailable: %v", err)
 	}
