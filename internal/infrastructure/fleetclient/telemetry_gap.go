@@ -13,6 +13,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
+const telemetryGapMediaType = "application/vnd.synapse.telemetry-gap+json"
+
 // TelemetryGapShipResponse acknowledges one stable local loss object. GapID is
 // echoed by the server only after the signed report has passed validation and
 // durable persistence; callers must match it before deleting the local journal.
@@ -21,9 +23,9 @@ type TelemetryGapShipResponse struct {
 	GapID        shared.ID `json:"gap_id"`
 }
 
-// ShipTelemetryGap sends one purpose-bound signed durable-loss report. HTTP gzip
-// is transport-only: the Ed25519 signature commits to the canonical report fields,
-// not their wire compression.
+// ShipTelemetryGap sends one purpose-bound signed durable-loss report over the
+// authenticated telemetry endpoint with a distinct media type. HTTP gzip is
+// transport-only: the Ed25519 signature commits to canonical report fields.
 func (c *Client) ShipTelemetryGap(ctx context.Context, token string, report fleetagent.TelemetryGapReport) (TelemetryGapShipResponse, error) {
 	var out TelemetryGapShipResponse
 	if err := report.Validate(); err != nil {
@@ -42,12 +44,12 @@ func (c *Client) ShipTelemetryGap(ctx context.Context, token string, report flee
 	if err := zw.Close(); err != nil {
 		return out, fmt.Errorf("fleetclient: gzip telemetry gap close: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/fleet/telemetry/gaps", bytes.NewReader(compressed.Bytes()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/fleet/telemetry", bytes.NewReader(compressed.Bytes()))
 	if err != nil {
 		return out, fmt.Errorf("fleetclient: telemetry gap request: %w", err)
 	}
 	req.Header.Set(protoHeader, protoVersion)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", telemetryGapMediaType)
 	req.Header.Set("Content-Encoding", "gzip")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
