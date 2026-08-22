@@ -17,6 +17,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
+const telemetryGapContentType = "application/vnd.synapse.telemetry-gap+json"
+
 // HostInventoryResponse returns the server-reconciled canonical asset identity. The
 // agent persists this value and never substitutes its mutable name or AgentID for it.
 type HostInventoryResponse struct {
@@ -91,6 +93,10 @@ func (r TelemetryShipResponse) Ack() (fleetagent.DeliveryPriority, uint64, uint6
 	return r.ACK.Priority, r.ACK.Epoch, r.ACK.Through
 }
 
+type TelemetryGapShipResponse struct {
+	GapID shared.ID `json:"gap_id"`
+}
+
 // HTTPStatusError preserves the status required by A2's retry policy without
 // exposing or depending on server response text.
 type HTTPStatusError struct {
@@ -154,6 +160,40 @@ func (c *Client) ShipTelemetry(ctx context.Context, token string, batch fleetage
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return out, fmt.Errorf("fleetclient: decode telemetry ack: %w", err)
+	}
+	return out, nil
+}
+
+// ShipTelemetryGap sends one signed durable spool-loss record over the same
+// authenticated telemetry route using a distinct media type. The local gap journal
+// must retain the record until the returned GapID matches the signed evidence.
+func (c *Client) ShipTelemetryGap(ctx context.Context, token string, gap fleetagent.SignedTelemetryGap) (TelemetryGapShipResponse, error) {
+	var out TelemetryGapShipResponse
+	body, err := json.Marshal(gap)
+	if err != nil {
+		return out, fmt.Errorf("fleetclient: marshal telemetry gap: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/fleet/telemetry", bytes.NewReader(body))
+	if err != nil {
+		return out, fmt.Errorf("fleetclient: telemetry gap request: %w", err)
+	}
+	req.Header.Set(protoHeader, protoVersion)
+	req.Header.Set("Content-Type", telemetryGapContentType)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return out, fmt.Errorf("fleetclient: telemetry gap: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		h := telemetryHTTPStatusError(resp)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return out, h
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
+		return out, fmt.Errorf("fleetclient: decode telemetry gap ack: %w", err)
 	}
 	return out, nil
 }
