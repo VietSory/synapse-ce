@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 )
 
 func TestShipTelemetryUsesGzipAndDecodesACK(t *testing.T) {
@@ -69,6 +70,66 @@ func TestShipTelemetryPreservesRetryAfter(t *testing.T) {
 			}
 			if !status.Retryable() || status.RetryAfter != 7*time.Second || status.StatusCode != statusCode {
 				t.Fatalf("retry contract lost: %+v", status)
+			}
+		})
+	}
+}
+
+func TestShipTelemetryGapUsesDistinctMediaTypeAndDecodesACK(t *testing.T) {
+	gapID := shared.ID("gap-client-wire")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/telemetry" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get(protoHeader) != protoVersion || r.Header.Get("Authorization") != "Bearer token" {
+			t.Fatalf("missing fleet auth/proto headers")
+		}
+		if got := r.Header.Get("Content-Type"); got != telemetryGapContentType {
+			t.Fatalf("gap Content-Type=%q want=%q", got, telemetryGapContentType)
+		}
+		if got := r.Header.Get("Content-Encoding"); got != "" {
+			t.Fatalf("gap Content-Encoding=%q want empty", got)
+		}
+		var got fleetagent.SignedTelemetryGap
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode gap request: %v", err)
+		}
+		if got.Manifest.GapID != gapID {
+			t.Fatalf("gap id=%q want=%q", got.Manifest.GapID, gapID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"gap_id": gapID})
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := New(srv.URL, 5*time.Second).ShipTelemetry(context.Background(), "token", fleetagent.SignedTelemetryGap{
+		Manifest: fleetagent.TelemetryGapManifest{GapID: gapID},
+	})
+	if err != nil {
+		t.Fatalf("ShipTelemetryGap: %v", err)
+	}
+	if resp.GapID != gapID {
+		t.Fatalf("gap ACK=%q want=%q", resp.GapID, gapID)
+	}
+}
+
+func TestShipTelemetryGapPreservesRetryAfter(t *testing.T) {
+	for _, statusCode := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "6")
+				w.WriteHeader(statusCode)
+				_, _ = w.Write([]byte("busy"))
+			}))
+			defer srv.Close()
+
+			_, err := New(srv.URL, 5*time.Second).ShipTelemetryGap(context.Background(), "token", fleetagent.SignedTelemetryGap{})
+			var status *HTTPStatusError
+			if !errors.As(err, &status) {
+				t.Fatalf("want HTTPStatusError, got %v", err)
+			}
+			if !status.Retryable() || status.RetryAfter != 6*time.Second || status.StatusCode != statusCode {
+				t.Fatalf("gap retry contract lost: %+v", status)
 			}
 		})
 	}
