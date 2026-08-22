@@ -1,8 +1,8 @@
 -- +goose Up
 -- A3 (#624) tail: materialize server-authoritative transport facts that cannot
 -- safely live only in agent memory: the enrolled-agent -> canonical host-asset binding,
--- the exact batch commitment occupying each delivery sequence, and the current/history
--- view of sequence gaps. telemetry_stream_positions remains the ACK source of truth.
+-- exact per-sequence batch commitments, inferred delivery gaps, and durable agent-origin
+-- spool gaps. telemetry_stream_positions remains the ACK source of truth.
 
 ALTER TABLE fleet_agents
     ADD CONSTRAINT uq_fleet_agents_tenant_id UNIQUE (tenant_id, id);
@@ -20,8 +20,6 @@ CREATE INDEX idx_telemetry_asset_bindings_asset
     ON telemetry_asset_bindings (tenant_id, asset_id);
 CALL synapse_enable_tenant_rls('telemetry_asset_bindings');
 
--- Host inventory stamps reporting_agent_id from the authenticated actor, never the
--- request body. Keep the telemetry binding synchronized in the same asset transaction.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION synapse_sync_telemetry_asset_binding()
 RETURNS TRIGGER
@@ -58,9 +56,6 @@ CREATE TRIGGER fleet_assets_sync_telemetry_binding
 AFTER INSERT OR UPDATE OF attributes, updated_at ON fleet_assets
 FOR EACH ROW EXECUTE FUNCTION synapse_sync_telemetry_asset_binding();
 
--- One immutable signed-batch identity per delivery coordinate. The observed-time
--- span and priority are derived from the already-verified canonical events and let
--- missing neighboring sequences be materialized as coverage windows, not point markers.
 CREATE TABLE telemetry_batch_commits (
     tenant_id       TEXT NOT NULL REFERENCES tenants(id),
     agent_id        TEXT NOT NULL,
@@ -82,12 +77,44 @@ CREATE INDEX idx_telemetry_batch_commits_batch
     ON telemetry_batch_commits (tenant_id, batch_id);
 CALL synapse_enable_tenant_rls('telemetry_batch_commits');
 
+-- Agent-origin loss is immutable provenance, not an AckLedger hole. It therefore has
+-- its own table: late-arriving sequence fills can resolve telemetry_transport_gaps but
+-- can never erase quota/corruption/recovery facts already observed on the endpoint.
+CREATE TABLE telemetry_agent_gaps (
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id),
+    gap_id             TEXT NOT NULL,
+    agent_id           TEXT NOT NULL,
+    asset_id           TEXT NOT NULL,
+    stream_id          TEXT NOT NULL,
+    priority           INT NOT NULL CHECK (priority BETWEEN 0 AND 3),
+    epoch              BIGINT NOT NULL CHECK (epoch >= 1),
+    known_sequence     BOOLEAN NOT NULL,
+    from_sequence      BIGINT,
+    to_sequence        BIGINT,
+    count              BIGINT NOT NULL CHECK (count >= 1),
+    reason             TEXT NOT NULL CHECK (reason IN ('quota_eviction','quota_backpressure','corrupt_frame','torn_write','io_failure','unsynced_tail','state_recovery')),
+    from_at            TIMESTAMPTZ NOT NULL,
+    to_at              TIMESTAMPTZ NOT NULL CHECK (to_at >= from_at),
+    first_reported_at  TIMESTAMPTZ NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL CHECK (updated_at >= first_reported_at),
+    PRIMARY KEY (tenant_id, gap_id),
+    FOREIGN KEY (tenant_id, agent_id) REFERENCES fleet_agents(tenant_id, id),
+    FOREIGN KEY (tenant_id, asset_id) REFERENCES fleet_assets(tenant_id, id),
+    CONSTRAINT telemetry_agent_gaps_sequence_shape CHECK (
+        (known_sequence AND from_sequence IS NOT NULL AND from_sequence >= 1 AND to_sequence IS NOT NULL AND to_sequence >= from_sequence AND count = to_sequence - from_sequence + 1)
+        OR
+        (NOT known_sequence AND from_sequence IS NULL AND to_sequence IS NULL)
+    )
+);
+CREATE INDEX idx_telemetry_agent_gaps_coverage
+    ON telemetry_agent_gaps (tenant_id, asset_id, priority, from_at, to_at);
+CREATE INDEX idx_telemetry_agent_gaps_agent
+    ON telemetry_agent_gaps (tenant_id, agent_id, stream_id, epoch);
+CALL synapse_enable_tenant_rls('telemetry_agent_gaps');
+
 CREATE TABLE telemetry_transport_gaps (
     tenant_id      TEXT NOT NULL REFERENCES tenants(id),
     agent_id       TEXT NOT NULL,
-    -- Coverage metadata is nullable for low-level ACK-state repair/import paths that
-    -- do not yet have the neighboring batch commitments. The live ingest path always
-    -- commits the received batch first, so production gaps are enriched immediately.
     asset_id       TEXT,
     stream_id      TEXT NOT NULL,
     priority       INT CHECK (priority BETWEEN 0 AND 3),
@@ -120,17 +147,18 @@ CREATE UNIQUE INDEX uq_telemetry_transport_gaps_open_range
 CALL synapse_enable_tenant_rls('telemetry_transport_gaps');
 
 -- +goose Down
--- Gap rows are provenance. Refuse a destructive rollback once the live transport has
--- materialized any; operators must explicitly preserve/migrate that evidence first.
+-- Both inferred and agent-origin gap rows are provenance. Refuse destructive rollback
+-- once either contains evidence that an operator would otherwise silently discard.
 -- +goose StatementBegin
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM telemetry_transport_gaps) THEN
-        RAISE EXCEPTION 'cannot roll back 0110: telemetry transport gap provenance exists';
+    IF EXISTS (SELECT 1 FROM telemetry_transport_gaps) OR EXISTS (SELECT 1 FROM telemetry_agent_gaps) THEN
+        RAISE EXCEPTION 'cannot roll back 0110: telemetry gap provenance exists';
     END IF;
 END $$;
 -- +goose StatementEnd
 DROP TABLE telemetry_transport_gaps;
+DROP TABLE telemetry_agent_gaps;
 DROP TABLE telemetry_batch_commits;
 DROP TRIGGER fleet_assets_sync_telemetry_binding ON fleet_assets;
 DROP FUNCTION synapse_sync_telemetry_asset_binding();
