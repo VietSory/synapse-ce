@@ -62,7 +62,7 @@ func TestTelemetryTransportTailBindingAndDurableGaps(t *testing.T) {
 	})
 
 	if _, err := pool.Exec(ctx, `INSERT INTO fleet_assets(id,tenant_id,kind,"key",name,attributes,created_at,updated_at)
-		VALUES($1,$2,'host',$3,$4,jsonb_build_object('reporting_agent_id',$5),$6,$6)`,
+		VALUES($1,$2,'host',$3,$4,jsonb_build_object('reporting_agent_id',$5::text),$6,$6)`,
 		asset.String(), tenant.String(), "machine/"+suffix, "host-"+suffix, agent.String(), now); err != nil {
 		t.Fatalf("seed host asset and trigger telemetry binding: %v", err)
 	}
