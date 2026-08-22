@@ -6,13 +6,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/fleetclient"
-	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/spool"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
@@ -55,10 +56,10 @@ func testTelemetryRecord(agent string, sequence uint64, schema int) ports.SpoolR
 			Priority: fleetagent.PriorityP3,
 			Epoch:    4,
 			Sequence: sequence,
-			Session:  fleetagent.CanonicalSessionID(fleetagentID(agent)),
+			Session:  fleetagent.CanonicalSessionID(shared.ID(agent)),
 			Boot:     "boot-1",
 		},
-		EventID:       fleetagentID("event-" + time.Unix(int64(sequence), 0).Format("150405")),
+		EventID:       shared.ID("event-" + strconv.FormatUint(sequence, 10)),
 		EventClass:    detection.ClassProcess,
 		ContentType:   "application/json",
 		Payload:       []byte(`{"event":"ok"}`),
@@ -68,18 +69,6 @@ func testTelemetryRecord(agent string, sequence uint64, schema int) ports.SpoolR
 		SchemaVersion: schema,
 	}
 }
-
-func fleetagentID(value string) stringID { return stringID(value) }
-
-type stringID = interfaceStringID
-
-// interfaceStringID is kept as an alias target solely to make the test fixtures
-// concise while preserving the shared.ID static type at call sites below.
-type interfaceStringID = sharedIDAlias
-
-type sharedIDAlias = fleetagentTestSharedID
-
-type fleetagentTestSharedID = shared.ID
 
 func TestBuildTelemetryIngestRequestUsesBatchSequenceNotWALSequence(t *testing.T) {
 	signer := testTelemetrySigner(t, "agent-1")
@@ -137,11 +126,11 @@ func TestTelemetryBatchJournalRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := telemetryBatchLaneState{
-		Version: telemetryBatchJournalVersion,
-		Priority: fleetagent.PriorityP3,
-		Epoch: 4,
+		Version:       telemetryBatchJournalVersion,
+		Priority:      fleetagent.PriorityP3,
+		Epoch:         4,
 		LastCommitted: 2,
-		Pending: &telemetryPendingBatch{Epoch: 4, Sequence: 3, WALFrom: 5, WALThrough: 5, Request: req},
+		Pending:       &telemetryPendingBatch{Epoch: 4, Sequence: 3, WALFrom: 5, WALThrough: 5, Request: req},
 	}
 	if err := store.Save(state); err != nil {
 		t.Fatal(err)
