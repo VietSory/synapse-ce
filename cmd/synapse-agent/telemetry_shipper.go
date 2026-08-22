@@ -364,9 +364,9 @@ func buildTelemetryIngestRequest(
 		digest := fleetagent.TelemetryEventDigest(record.Payload, assetID)
 		refs = append(refs, fleetagent.EventRef{ID: record.EventID, Digest: digest})
 		events = append(events, fleetclient.TelemetryEventPayload{
-			EventID: record.EventID,
-			Class: record.EventClass,
-			Payload: append([]byte(nil), record.Payload...),
+			EventID:    record.EventID,
+			Class:      record.EventClass,
+			Payload:    append([]byte(nil), record.Payload...),
 			ObservedAt: record.ObservedAt.UTC(),
 		})
 		at := record.ObservedAt.UTC()
@@ -387,6 +387,7 @@ func buildTelemetryIngestRequest(
 		SchemaVersion:        first.SchemaVersion,
 		BatchID:              telemetryBatchID(agentID, streamID, first.Position.Epoch, batchSequence, payloadDigest),
 		AgentID:              agentID,
+		HostID:               agentID,
 		AssetID:              assetID,
 		StreamID:             streamID,
 		Position: fleetagent.StreamPosition{
