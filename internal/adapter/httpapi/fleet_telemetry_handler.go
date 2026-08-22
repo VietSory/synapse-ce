@@ -1,17 +1,24 @@
 package httpapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/fleet/telemetryingest"
 )
 
-// fleetTelemetryCap bounds one agent telemetry batch body. It matches the agent spool's per-batch sizing
-// so a full priority batch fits, while a malicious oversize body is rejected before decode.
-const fleetTelemetryCap = 16 << 20 // 16 MiB
+const (
+	fleetTelemetryWireCap    = 8 << 20
+	fleetTelemetryDecodedCap = 32 << 20
+)
 
 // fleetTelemetryIngest is the narrow agent-plane telemetry ingest surface the handler consumes. The
 // usecase (telemetryingest.Service) satisfies it; defined here (consumer side) so the adapter depends on
@@ -20,11 +27,9 @@ type fleetTelemetryIngest interface {
 	Ingest(ctx context.Context, authAgentID shared.ID, req telemetryingest.IngestRequest) (telemetryingest.IngestResult, error)
 }
 
-// ingestTelemetry is the agent-plane endpoint (POST /api/v1/fleet/telemetry): an enrolled agent ships a
-// signed TelemetryBatchManifest plus its events; the control plane verifies identity, signing key, and
-// schema SERVER-SIDE (fail-closed), sequences the batch idempotently, derives gaps from the ACK snapshot, and returns the
-// highest-contiguous ACK so the agent can delete acknowledged batches. Identity/key/schema failures map
-// to 403/4xx via writeError; the agent id + tenant come from the authenticated credential, never the body.
+// ingestTelemetry is the agent-plane endpoint (POST /api/v1/fleet/telemetry). The HTTP layer accepts
+// raw or gzip JSON, bounds both compressed and decoded sizes, and rejects trailing/unknown fields before
+// the use case reaches the identity/signature/schema trust boundary.
 func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 	if f.telemetry == nil {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "telemetry ingest not enabled"})
@@ -35,8 +40,13 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, errorBody{Error: "unauthenticated"})
 		return
 	}
+	body, err := readFleetTelemetryBody(w, r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
+		return
+	}
 	var req telemetryingest.IngestRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, fleetTelemetryCap)).Decode(&req); err != nil {
+	if err := decodeStrictFleetTelemetry(body, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid telemetry batch body"})
 		return
 	}
@@ -52,4 +62,52 @@ func (f *fleetRouter) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 		"provenance": res.Provenance,
 		"gap_open":   res.GapOpen,
 	})
+}
+
+func readFleetTelemetryBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	raw := http.MaxBytesReader(w, r.Body, fleetTelemetryWireCap)
+	var reader io.Reader = raw
+	var closeGzip func() error
+	switch enc := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding"))); enc {
+	case "":
+	case "gzip":
+		zr, err := gzip.NewReader(raw)
+		if err != nil {
+			return nil, err
+		}
+		reader = zr
+		closeGzip = zr.Close
+	default:
+		return nil, fmt.Errorf("unsupported content encoding %q", enc)
+	}
+	if closeGzip != nil {
+		defer func() { _ = closeGzip() }()
+	}
+	payload, err := io.ReadAll(io.LimitReader(reader, fleetTelemetryDecodedCap+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) == 0 {
+		return nil, errors.New("empty telemetry request")
+	}
+	if len(payload) > fleetTelemetryDecodedCap {
+		return nil, errors.New("telemetry request exceeds decoded limit")
+	}
+	return payload, nil
+}
+
+func decodeStrictFleetTelemetry(body []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
