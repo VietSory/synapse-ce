@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/fleetagent"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/fleetclient"
 )
 
@@ -44,12 +46,13 @@ func TestOpenTelemetrySpoolUsesCanonicalIdentity(t *testing.T) {
 		t.Skip("live telemetry spool is paired with the Linux-only eBPF sensor")
 	}
 	r := &runner{cfg: config{stateDir: t.TempDir(), spoolBytes: 1 << 20}}
-	durable, identity, err := r.openTelemetrySpool(context.Background(), fleetclient.Credential{AgentID: " agent-1 "})
+	durable, identity, err := r.openTelemetrySpool(context.Background(), fleetclient.Credential{AgentID: " agent-1 ", AssetID: " asset-1 "})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer durable.Close()
-	if identity.AgentID != "agent-1" || identity.AssetID != identity.AgentID || identity.AgentSession != identity.AgentID || identity.BootID.IsZero() {
+	wantAgentID := shared.ID("agent-1")
+	if identity.AgentID != wantAgentID || identity.AssetID != "asset-1" || identity.AgentSession != shared.ID(fleetagent.CanonicalSessionID(wantAgentID)) || identity.BootID.IsZero() {
 		t.Fatalf("identity = %#v", identity)
 	}
 }
@@ -59,5 +62,16 @@ func TestOpenTelemetrySpoolRejectsMissingAgentIdentity(t *testing.T) {
 	if durable, _, err := r.openTelemetrySpool(context.Background(), fleetclient.Credential{}); err == nil {
 		_ = durable.Close()
 		t.Fatal("missing canonical agent id accepted")
+	}
+}
+
+func TestOpenTelemetrySpoolRejectsMissingCanonicalAssetBinding(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("live telemetry spool is paired with the Linux-only eBPF sensor")
+	}
+	r := &runner{cfg: config{stateDir: t.TempDir(), spoolBytes: 1 << 20}}
+	if durable, _, err := r.openTelemetrySpool(context.Background(), fleetclient.Credential{AgentID: "agent-1"}); err == nil {
+		_ = durable.Close()
+		t.Fatal("missing control-plane asset binding accepted")
 	}
 }

@@ -1,0 +1,41 @@
+name: Telemetry Transport Race
+
+on:
+  pull_request:
+    paths:
+      - "cmd/synapse-agent/**"
+      - "cmd/synapse-api/telemetry_runtime*.go"
+      - "internal/adapter/httpapi/fleet_telemetry*.go"
+      - "internal/domain/fleetagent/**"
+      - "internal/domain/telemetry/**"
+      - "internal/domain/telemetryschema/**"
+      - "internal/infrastructure/fleetclient/**"
+      - "internal/infrastructure/persistence/memory/telemetry*.go"
+      - "internal/infrastructure/persistence/postgres/telemetry*.go"
+      - "internal/infrastructure/spool/**"
+      - "internal/usecase/fleet/telemetry/**"
+      - "internal/usecase/ports/telemetry_delivery.go"
+      - "migrations/0109_telemetry_delivery.sql"
+      - ".github/workflows/telemetry-transport-race.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  race:
+    name: Telemetry ingest + agent spool (-race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Race-sensitive telemetry transport tests
+        run: >-
+          go test -race -count=1
+          ./internal/usecase/fleet/telemetry
+          ./internal/infrastructure/spool
+          ./cmd/synapse-agent

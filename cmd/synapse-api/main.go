@@ -1795,6 +1795,10 @@ func main() {
 		}
 		router.SetFleet(agentSvc, workSvc, clock.Now, cfg.FleetClientCertHeader)
 		router.SetFleetAdmin(agentSvc)
+		if terr := wireFleetTelemetry(router, databasePool, auditLog, clock, log); terr != nil {
+			log.Error("fleet telemetry transport init failed", "err", terr)
+			os.Exit(1)
+		}
 
 		// Operator-controlled update rollout (#412 req 9). Wiring it is what makes an update offer
 		// possible at all: with no rollout service the heartbeat offers nothing, because the absence

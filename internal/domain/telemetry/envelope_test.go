@@ -14,17 +14,18 @@ func baseEnvelope() TelemetryEnvelope {
 	observed := occurred.Add(2 * time.Millisecond)
 	ev := TelemetryEvent{Class: detection.ClassProcess, Process: &ProcessObservation{Kind: "exec", PID: 10, EntityID: "pe_x", Comm: "sh", Path: "/bin/sh"}}
 	return TelemetryEnvelope{
-		SchemaVersion: SchemaVersion,
-		EventID:       "te_x",
-		EventType:     ev.EventType(),
-		EventClass:    detection.ClassProcess,
-		AgentID:       "agent-1",
-		AssetID:       "asset-1",
-		BootID:        "boot-1",
-		StreamID:      "stream-1",
-		OccurredAt:    occurred,
-		ObservedAt:    observed,
-		Event:         ev,
+		SchemaVersion:    SchemaVersion,
+		EventID:          "te_x",
+		EventType:        ev.EventType(),
+		EventClass:       detection.ClassProcess,
+		AgentID:          "agent-1",
+		AssetID:          "asset-1",
+		BootID:           "boot-1",
+		StreamID:         "stream-1",
+		OccurredAt:       occurred,
+		OccurredAtSource: OccurredAtKernel,
+		ObservedAt:       observed,
+		Event:            ev,
 	}
 }
 
@@ -40,6 +41,8 @@ func TestEnvelopeValidate(t *testing.T) {
 		{"no event id", func(e *TelemetryEnvelope) { e.EventID = "" }, true},
 		{"no agent id", func(e *TelemetryEnvelope) { e.AgentID = "" }, true},
 		{"no asset id", func(e *TelemetryEnvelope) { e.AssetID = "" }, true},
+		{"v2 no timestamp source", func(e *TelemetryEnvelope) { e.OccurredAtSource = "" }, true},
+		{"bad timestamp source", func(e *TelemetryEnvelope) { e.OccurredAtSource = "userspace_guess" }, true},
 		{"class disagrees with payload", func(e *TelemetryEnvelope) { e.EventClass = detection.ClassNetwork }, true},
 		{"type disagrees with payload", func(e *TelemetryEnvelope) { e.EventType = "process.fork" }, true},
 		{"no occurred-at", func(e *TelemetryEnvelope) { e.OccurredAt = time.Time{} }, true},
@@ -61,6 +64,25 @@ func TestEnvelopeValidate(t *testing.T) {
 				t.Fatalf("error must wrap shared.ErrValidation, got %v", err)
 			}
 		})
+	}
+}
+
+func TestEnvelopeV1AndV2AreRealAdditiveSchemas(t *testing.T) {
+	v1 := baseEnvelope()
+	v1.SchemaVersion = 1
+	v1.OccurredAtSource = "" // field did not exist in v1
+	if err := v1.Validate(); err != nil {
+		t.Fatalf("v1 without additive field must remain readable: %v", err)
+	}
+
+	v2 := baseEnvelope()
+	v2.SchemaVersion = 2
+	if err := v2.Validate(); err != nil {
+		t.Fatalf("v2 with timestamp provenance must validate: %v", err)
+	}
+	v2.OccurredAtSource = ""
+	if err := v2.Validate(); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("v2 without its additive field error = %v, want validation rejection", err)
 	}
 }
 

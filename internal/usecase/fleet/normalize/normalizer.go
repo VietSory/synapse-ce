@@ -118,13 +118,16 @@ func (Normalizer) Normalize(d DecodedEvent) (telemetry.TelemetryEnvelope, error)
 	}
 
 	dq := telemetry.DataQuality(0)
+	occurredSource := telemetry.OccurredAtKernel
 
 	// Resolve the source timestamp. A missing kernel ts, or one that is after the collector saw the event
 	// (clock-domain skew), falls back to ObservedAt so the OccurredAt<=ObservedAt invariant always holds,
-	// and is flagged so a reader knows the two are equal by fallback, not by coincidence.
+	// and is flagged so a reader knows the two are equal by fallback, not by coincidence. Schema v2 makes
+	// that provenance an explicit additive field rather than forcing consumers to infer it from the flag.
 	occurred := d.OccurredAt
 	if occurred.IsZero() || occurred.After(d.ObservedAt) {
 		occurred = d.ObservedAt
+		occurredSource = telemetry.OccurredAtObservedFallback
 		dq = dq.With(telemetry.QualityKernelTimestampUnavailable)
 	}
 
@@ -134,24 +137,25 @@ func (Normalizer) Normalize(d DecodedEvent) (telemetry.TelemetryEnvelope, error)
 	}
 
 	env := telemetry.TelemetryEnvelope{
-		SchemaVersion:   telemetry.SchemaVersion,
-		EventID:         telemetry.DeriveEventID(d.AssetID, d.BootID, d.StreamID, d.Sequence, d.Class, occurred.UnixNano()),
-		EventType:       event.EventType(),
-		EventClass:      d.Class,
-		AgentID:         d.AgentID,
-		AgentSessionID:  d.AgentSessionID,
-		AssetID:         d.AssetID,
-		BootID:          d.BootID,
-		StreamID:        d.StreamID,
-		SensorID:        d.SensorID,
-		SensorVersion:   d.SensorVersion,
-		OccurredAt:      occurred,
-		ObservedAt:      d.ObservedAt,
-		Sequence:        d.Sequence,
-		CoverageFlags:   d.Coverage,
-		DataQuality:     dq,
-		ResourceContext: d.Resource,
-		Event:           event,
+		SchemaVersion:    telemetry.SchemaVersion,
+		EventID:          telemetry.DeriveEventID(d.AssetID, d.BootID, d.StreamID, d.Sequence, d.Class, occurred.UnixNano()),
+		EventType:        event.EventType(),
+		EventClass:       d.Class,
+		AgentID:          d.AgentID,
+		AgentSessionID:   d.AgentSessionID,
+		AssetID:          d.AssetID,
+		BootID:           d.BootID,
+		StreamID:         d.StreamID,
+		SensorID:         d.SensorID,
+		SensorVersion:    d.SensorVersion,
+		OccurredAt:       occurred,
+		OccurredAtSource: occurredSource,
+		ObservedAt:       d.ObservedAt,
+		Sequence:         d.Sequence,
+		CoverageFlags:    d.Coverage,
+		DataQuality:      dq,
+		ResourceContext:  d.Resource,
+		Event:            event,
 	}
 	if err := env.Validate(); err != nil {
 		return telemetry.TelemetryEnvelope{}, err
