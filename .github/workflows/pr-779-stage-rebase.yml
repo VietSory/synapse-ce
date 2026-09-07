@@ -78,7 +78,11 @@ jobs:
             done
           fi
 
-          test ! -e migrations/0134_scan_run_provenance.sql
+          if test -e migrations/0134_scan_run_provenance.sql; then
+            git mv migrations/0134_scan_run_provenance.sql migrations/0138_scan_run_provenance.sql
+            sed -i 's/0134/0138/g' migrations/0138_scan_run_provenance.sql
+            git commit -m "chore(scanrun): renumber provenance migration after rebase"
+          fi
           test -e migrations/0138_scan_run_provenance.sql
           python3 - <<'PY'
           from pathlib import Path
