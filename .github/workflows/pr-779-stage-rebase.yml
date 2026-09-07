@@ -4,6 +4,8 @@ on:
   push:
     branches: [ci/pr-779-stage-rebase]
   workflow_dispatch:
+  pull_request:
+    branches: [ci/pr-779-stage-rebase]
 
 permissions:
   contents: write
