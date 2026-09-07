@@ -1,0 +1,95 @@
+name: Stage PR 779 rebase
+
+on:
+  push:
+    branches: [ci/pr-779-stage-rebase]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: \${{ github.token }}
+
+      - name: Rebase PR 779 onto current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main feat/708-a2a-scan-run-provenance
+          git checkout -B pr-779-candidate origin/feat/708-a2a-scan-run-provenance
+
+          if ! GIT_EDITOR=true git rebase origin/main; then
+            while test -d .git/rebase-merge || test -d .git/rebase-apply; do
+              mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+              printf '%s\n' "\${conflicts[@]}"
+              if test "\${#conflicts[@]}" -eq 0; then
+                exit 1
+              fi
+              for path in "\${conflicts[@]}"; do
+                case "\${path}" in
+                  CHANGELOG.md)
+                    git show :3:CHANGELOG.md > /tmp/pr779-changelog.md
+                    git checkout --ours CHANGELOG.md
+                    python3 - <<'PY'
+          from pathlib import Path
+          import re
+          feature = Path("/tmp/pr779-changelog.md").read_text()
+          base = Path("CHANGELOG.md").read_text()
+          match = re.search(r"(?ms)^- \*\*Scan runs now support tenant-owned, sealed provenance v1\.\*\*.*?(?=^- \*\*|\Z)", feature)
+          if not match:
+              raise SystemExit("scan-run changelog entry not found in feature side")
+          entry = match.group(0).rstrip() + "\n\n"
+          marker = "### Added\n\n"
+          if marker not in base:
+              raise SystemExit("Unreleased Added section not found")
+          if entry not in base:
+              base = base.replace(marker, marker + entry, 1)
+          Path("CHANGELOG.md").write_text(base)
+          PY
+                    ;;
+                  migrations/0134_scan_run_provenance.sql)
+                    git show :3:migrations/0134_scan_run_provenance.sql > migrations/0138_scan_run_provenance.sql
+                    git checkout --ours migrations/0134_scan_run_provenance.sql
+                    sed -i 's/0134/0138/g' migrations/0138_scan_run_provenance.sql
+                    ;;
+                  internal/infrastructure/persistence/postgres/migration_0134_test.go)
+                    git show :3:internal/infrastructure/persistence/postgres/migration_0134_test.go > internal/infrastructure/persistence/postgres/migration_0138_test.go
+                    git checkout --ours internal/infrastructure/persistence/postgres/migration_0134_test.go
+                    sed -i -e 's/0134/0138/g' -e 's/DownTo(133)/DownTo(137)/g' -e 's/UpTo(134)/UpTo(138)/g' internal/infrastructure/persistence/postgres/migration_0138_test.go
+                    ;;
+                  *)
+                    echo "Unexpected rebase conflict: \${path}" >&2
+                    exit 1
+                    ;;
+                esac
+              done
+              git add -A
+              GIT_EDITOR=true git rebase --continue || true
+            done
+          fi
+
+          test ! -e migrations/0134_scan_run_provenance.sql
+          test -e migrations/0138_scan_run_provenance.sql
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          seen = {}
+          for p in Path("migrations").glob("*.sql"):
+              m = re.match(r"^(\d+)_", p.name)
+              if not m:
+                  continue
+              seen.setdefault(m.group(1), []).append(p.name)
+          duplicates = {n: names for n, names in seen.items() if len(names) > 1}
+          if duplicates:
+              raise SystemExit(f"duplicate migration versions: {duplicates}")
+          PY
+          git diff --check origin/main...HEAD
+          git push --force-with-lease origin HEAD:refs/heads/codex/pr-779-candidate
