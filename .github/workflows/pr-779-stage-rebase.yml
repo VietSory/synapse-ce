@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: \${{ github.token }}
+          token: ${{ github.token }}
 
       - name: Rebase PR 779 onto current main
         shell: bash
@@ -29,12 +29,12 @@ jobs:
           if ! GIT_EDITOR=true git rebase origin/main; then
             while test -d .git/rebase-merge || test -d .git/rebase-apply; do
               mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-              printf '%s\n' "\${conflicts[@]}"
-              if test "\${#conflicts[@]}" -eq 0; then
+              printf '%s\n' "${conflicts[@]}"
+              if test "${#conflicts[@]}" -eq 0; then
                 exit 1
               fi
-              for path in "\${conflicts[@]}"; do
-                case "\${path}" in
+              for path in "${conflicts[@]}"; do
+                case "${path}" in
                   CHANGELOG.md)
                     git show :3:CHANGELOG.md > /tmp/pr779-changelog.md
                     git checkout --ours CHANGELOG.md
@@ -66,7 +66,7 @@ jobs:
                     sed -i -e 's/0134/0138/g' -e 's/DownTo(133)/DownTo(137)/g' -e 's/UpTo(134)/UpTo(138)/g' internal/infrastructure/persistence/postgres/migration_0138_test.go
                     ;;
                   *)
-                    echo "Unexpected rebase conflict: \${path}" >&2
+                    echo "Unexpected rebase conflict: ${path}" >&2
                     exit 1
                     ;;
                 esac
