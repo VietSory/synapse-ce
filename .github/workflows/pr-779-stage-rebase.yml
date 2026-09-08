@@ -1,4 +1,4 @@
-name: Stage PR 779 rebase
+name: Stage PR 779 rebase (current main)
 
 on:
   push:
