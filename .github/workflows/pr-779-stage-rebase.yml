@@ -99,3 +99,51 @@ jobs:
           PY
           git diff --check origin/main...HEAD
           git push --force-with-lease origin HEAD:refs/heads/codex/pr-779-candidate
+
+  validate-candidate:
+    needs: rebase
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: synapse_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d synapse_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SYNAPSE_TEST_DB_DSN: postgres://postgres:postgres@localhost:5432/synapse_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/pr-779-candidate
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build and vet
+        run: |
+          go build ./...
+          go vet ./...
+      - name: Validate scan-run domain and service
+        run: |
+          go test ./internal/domain/scanrun ./internal/usecase/scanrun ./internal/infrastructure/persistence/memory -count=1
+      - name: Validate Postgres 17 migration and store contracts
+        run: |
+          go test ./internal/infrastructure/persistence/postgres -count=1 -run '^(TestMigration0138ProductionOwnerPath|TestMigrationInventoryNoDuplicateGooseVersions|TestPostgresScanRunStore|TestScanRunStore)'
+      - name: Build without CGO
+        run: CGO_ENABLED=0 go build ./cmd/...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate frontend
+        working-directory: web
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm test --run
+          pnpm typecheck
+          pnpm build
