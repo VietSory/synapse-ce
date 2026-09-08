@@ -25,8 +25,8 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin main feat/708-a2a-scan-run-provenance
-          git checkout -B pr-779-candidate origin/feat/708-a2a-scan-run-provenance
+          git fetch origin main codex/pr-779-candidate
+          git checkout -B pr-779-candidate origin/codex/pr-779-candidate
 
           if ! GIT_EDITOR=true git rebase origin/main; then
             while test -d .git/rebase-merge || test -d .git/rebase-apply; do
