@@ -3,3 +3,4 @@ Validation requested after current-main rebase.
 Full-suite validation after latest main rebase.
 Isolated database full-suite validation.
 Final rebase after flexible scanner sources merge.
+Validate migration boundary 0137 to 0138.
