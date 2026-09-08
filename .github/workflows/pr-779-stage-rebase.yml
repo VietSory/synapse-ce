@@ -134,6 +134,8 @@ jobs:
       - name: Validate Postgres 17 migration and store contracts
         run: |
           go test ./internal/infrastructure/persistence/postgres -count=1 -run '^(TestMigration0138ProductionOwnerPath|TestMigrationInventoryNoDuplicateGooseVersions|TestPostgresScanRunStore|TestScanRunStore)'
+      - name: Run full Go suite
+        run: go test ./... -count=1
       - name: Build without CGO
         run: CGO_ENABLED=0 go build ./cmd/...
       - uses: actions/setup-node@v4
