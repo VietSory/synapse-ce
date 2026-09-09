@@ -3627,13 +3627,19 @@ func kindOrLocal(kind string) string {
 func classifyVulns(doc *sbom.SBOM, vulns []vulnerability.Vulnerability) {
 	firstParty := make(map[string]bool, len(doc.Components))
 	scopeByCV := make(map[string]string, len(doc.Components))
+	reachableScopes := sbom.ReachableScopes(doc.Components, doc.Dependencies)
 	reachByCV := make(map[string]string, len(doc.Components))
 	for _, c := range doc.Components {
 		if c.FirstParty {
 			firstParty[c.Name] = true
 		}
-		if c.Scope != "" {
-			scopeByCV[c.Name+"\x00"+c.Version] = c.Scope
+		effectiveScope := c.Scope
+		id := sbom.ComponentID(c.Name, c.Version, c.PURL)
+		if graphScope := reachableScopes[id]; graphScope != "" && graphScope != sbom.ScopeUnknown {
+			effectiveScope = graphScope
+		}
+		if effectiveScope != "" {
+			scopeByCV[c.Name+"\x00"+c.Version] = effectiveScope
 		}
 		if c.Reachability != "" {
 			reachByCV[c.Name+"\x00"+c.Version] = c.Reachability
