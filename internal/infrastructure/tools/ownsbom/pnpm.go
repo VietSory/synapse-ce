@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
@@ -240,6 +241,8 @@ func pnpmResolveEdges(rawEdges []pnpmRawEdge, purlByKey map[string]string, scope
 				required = append(required, target)
 			}
 		}
+		sort.Strings(required)
+		sort.Strings(optional)
 		if len(required) > 0 {
 			edges = append(edges, sbom.Dependency{Ref: ref, DependsOn: required, Scope: scope})
 		}
