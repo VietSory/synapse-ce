@@ -101,7 +101,7 @@ func uvDependencyNames(arrayText string) []string {
 		c := arrayText[i]
 		switch {
 		case inBasic:
-			if c == '\\' { // skip an escaped char inside a basic string
+			if c == '\\' {
 				i++
 				continue
 			}
@@ -112,7 +112,7 @@ func uvDependencyNames(arrayText string) []string {
 			if c == '\'' {
 				inLiteral = false
 			}
-		case c == '#': // a comment runs to end of line; its bytes are not structure
+		case c == '#':
 			for i < len(arrayText) && arrayText[i] != '\n' {
 				i++
 			}
@@ -163,7 +163,7 @@ func uvNetBrackets(line string) int {
 				inLiteral = false
 			}
 		case c == '#':
-			return net // comment to end of line
+			return net
 		case c == '"':
 			inBasic = true
 		case c == '\'':
@@ -211,7 +211,6 @@ func (UV) Parse(ctx context.Context, in ParseInput) ([]sbom.Component, []sbom.De
 
 	scope := sbom.ClassifyScope(in.Path, "")
 
-	// Pass 1: collect every [[package]] block (name, version, source, resolved dependency names).
 	var pkgs []uvPackage
 	var cur uvPackage
 	inPackage := false
@@ -278,7 +277,6 @@ func (UV) Parse(ctx context.Context, in ParseInput) ([]sbom.Component, []sbom.De
 			case "source":
 				cur.registry = uvRegistrySource(value)
 			case "dependencies":
-				// value begins with '['; a single-line array closes immediately, otherwise accumulate.
 				depsText.Reset()
 				depsText.WriteString(value)
 				depsText.WriteByte('\n')
@@ -297,8 +295,6 @@ func (UV) Parse(ctx context.Context, in ParseInput) ([]sbom.Component, []sbom.De
 		return nil, nil, fmt.Errorf("scan uv.lock: %w", err)
 	}
 
-	// Pass 2: index emitted components by name, then emit components + resolved edges. A name mapping to more
-	// than one emitted version is ambiguous (universal lock) and resolves to NO edge, never a guessed target.
 	purlOf := func(name, version string) string { return "pkg:pypi/" + name + "@" + version }
 	versionsOf := map[string][]string{}
 	emitted := func(p uvPackage) (string, bool) {
@@ -326,13 +322,13 @@ func (UV) Parse(ctx context.Context, in ParseInput) ([]sbom.Component, []sbom.De
 		ref := purlOf(name, version)
 		set.add(sbom.Component{Name: name, Version: version, PURL: ref, Location: in.Path, Scope: scope})
 
-		seen := map[string]bool{ref: true} // drop self-edges + duplicate targets
+		seen := map[string]bool{ref: true}
 		var on []string
 		for _, d := range p.deps {
 			dn := normalizePyPI(strings.TrimSpace(d))
 			vs := versionsOf[dn]
 			if len(vs) != 1 {
-				continue // not an emitted component, or an ambiguous duplicate name – no edge
+				continue
 			}
 			if t := purlOf(dn, vs[0]); !seen[t] {
 				seen[t] = true
@@ -340,7 +336,7 @@ func (UV) Parse(ctx context.Context, in ParseInput) ([]sbom.Component, []sbom.De
 			}
 		}
 		if len(on) > 0 {
-			deps = append(deps, sbom.Dependency{Ref: ref, DependsOn: on})
+			deps = append(deps, sbom.Dependency{Ref: ref, DependsOn: on, Scope: scope})
 		}
 	}
 
