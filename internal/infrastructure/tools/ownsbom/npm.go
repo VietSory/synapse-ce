@@ -83,7 +83,7 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 		// Syft path + the PURL conformance test), while Component.Name keeps the @scope/name.
 		purlName := name
 		if strings.HasPrefix(purlName, "@") {
-			purlName = "%40" + purlName[1:]
+			purlName = "%40" + purlName[1:] 
 		}
 		return "pkg:npm/" + purlName + "@" + version
 	}
@@ -98,16 +98,13 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 		return purl
 	}
 
-	if len(lock.Packages) > 0 { // lockfileVersion 2/3 – flat + complete
-		// Pass 1: emit components + index install-path -> PURL (the root project, path "", is not a dep).
+	if len(lock.Packages) > 0 {
 		pathPURL := make(map[string]string, len(lock.Packages))
 		for path, p := range lock.Packages {
 			if name := npmNameFromPath(path); name != "" {
 				pathPURL[path] = add(name, p.Version, p.Integrity, p.Dev)
 			}
 		}
-		// Pass 2: resolve each package's direct deps to PURLs via npm's nearest-wins hoisting. Edge scope and
-		// optionality stay attached to the relationship; records are split when one source has mixed metadata.
 		paths := make([]string, 0, len(lock.Packages))
 		for path := range lock.Packages {
 			paths = append(paths, path)
@@ -117,7 +114,7 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 		for _, path := range paths {
 			ref, ok := pathPURL[path]
 			if !ok {
-				continue // root project / unnamed – not a component, so no edges from it
+				continue
 			}
 			targetMeta := make(map[string]npmEdgeMeta)
 			for _, dep := range npmEdgeSpecs(lock.Packages[path], prodScope) {
@@ -141,7 +138,7 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 			}
 			groups := make(map[groupKey][]string)
 			for target, meta := range targetMeta {
-				key := groupKey{scope: meta.scope, optional: meta.optional}
+				key := groupKey(meta)
 				groups[key] = append(groups[key], target)
 			}
 			keys := make([]groupKey, 0, len(groups))
@@ -163,7 +160,6 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 		return set.components(), edges, nil
 	}
 
-	// lockfileVersion 1 – recurse the nested dependencies map (components only; v1 edges are a legacy follow-up).
 	var walk func(deps map[string]npmV1Dep, depth int) error
 	walk = func(deps map[string]npmV1Dep, depth int) error {
 		if depth > maxNPMNestDepth {
@@ -174,7 +170,6 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 			if err := walk(d.Dependencies, depth+1); err != nil {
 				return err
 			}
-		}
 		return nil
 	}
 	if err := walk(lock.Dependencies, 0); err != nil {
@@ -183,25 +178,18 @@ func (NPM) Parse(_ context.Context, in ParseInput) ([]sbom.Component, []sbom.Dep
 	return set.components(), nil, nil
 }
 
-// parseSubresourceIntegrity parses a W3C Subresource Integrity string as npm/yarn/pnpm record it in a
-// lockfile `integrity` field: one or more space-separated "<alg>-<base64>" hashes (e.g.
-// "sha512-<b64> sha1-<b64>"). Each becomes a Checksum with an SPDX-style uppercased algorithm name and the
-// base64 digest as recorded. Malformed tokens are skipped; returns nil when none parse.
 func parseSubresourceIntegrity(s string) []sbom.Checksum {
 	var out []sbom.Checksum
 	for _, tok := range strings.Fields(s) {
 		i := strings.IndexByte(tok, '-')
 		if i <= 0 || i == len(tok)-1 {
-			continue // not the "<alg>-<digest>" shape
+			continue
 		}
 		out = append(out, sbom.Checksum{Algorithm: strings.ToUpper(tok[:i]), Value: tok[i+1:]})
 	}
 	return out
 }
 
-// npmEdgeSpecs returns sorted, unique direct-dependency declarations with their per-edge semantics.
-// If the same package is listed as both runtime and dev, the runtime relationship wins: one shipping path is
-// sufficient to make that edge shipping. Optionality is retained independently from scope.
 func npmEdgeSpecs(p npmV3Pkg, prodScope string) []npmEdgeSpec {
 	byName := map[string]npmEdgeSpec{}
 	for name := range p.Dependencies {
@@ -209,7 +197,7 @@ func npmEdgeSpecs(p npmV3Pkg, prodScope string) []npmEdgeSpec {
 	}
 	for name := range p.DevDependencies {
 		if _, exists := byName[name]; exists {
-			continue // an existing runtime declaration is the stronger shipping relationship
+			continue
 		}
 		byName[name] = npmEdgeSpec{name: name, scope: sbom.ScopeDevelopment}
 	}
@@ -246,10 +234,6 @@ func mergeNPMEdgeMeta(a, b npmEdgeMeta) npmEdgeMeta {
 	return out
 }
 
-// resolveNpmDep resolves dependency depName, as required by the package installed at fromPath, to the
-// install path of the package that satisfies it – npm's hoisting rule: search fromPath's own
-// node_modules first, then each ancestor install context outward, ending at the root node_modules; the
-// nearest match wins. Returns "" when no installed package satisfies it (resolution-as-filter → no edge).
 func resolveNpmDep(fromPath, depName string, packages map[string]npmV3Pkg) string {
 	cur := fromPath
 	for {
@@ -261,19 +245,16 @@ func resolveNpmDep(fromPath, depName string, packages map[string]npmV3Pkg) strin
 			return cand
 		}
 		if cur == "" {
-			return "" // already tried the root node_modules – unresolvable
+			return ""
 		}
 		if idx := strings.LastIndex(cur, "/node_modules/"); idx >= 0 {
-			cur = cur[:idx] // step out to the parent install context
+			cur = cur[:idx]
 		} else {
-			cur = "" // cur was a root-level node_modules/<pkg>; next iteration tries the root
+			cur = ""
 		}
 	}
 }
 
-// npmNameFromPath turns a lockfileVersion-2/3 `packages` key into a package name: "node_modules/foo" ->
-// "foo", "node_modules/@scope/bar" -> "@scope/bar", a nested ".../node_modules/b" -> "b" (the last
-// segment). The root-project key "" yields "" (skipped – the project itself is not a dependency).
 func npmNameFromPath(p string) string {
 	const nm = "node_modules/"
 	i := strings.LastIndex(p, nm)
