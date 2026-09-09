@@ -14,12 +14,13 @@ func TestNPMEdgeScopeAndOptional(t *testing.T) {
     "": {"name": "app", "version": "1.0.0"},
     "node_modules/parent": {
       "version": "1.0.0",
-      "dependencies": {"runtime": "1.0.0"},
-      "devDependencies": {"dev-only": "1.0.0"},
+      "dependencies": {"runtime": "1.0.0", "shared": "1.0.0"},
+      "devDependencies": {"dev-only": "1.0.0", "shared": "1.0.0"},
       "optionalDependencies": {"optional": "1.0.0"}
     },
     "node_modules/runtime": {"version": "1.0.0"},
     "node_modules/dev-only": {"version": "1.0.0"},
+    "node_modules/shared": {"version": "1.0.0"},
     "node_modules/optional": {"version": "1.0.0"}
   }
 }`)
@@ -52,6 +53,7 @@ func TestNPMEdgeScopeAndOptional(t *testing.T) {
 	}{
 		"pkg:npm/runtime@1.0.0":  {sbom.ScopeProduction, false},
 		"pkg:npm/dev-only@1.0.0": {sbom.ScopeDevelopment, false},
+		"pkg:npm/shared@1.0.0":   {sbom.ScopeProduction, false},
 		"pkg:npm/optional@1.0.0": {sbom.ScopeProduction, true},
 	}
 	if len(got) != len(want) {
