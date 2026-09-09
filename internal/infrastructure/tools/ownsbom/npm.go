@@ -200,18 +200,18 @@ func parseSubresourceIntegrity(s string) []sbom.Checksum {
 }
 
 // npmEdgeSpecs returns sorted, unique direct-dependency declarations with their per-edge semantics.
-// A package present in more than one declaration map keeps every applicable property: dev scope is sticky,
-// and optionality is true when npm records the relationship under optionalDependencies.
+// If the same package is listed as both runtime and dev, the runtime relationship wins: one shipping path is
+// sufficient to make that edge shipping. Optionality is retained independently from scope.
 func npmEdgeSpecs(p npmV3Pkg, prodScope string) []npmEdgeSpec {
 	byName := map[string]npmEdgeSpec{}
 	for name := range p.Dependencies {
 		byName[name] = npmEdgeSpec{name: name, scope: prodScope}
 	}
 	for name := range p.DevDependencies {
-		spec := byName[name]
-		spec.name = name
-		spec.scope = sbom.ScopeDevelopment
-		byName[name] = spec
+		if _, exists := byName[name]; exists {
+			continue // an existing runtime declaration is the stronger shipping relationship
+		}
+		byName[name] = npmEdgeSpec{name: name, scope: sbom.ScopeDevelopment}
 	}
 	for name := range p.OptionalDependencies {
 		spec := byName[name]
