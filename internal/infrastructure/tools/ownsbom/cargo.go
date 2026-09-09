@@ -200,6 +200,7 @@ func cargoDevDeps(dir string) map[string]bool {
 				if key := strings.Trim(strings.TrimSpace(line[:eq]), `"`); key != "" {
 					dev[key] = true
 				}
+			}
 		}
 	}
 	return dev
