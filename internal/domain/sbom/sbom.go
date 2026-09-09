@@ -339,11 +339,14 @@ func ComputeLicenseCoverage(comps []Component) LicenseCoverage {
 	return c
 }
 
-// Dependency is one edge of the dependency graph: Ref depends on each of
-// DependsOn. Identities are PURLs (or name@version when a component has no PURL).
+// Dependency is one edge group of the dependency graph: Ref depends on each of DependsOn. Scope and
+// Optional describe that relationship group; parsers split records when children have different metadata.
+// Identities are PURLs (or name@version when a component has no PURL).
 type Dependency struct {
 	Ref       string
 	DependsOn []string
+	Scope     string
+	Optional  bool
 }
 
 // PathToRoot returns the dependency path from a top-level dependency (a node that
