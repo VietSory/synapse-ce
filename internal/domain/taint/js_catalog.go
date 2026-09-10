@@ -28,11 +28,17 @@ type JSSanitizerModel struct {
 	Classes []TaintClass
 }
 
+type JSPrototypePollutionModel struct {
+	Pattern         JSCallablePattern
+	ArgumentIndexes []int
+}
+
 type JSCatalog struct {
 	Sources          []JSSourceModel
 	Sinks            []JSSinkModel
 	Sanitizers       []JSSanitizerModel
 	ReferenceSources []string
+	PrototypeMerges  []JSPrototypePollutionModel
 }
 
 func DefaultJSCatalog() JSCatalog {
@@ -101,6 +107,14 @@ func DefaultJSCatalog() JSCatalog {
 			{Pattern: jsModuleCall([]string{"validator"}, []string{"escape"}), Classes: []TaintClass{TaintXSS}},
 			{Pattern: jsModuleCall([]string{"path", "node:path"}, []string{"basename"}), Classes: []TaintClass{TaintPathTraversal}},
 			{Pattern: jsModuleCall([]string{"global"}, []string{"encodeURIComponent"}), Classes: []TaintClass{TaintRedirect}},
+		},
+		// CWE-1321: recursive object merge helpers can turn attacker-controlled keys such as __proto__ or
+		// constructor.prototype into prototype mutation. Only semantically-resolved package calls are modeled;
+		// a generic application method named merge is deliberately not a sink. The first source object is the
+		// dangerous argument for the common lodash APIs. Standalone per-method packages resolve as a default call.
+		PrototypeMerges: []JSPrototypePollutionModel{
+			{Pattern: jsModuleCall([]string{"lodash"}, []string{"merge", "mergeWith", "defaultsDeep"}), ArgumentIndexes: []int{1}},
+			{Pattern: jsModuleCall([]string{"lodash.merge", "lodash/merge", "lodash.mergewith", "lodash/mergeWith", "lodash.defaultsdeep", "lodash/defaultsDeep"}, []string{""}), ArgumentIndexes: []int{1}},
 		},
 	}
 }
