@@ -110,7 +110,9 @@ func (c *JSCoordinator) ScanWithCoverage(ctx context.Context, engagementID share
 		outcome.Coverage.Reason = ports.AnalysisReasonAnalysisFailed
 		return outcome, err
 	}
-	paths := deduplicateJSTaintPaths(graph.Vulnerabilities())
+	paths := graph.Vulnerabilities()
+	paths = append(paths, taint.JSPrototypePollutionPaths(document, resolution, c.catalog, graph)...)
+	paths = deduplicateJSTaintPaths(paths)
 	outcome.Coverage.Truncated = outcome.Coverage.Truncated || graph.Truncated
 	if graph.Truncated {
 		outcome.Coverage.Status = ports.AnalysisCoveragePartial
