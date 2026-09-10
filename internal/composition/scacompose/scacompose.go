@@ -484,11 +484,11 @@ type TaintProposer interface {
 
 // ConfigureJudgmentScanners attaches the source-only, judgment-minting analyzers that run in the DEFAULT scan
 // path onto svc, so synapse-api and synapse-worker run the same default-scan analysis rather than a
-// regex-only scan. Python semantic value-flow taint is wired today (JS/Java as they land). The synapse-ast
-// sidecar it uses only PARSES target source (tree-sitter); it never compiles or executes the target, and it
-// degrades to a clean no-op when the sidecar is not installed, so it is safe to attach by default. A nil
-// proposer (judgments disabled) attaches nothing. A coordinator init error is returned so a misconfigured
-// analyzer is a loud startup failure at the composition root, never a silently degraded scan.
+// regex-only scan. Python and JavaScript/TypeScript semantic value-flow taint are wired here. The synapse-ast
+// sidecar only PARSES target source (tree-sitter); it never compiles or executes the target, and it degrades
+// to a clean no-op when the sidecar is not installed, so it is safe to attach by default. A nil proposer
+// (judgments disabled) attaches nothing. A coordinator init error is returned so a misconfigured analyzer is
+// a loud startup failure at the composition root, never a silently degraded scan.
 func ConfigureJudgmentScanners(svc *scauc.Service, cfg config.Config, sb *sandbox.Runner, proposer TaintProposer, audit ports.AuditLogger, clock ports.Clock, log *slog.Logger) error {
 	pythonTaint, err := pythonTaintScanner(cfg, sb, proposer, audit, clock, log)
 	if err != nil {
@@ -497,6 +497,14 @@ func ConfigureJudgmentScanners(svc *scauc.Service, cfg config.Config, sb *sandbo
 	if pythonTaint != nil {
 		svc.SetPythonTaint(pythonTaint)
 		log.Info("Python semantic taint ENABLED (source-only interprocedural value flow; propose-only, a distinct verifier gates)")
+	}
+	jsTaint, err := jsTaintScanner(cfg, sb, proposer, audit, clock, log)
+	if err != nil {
+		return err
+	}
+	if jsTaint != nil {
+		svc.SetJSTaint(jsTaint)
+		log.Info("JavaScript semantic taint ENABLED (source-only interprocedural value flow; propose-only, a distinct verifier gates)")
 	}
 	return nil
 }
@@ -529,6 +537,26 @@ func pythonTaintScanner(cfg config.Config, sb *sandbox.Runner, proposer TaintPro
 	coordinator, err := taintscan.NewPythonCoordinator(factsProvider, proposer, catalog, audit, clock)
 	if err != nil {
 		return nil, fmt.Errorf("python semantic taint coordinator init: %w", err)
+	}
+	return coordinator, nil
+}
+
+// jsTaintScanner builds the JavaScript/TypeScript value-flow coordinator when JavaScript taint is enabled
+// and a judgment proposer is present. It deliberately has no custom-rule input yet: only reviewed built-in
+// source, sink, and sanitizer models may mint judgments until a typed JS rule schema is introduced.
+func jsTaintScanner(cfg config.Config, sb *sandbox.Runner, proposer TaintProposer, audit ports.AuditLogger, clock ports.Clock, log *slog.Logger) (ports.TaintScanner, error) {
+	if proposer == nil || !cfg.JSTaintEnabled {
+		return nil, nil
+	}
+	factsProvider := asttool.New(cfg.ASTBin)
+	if sb != nil {
+		factsProvider = factsProvider.WithRunner(sb)
+	} else {
+		log.Warn("javascript taint: synapse-ast runs unsandboxed (dev only); target source is parsed but never executed")
+	}
+	coordinator, err := taintscan.NewJSCoordinator(factsProvider, proposer, taint.DefaultJSCatalog(), audit, clock)
+	if err != nil {
+		return nil, fmt.Errorf("javascript semantic taint coordinator init: %w", err)
 	}
 	return coordinator, nil
 }

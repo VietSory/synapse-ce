@@ -1,10 +1,9 @@
 // Command synapse-ast parses a source tree with language-aware (tree-sitter) grammars and emits
 // structural facts as JSON on stdout. In addition to code metrics and quality facts, it emits the
-// versioned Python semantic-facts document consumed by Tier-2 reachability (`python-facts`). It isolates
-// the CGO tree-sitter grammars into a standalone,
-// sandboxable binary so the api server and CLI never import them and the UNTRUSTED target is parsed only
-// inside the sandbox the ast adapter runs this binary under. Composition root only – the analysis lives
-// in internal/infrastructure/tools/astwalk.
+// versioned Python and JavaScript/TypeScript semantic-facts documents consumed by value-flow analysis.
+// It isolates the CGO tree-sitter grammars into a standalone, sandboxable binary so the api server and
+// CLI never import them and the UNTRUSTED target is parsed only inside the sandbox the ast adapter runs
+// this binary under. Composition root only – the analysis lives in internal/infrastructure/tools/astwalk.
 //
 // Exit codes: 0 = ok (JSON on stdout); 3 = the tree-sitter backend is not built in (CGO-free build), so
 // the adapter treats the provider as unavailable rather than failed; 1 = a real error.
@@ -21,8 +20,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 3 || (os.Args[1] != "functions" && os.Args[1] != "metrics" && os.Args[1] != "bugs" && os.Args[1] != "quality" && os.Args[1] != "python-facts") {
-		fmt.Fprintln(os.Stderr, "usage: synapse-ast functions|metrics|bugs|quality|python-facts <dir>")
+	if len(os.Args) != 3 || (os.Args[1] != "functions" && os.Args[1] != "metrics" && os.Args[1] != "bugs" && os.Args[1] != "quality" && os.Args[1] != "python-facts" && os.Args[1] != "js-facts") {
+		fmt.Fprintln(os.Stderr, "usage: synapse-ast functions|metrics|bugs|quality|python-facts|js-facts <dir>")
 		os.Exit(2)
 	}
 	var (
@@ -40,6 +39,8 @@ func main() {
 		out, err = astwalk.QualityFor(context.Background(), os.Args[2])
 	case "python-facts":
 		out, err = astwalk.PythonFactsFor(context.Background(), os.Args[2])
+	case "js-facts":
+		out, err = astwalk.JSFactsFor(context.Background(), os.Args[2])
 	}
 	if errors.Is(err, astwalk.ErrUnavailable) {
 		fmt.Fprintln(os.Stderr, "synapse-ast:", err)

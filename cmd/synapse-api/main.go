@@ -2972,13 +2972,13 @@ func main() {
 		log.Info("taint-analysis CapSAST proposals ENABLED (sandboxed call-graph; propose-only, a distinct verifier gates)")
 	}
 
-	// Python Tier-2 taint is source-only: synapse-ast parses bounded semantic/value facts and never imports,
-	// executes, or compiles target Python. It runs in the default scan (shared with synapse-worker via
-	// scacompose.ConfigureJudgmentScanners); requireJudgmentsOrSkip preserves the loud error when the flag is
-	// set explicitly without the judgment lifecycle.
-	if cfg.PythonTaintEnabled && requireJudgmentsOrSkip(log, judgmentSvc != nil, "SYNAPSE_PYTAINT_ENABLED", "python semantic taint") {
+	// Source-only semantic taint parses bounded Python and JavaScript/TypeScript facts; it never imports,
+	// executes, or compiles target source. It runs in the default scan (shared with synapse-worker via
+	// scacompose.ConfigureJudgmentScanners); requireJudgmentsOrSkip preserves the loud error when either
+	// source-only analyzer is enabled without the judgment lifecycle.
+	if (cfg.PythonTaintEnabled || cfg.JSTaintEnabled) && requireJudgmentsOrSkip(log, judgmentSvc != nil, "SYNAPSE_PYTAINT_ENABLED/SYNAPSE_JSTAINT_ENABLED", "source-only semantic taint") {
 		if err := scacompose.ConfigureJudgmentScanners(scaService, cfg, scaSandbox, judgmentSvc, auditLog, clock, log); err != nil {
-			log.Error("python semantic taint coordinator init failed", "err", err)
+			log.Error("source-only semantic taint coordinator init failed", "err", err)
 			os.Exit(1)
 		}
 	}

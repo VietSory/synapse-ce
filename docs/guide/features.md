@@ -247,6 +247,22 @@ literal values, or internal value identifiers. The feature needs judgments plus 
 `synapse-ast`; it does not import, execute, or compile target Python and therefore does not require the
 target-compilation sandbox.
 
+
+### JavaScript/TypeScript semantic taint
+
+`SYNAPSE_JSTAINT_ENABLED=true` enables the source-only JavaScript/TypeScript value-flow pass in every
+default SCA scan, including queued worker scans. The same sandboxable `synapse-ast` sidecar emits bounded
+facts for imports, lexical values, assignments, calls, returns, and explicit coverage gaps; the analyzer
+resolves aliases and follows value flow without installing dependencies or executing target code.
+
+The reviewed catalog covers request-derived input and common command, eval, SQL/NoSQL, filesystem, SSRF,
+XSS, redirect, template, and deserialization sinks. Each positive witness mints only a score-zero,
+gated `CapSAST` proposal under `system:javascript-taint-scan`; a distinct verifier must confirm it.
+Incomplete or unavailable analysis is surfaced as coverage/warnings and can never create a clean result.
+The bounded audit and SARIF traces contain positions and catalog metadata only—no source contents, literal
+values, or internal value identifiers. The feature requires judgments plus a CGO-enabled `synapse-ast`;
+because it is source-only, the target-compilation sandbox is not required.
+
 ### Runtime confirmation (DAST)
 
 A gated SAST hypothesis can be confirmed at runtime by a **safe HTTP probe**. When a distinct

@@ -18,6 +18,10 @@ func TestClaimRoundTrip(t *testing.T) {
 			Language: "python", Source: SASTFlowLocation{File: "app.py", Line: 3, Column: 4}, Sink: SASTFlowLocation{File: "app.py", Line: 4, Column: 4},
 			Steps: []SASTFlowLocation{{File: "app.py", Line: 3, Column: 4}, {File: "app.py", Line: 4, Column: 4}},
 		}},
+		SASTClaim{CWE: "CWE-78", Location: "app.ts:4", Rule: "javascript-taint-command", DataFlow: &SASTDataFlow{
+			Language: "javascript", Source: SASTFlowLocation{File: "app.ts", Line: 3, Column: 4}, Sink: SASTFlowLocation{File: "app.ts", Line: 4, Column: 4},
+			Steps: []SASTFlowLocation{{File: "app.ts", Line: 3, Column: 4}, {File: "app.ts", Line: 4, Column: 4}},
+		}},
 		DASTClaim{CWE: "CWE-79", Location: "/search", Rule: "reflected-xss", Source: "first_party", Fingerprint: "search_reflection", ProofEvidenceID: "proof-1"},
 		RiskNarrativeClaim{Drivers: []string{"kev", "cvss>=9"}, Priority: 1},
 		CritiqueClaim{Verdict: CritiqueRefuted, Driver: "version_mismatch", Confidence: 85},

@@ -109,6 +109,7 @@ type Service struct {
 	sbomCrossCheck                   ports.SBOMCrossCheckRecorder          // optional SBOM-producer disagreement → judgment minter
 	taint                            ports.TaintScanner                    // optional deterministic taint-analysis → gated CapSAST proposals
 	pythonTaint                      ports.TaintScanner                    // optional Python semantic value-flow → gated CapSAST proposals
+	jsTaint                          ports.TaintScanner                    // optional JavaScript semantic value-flow → gated CapSAST proposals
 	graphResolver                    ports.DependencyGraphResolver         // optional transitive-edge resolver (Go via `go mod graph`)
 	mavenResolver                    ports.MavenResolver                   // optional Maven transitive-tree resolver (`mvn dependency:tree` when it also implements ports.MavenGraphResolver, else `dependency:list`)
 	gradleResolver                   ports.GradleResolver                  // optional Gradle transitive-tree resolver (`gradle dependencies`)
@@ -516,6 +517,10 @@ func (s *Service) SetTaint(t ports.TaintScanner) { s.taint = t }
 // legacy Go function-level scanner. Keeping independent hooks lets operators enable Python analysis without
 // enabling target compilation. No-coverage parser/resolution failures remain best-effort and propose nothing.
 func (s *Service) SetPythonTaint(t ports.TaintScanner) { s.pythonTaint = t }
+
+// SetJSTaint configures JavaScript/TypeScript source-only, interprocedural value-flow analysis separately
+// from the legacy Go scanner. No-coverage parser/resolution failures are best-effort and propose nothing.
+func (s *Service) SetJSTaint(t ports.TaintScanner) { s.jsTaint = t }
 
 // SetGraphResolver configures the optional transitive-edge resolver (Go via `go mod graph`). nil ⇒
 // no resolved Go edges. Best-effort + opt-in: a non-Go target / no module cache / tool error adds no edges
@@ -3349,9 +3354,10 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		_, _ = s.taint.Scan(ctx, engagementID, ws.Dir)
 	}
 
-	// Python semantic taint is source-only and value-granular. It runs independently of the legacy Go
-	// function-level scanner, but follows the same propose-only lifecycle: positive witnesses become gated
-	// CapSAST proposals, while missing/partial coverage never becomes a clean conclusion.
+	// Source-only semantic taint is value-granular and independent of the legacy Go function-level scanner.
+	// Positive witnesses become gated CapSAST proposals, while missing/partial coverage never becomes a clean
+	// conclusion. Each language is independently observable in the scan result. Keep the explicit calls so
+	// the deterministic-before-AI ordering contract remains statically verifiable for each producer.
 	if opts.scansVulnerabilities() && s.pythonTaint != nil {
 		if scanner, ok := s.pythonTaint.(ports.TaintCoverageScanner); ok {
 			outcome, _ := scanner.ScanWithCoverage(ctx, engagementID, ws.Dir)
@@ -3361,6 +3367,17 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 			}
 		} else {
 			_, _ = s.pythonTaint.Scan(ctx, engagementID, ws.Dir)
+		}
+	}
+	if opts.scansVulnerabilities() && s.jsTaint != nil {
+		if scanner, ok := s.jsTaint.(ports.TaintCoverageScanner); ok {
+			outcome, _ := scanner.ScanWithCoverage(ctx, engagementID, ws.Dir)
+			result.AnalysisCoverage = mergeAnalysisCoverage(result.AnalysisCoverage, outcome.Coverage)
+			if warning := semanticCoverageWarning(outcome.Coverage); warning != "" {
+				result.SourceWarnings = mergeStrings(result.SourceWarnings, []string{warning})
+			}
+		} else {
+			_, _ = s.jsTaint.Scan(ctx, engagementID, ws.Dir)
 		}
 	}
 
