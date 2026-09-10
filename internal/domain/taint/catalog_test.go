@@ -171,3 +171,61 @@ func TestDefaultCatalogWellFormed(t *testing.T) {
 		}
 	}
 }
+
+// The expanded path/SSRF sink coverage flags a flow through a newly-modeled sink (a tainted path reaching
+// os.Remove, a tainted URL reaching http.PostForm), the same way the original sinks do.
+func TestAssembleExpandedSinks(t *testing.T) {
+	cases := []struct {
+		name string
+		sink string
+		cwe  string
+	}{
+		{"path-remove", "os.Remove", "CWE-22"},
+		{"path-mkdirall", "os.MkdirAll", "CWE-22"},
+		{"path-readdir", "os.ReadDir", "CWE-22"},
+		{"path-rename", "os.Rename", "CWE-22"},
+		{"ssrf-postform", "net/http.PostForm", "CWE-918"},
+		{"ssrf-client-head", "net/http.Client.Head", "CWE-918"},
+	}
+	for _, tc := range cases {
+		g := callgraph.Graph{Edges: []callgraph.Edge{
+			{Caller: "app.handler", Callees: []string{"net/http.Request.FormValue", "app.op"}},
+			{Caller: "app.op", Callees: []string{tc.sink}},
+		}}
+		fg, sinkClass := Assemble(g, DefaultCatalog())
+		vulns := fg.Vulnerabilities()
+		if len(vulns) != 1 || vulns[0].Sink != "app.op" {
+			t.Errorf("%s: want a flow to the sink, got %+v", tc.name, vulns)
+			continue
+		}
+		if cs := sinkClass["app.op"]; len(cs) != 1 || cs[0].CWE != tc.cwe {
+			t.Errorf("%s: sink must be tagged %s, got %+v", tc.name, tc.cwe, cs)
+		}
+	}
+}
+
+// The new path sinks that also take a non-path argument are deliberately NOT added, so a tainted content
+// argument cannot fire a false path-traversal: os.WriteFile stays out of the catalog.
+func TestWriteFileNotAPathSink(t *testing.T) {
+	for _, s := range DefaultCatalog().Sinks {
+		if s.Symbol == "os.WriteFile" {
+			t.Errorf("os.WriteFile takes a data argument; a class-blind match would false-positive on tainted content")
+		}
+	}
+}
+
+// The Go source set includes the Go 1.22 path parameter and the header accessors, so a flow from a path
+// parameter (or Referer/User-Agent) into a sink is detected.
+func TestAssembleExpandedSources(t *testing.T) {
+	for _, src := range []string{"net/http.Request.PathValue", "net/http.Request.Referer", "net/http.Request.UserAgent"} {
+		g := callgraph.Graph{Edges: []callgraph.Edge{
+			{Caller: "app.handler", Callees: []string{src, "app.op"}},
+			{Caller: "app.op", Callees: []string{"os/exec.Command"}},
+		}}
+		fg, _ := Assemble(g, DefaultCatalog())
+		vulns := fg.Vulnerabilities()
+		if len(vulns) != 1 || vulns[0].Source != "app.handler" || vulns[0].Sink != "app.op" {
+			t.Errorf("%s: expected a source->sink flow, got %+v", src, vulns)
+		}
+	}
+}

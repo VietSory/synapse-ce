@@ -55,6 +55,10 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/agenttools"
 	analysisuc "github.com/KKloudTarus/synapse-ce/internal/usecase/analysis"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/approval"
+	comparisonuc "github.com/KKloudTarus/synapse-ce/internal/usecase/assessmentcomparison"
+	cycleuc "github.com/KKloudTarus/synapse-ce/internal/usecase/assessmentcycle"
+	lifecycleuc "github.com/KKloudTarus/synapse-ce/internal/usecase/assessmentlifecycle"
+	snapshotuc "github.com/KKloudTarus/synapse-ce/internal/usecase/assessmentsnapshot"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/assetuc"
 	attackpathuc "github.com/KKloudTarus/synapse-ce/internal/usecase/attackpath"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/cspm"
@@ -66,6 +70,7 @@ import (
 	evidenceuc "github.com/KKloudTarus/synapse-ce/internal/usecase/evidence"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/execution"
 	exploitationuc "github.com/KKloudTarus/synapse-ce/internal/usecase/exploitation"
+	lineageuc "github.com/KKloudTarus/synapse-ce/internal/usecase/findinglineage"
 	integrationuc "github.com/KKloudTarus/synapse-ce/internal/usecase/integrations"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/leaderuc"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/orchestrator"
@@ -115,6 +120,10 @@ func main() {
 	}
 	if err := cfg.ValidateNetworkExecutionPosture(config.ProcessRoleWorker); err != nil {
 		log.Error("network execution posture invalid", "err", err)
+		os.Exit(1)
+	}
+	if err := cfg.ValidateAssessmentLifecycleRollout(); err != nil {
+		log.Error("assessment lifecycle rollout invalid", "err", err)
 		os.Exit(1)
 	}
 
@@ -174,6 +183,48 @@ func main() {
 	evidenceStore := postgres.NewEvidenceStore(pool)
 	auditLog := postgres.NewAuditLog(pool)
 	queue := postgres.NewJobQueue(pool, ids)
+	assessmentCycleStore := postgres.NewAssessmentCycleRepository(pool)
+	assessmentSnapshotStore := postgres.NewAssessmentSnapshotRepository(pool)
+	assessmentComparisonStore := postgres.NewAssessmentComparisonRepository(pool)
+	assessmentLineageStore := postgres.NewFindingLineageRepository(pool)
+	assessmentTransactions := postgres.NewTenantTransactionRunner(pool)
+	comparisonVerification, err := comparisonuc.NewRetestVerificationReader(assessmentLineageStore, assessmentSnapshotStore, postgres.NewRetestRepository(pool))
+	if err != nil {
+		log.Error("assessment comparison verification reader init failed", "err", err)
+		os.Exit(1)
+	}
+	assessmentComparisonService, err := comparisonuc.NewService(
+		assessmentComparisonStore, assessmentSnapshotStore, assessmentCycleStore, assessmentLineageStore,
+		assessmentTransactions, auditLog, clock, ids, comparisonVerification, nil,
+	)
+	if err != nil {
+		log.Error("assessment comparison service init failed", "err", err)
+		os.Exit(1)
+	}
+	var lineageObserver ports.FindingLineageObserver
+	assessmentLineageService, err := lineageuc.NewService(assessmentLineageStore, assessmentTransactions, auditLog, clock, ids, lineageObserver)
+	if err != nil {
+		log.Error("assessment lineage service init failed", "err", err)
+		os.Exit(1)
+	}
+	assessmentComparisonService.SetAPIStores(nil, queue, assessmentLineageService)
+	closureDecisionReader, err := cycleuc.NewClosureDecisionReader(assessmentLineageStore, assessmentSnapshotStore, postgres.NewRetestRepository(pool), postgres.NewSLAStore(pool))
+	if err != nil {
+		log.Error("assessment closure decision reader init failed", "err", err)
+		os.Exit(1)
+	}
+	assessmentClosureReportService, err := cycleuc.NewClosureReportService(assessmentCycleStore, assessmentCycleStore, assessmentSnapshotStore, assessmentComparisonStore, closureDecisionReader, auditLog)
+	if err != nil {
+		log.Error("assessment closure report service init failed", "err", err)
+		os.Exit(1)
+	}
+	if cfg.WorkerProfile == config.WorkerProfileLifecycle {
+		runWorkerRuntime(ctx, cfg, queue, map[string]worker.Handler{
+			comparisonuc.JobKind:                   assessmentComparisonJobHandler{svc: assessmentComparisonService},
+			cycleuc.AssessmentClosureReportJobKind: assessmentClosureReportJobHandler{svc: assessmentClosureReportService},
+		}, nil, postgres.NewLeaderStore(pool), auditLog, clock, ids, 6*time.Minute, log)
+		return
+	}
 	vulnerabilitySources := postgres.NewVulnerabilitySourceStore(pool)
 	vulnerabilityRuns := postgres.NewSyncRunStore(pool, ids)
 	vulnerabilityMaterializer := postgres.NewAdvisoryMaterializer(pool)
@@ -254,7 +305,17 @@ func main() {
 		blobStore = memoryStore
 		objectStore = memoryStore
 	}
-	uploadedSources := sourceupload.NewStore(objectStore, 0)
+	sourceObjects := objectStore
+	if cfg.BlobEndpoint == "" {
+		localSources, err := blob.NewFilesystem(cfg.EngagementSourceDir)
+		if err != nil {
+			log.Error("durable engagement source store init failed", "err", err)
+			os.Exit(1)
+		}
+		defer func() { _ = localSources.Close() }()
+		sourceObjects = localSources
+	}
+	uploadedSources := sourceupload.NewStoreWithRepository(sourceObjects, postgres.NewEngagementSourceRepository(pool), 0)
 
 	guard, err := execution.NewGuard(repo, clock, auditLog)
 	if err != nil {
@@ -309,6 +370,9 @@ func main() {
 		},
 		VulnDBSource: "osv.dev",
 	}
+	if cfg.Offline {
+		prov.VulnDBSource = "" // Match API provenance when live OSV is disabled.
+	}
 	scmConnectorStore, scmErr := postgres.NewSCMConnectorRepository(pool, mustVaultCipher(cfg, log))
 	if scmErr != nil {
 		log.Error("source-control connector store init failed", "err", scmErr)
@@ -322,6 +386,10 @@ func main() {
 	scaService := scauc.NewService(repo, findingRepo, scanRepo, scanResultStore, scanJobStore, scanRunStore, evidenceService, ids, prov, clock, auditLog, shared.Severity(cfg.FindingMinSeverity), cfg.ScanTimeout, sourceupload.NewAcquirer(scaExecution.Acquirer, uploadedSources),
 		enry.New(), scaExecution.SBOMGen, scaExecution.Sources,
 		risk.New(cfg.KEVURL, cfg.EPSSURL, nil), license.New(), licensemeta.NewChain(licensemeta.NewOSMetadata(), licensemeta.New(cfg.DepsDevURL, nil), licensemeta.NewPyPI("", nil)))
+	if cfg.AssessmentSnapshotEnabled {
+		scaService.SetScanRunProvenance(scanRunStore, assessmentTransactions)
+		scaService.SetAssessmentCycleMembership(assessmentCycleStore, assessmentSnapshotStore)
+	}
 	scaService.SetImportedSBOMStore(importedSBOMStore)
 	scaService.SetUploadedSourceStore(uploadedSources)
 	configureCleanup := scacompose.Configure(scaService, cfg, scaExecution.Sandbox, log)
@@ -345,6 +413,27 @@ func main() {
 		log.Info("compliance report ENABLED (Synapse AppSec Baseline; deterministic, LLM-free)")
 	}
 	scaService.SetRunLock(postgres.NewLeaseRunLock(pool, ids.NewID().String(), cfg.ScanTimeout+time.Minute))
+	if cfg.AssessmentShadowEnabled {
+		shadowSnapshotService, shadowErr := snapshotuc.NewService(assessmentSnapshotStore, assessmentCycleStore, repo, scanRunStore, assessmentTransactions, ids, clock, auditLog)
+		if shadowErr != nil {
+			log.Error("worker assessment snapshot shadow init failed", "err", shadowErr)
+			os.Exit(1)
+		}
+		shadowProjector, shadowErr := lineageuc.NewShadowProjector(assessmentLineageService, assessmentCycleStore, assessmentSnapshotStore, findingRepo, cfg.AssessmentShadowForTenant)
+		if shadowErr != nil {
+			log.Error("worker assessment lineage shadow init failed", "err", shadowErr)
+			os.Exit(1)
+		}
+		shadowSnapshotService.SetFinalizationObserver(shadowProjector)
+		shadowProjector.SetNativeEvidence(scanRunStore, scanRunStore)
+		shadowCoordinator, shadowErr := lifecycleuc.NewShadowCoordinator(assessmentCycleStore, assessmentSnapshotStore, shadowSnapshotService, assessmentComparisonService, cfg.AssessmentShadowForTenant)
+		if shadowErr != nil {
+			log.Error("worker assessment lifecycle shadow coordinator init failed", "err", shadowErr)
+			os.Exit(1)
+		}
+		scaService.SetScanRunObserver(shadowCoordinator)
+		log.Info("worker assessment lifecycle shadow writers configured", "tenant_count", len(cfg.AssessmentShadowTenants))
+	}
 
 	// The sandbox is REQUIRED here – the worker exists to run recon contained.
 	sb, serr := sandbox.NewRunner(cfg.ReconTimeout, cfg.ReconMaxOutput, cfg.SandboxMemMax, cfg.SandboxPidsMax)
@@ -420,9 +509,11 @@ func main() {
 
 	maintenanceTasks := append([]func(context.Context){}, integrationMaintenanceTasks...)
 	handlers := map[string]worker.Handler{
-		reconuc.JobKind:       reconJobHandler{svc: reconService}, // Handle + OnDeadLetter (finalize the run)
-		scauc.ScanJobKind:     scaJobHandler{svc: scaService},
-		integrationuc.JobKind: integrationJobHandler{svc: integrationService},
+		reconuc.JobKind:                        reconJobHandler{svc: reconService}, // Handle + OnDeadLetter (finalize the run)
+		scauc.ScanJobKind:                      scaJobHandler{svc: scaService},
+		integrationuc.JobKind:                  integrationJobHandler{svc: integrationService},
+		comparisonuc.JobKind:                   assessmentComparisonJobHandler{svc: assessmentComparisonService},
+		cycleuc.AssessmentClosureReportJobKind: assessmentClosureReportJobHandler{svc: assessmentClosureReportService},
 	}
 	vulnerabilityRegistry := vulnerabilitymonitor.NewRegistry()
 	vulnerabilityRegistry.AllowPrivateNetworkSources(cfg.VulnerabilitySourceAllowPrivateNetwork)
@@ -501,6 +592,32 @@ func main() {
 	vulnerabilityMonitor.SetReconciler(vulnerabilityRuntime)
 	handlers[vulnerabilitymonitor.JobKind] = vulnerabilitySyncJobHandler{svc: vulnerabilityMonitor}
 	handlers[vulnerabilityreconcile.JobKind] = vulnerabilityReconcileJobHandler{svc: vulnerabilityReconciliation}
+
+	// Cadence-driven sync scheduler (#860 D1.1): a leader-gated maintenance task that enqueues each source
+	// whose last successful sync is older than its Cadence and reclaims stranded runs. The worker runtime
+	// runs maintenance tasks only on the leader, so exactly one scheduler runs; the in-flight-run check and
+	// the hourly idempotency key are secondary guards. Off (interval 0) unless provider sync is also enabled.
+	if cfg.VulnerabilitySyncSchedulerInterval > 0 && cfg.VulnerabilityProviderSyncEnabled {
+		// The scheduler must run on exactly one worker; leader election is what guarantees that. Without it a
+		// multi-worker deployment would run a scheduler on every worker and two ticks across an hour boundary
+		// could enqueue redundant concurrent syncs for one source (the in-flight check and idempotency key
+		// are not transactional across workers). Same requirement as the integration scheduler.
+		if !cfg.LeaderElectionEnabled {
+			log.Error("vulnerability sync scheduler requires SYNAPSE_LEADER_ENABLED=true")
+			os.Exit(1)
+		}
+		syncScheduler, serr := vulnerabilitymonitor.NewScheduler(vulnerabilityMonitor, clock, vulnerabilitymonitor.AlwaysLeader{}, vulnerabilitymonitor.SchedulerConfig{
+			Interval:      cfg.VulnerabilitySyncSchedulerInterval,
+			StaleAfter:    cfg.VulnerabilitySyncStaleAfter,
+			DispatchLimit: cfg.VulnerabilitySyncSchedulerDispatch,
+		}, log)
+		if serr != nil {
+			log.Error("vulnerability sync scheduler init failed", "err", serr)
+			os.Exit(1)
+		}
+		maintenanceTasks = append(maintenanceTasks, syncScheduler.Run)
+		log.Info("vulnerability sync scheduler ENABLED", "interval", cfg.VulnerabilitySyncSchedulerInterval, "stale_after", cfg.VulnerabilitySyncStaleAfter, "dispatch_limit", cfg.VulnerabilitySyncSchedulerDispatch)
+	}
 
 	// #823 durable DAST verification. A governed, approved probe used to execute on the API request
 	// thread; it now runs here as a lease job. The stack is the SAME the API's in-process path uses
@@ -978,6 +1095,22 @@ func (handler integrationJobHandler) Handle(ctx context.Context, job ports.Queue
 }
 
 func (handler integrationJobHandler) OnDeadLetter(ctx context.Context, job ports.QueuedJob, _ error) error {
+	return handler.svc.OnDeadLetter(ctx, job.Payload)
+}
+
+type assessmentComparisonJobHandler struct{ svc *comparisonuc.Service }
+
+type assessmentClosureReportJobHandler struct{ svc *cycleuc.ClosureReportService }
+
+func (handler assessmentClosureReportJobHandler) Handle(ctx context.Context, job ports.QueuedJob) error {
+	return handler.svc.HandleJob(ctx, job)
+}
+
+func (handler assessmentComparisonJobHandler) Handle(ctx context.Context, job ports.QueuedJob) error {
+	return handler.svc.HandleJob(ctx, job.Payload)
+}
+
+func (handler assessmentComparisonJobHandler) OnDeadLetter(ctx context.Context, job ports.QueuedJob, _ error) error {
 	return handler.svc.OnDeadLetter(ctx, job.Payload)
 }
 

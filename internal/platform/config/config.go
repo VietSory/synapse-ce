@@ -15,6 +15,13 @@ import (
 const (
 	defaultWorkerConcurrency       = 1
 	maxWorkerConcurrency           = 64
+	defaultAssessmentBatchSize     = 500
+	maxAssessmentBatchSize         = 2000
+	defaultAssessmentTenantJobs    = 4
+	maxAssessmentTenantJobs        = 4
+	defaultComparisonBacklogWarn   = 500
+	defaultComparisonBacklogHard   = 1000
+	maxComparisonBacklogHard       = 1000
 	defaultFPTriageMaxFindings     = 100
 	maxFPTriageMaxFindings         = 1000
 	defaultFPTriageConcurrency     = 6
@@ -135,6 +142,9 @@ type Config struct {
 	MaxWorkspaceBytes int64
 	// ProjectUploadDir retains uploaded Project source archives for repeat analysis.
 	ProjectUploadDir string
+	// EngagementSourceDir is the durable operator-owned upload object root used
+	// when MinIO/S3 is not configured. API and workers must share the same root.
+	EngagementSourceDir string
 	// ProjectSourceArtifactDir retains immutable, analysis-owned Code source snapshots.
 	// It must be operator-owned; source contents are never fetched again at read time.
 	ProjectSourceArtifactDir  string
@@ -410,6 +420,14 @@ type Config struct {
 	// an explicit tenant allowlist entry; "*" enables all tenants. Dry-run records correlation
 	// differences without mutating occurrences, findings, actions, or notification outbox rows.
 	VulnerabilityProviderSyncEnabled bool
+	// VulnerabilitySyncSchedulerInterval turns on the leader-gated cadence-driven sync scheduler when set
+	// above zero: every interval a single worker enqueues each enabled source whose last successful sync is
+	// older than its Cadence, and reclaims runs stranded past VulnerabilitySyncStaleAfter. Zero (the default)
+	// leaves syncing manual, so the corpus is only as fresh as the last explicit trigger. It has no effect
+	// unless SYNAPSE_VULNERABILITY_PROVIDER_SYNC_ENABLED is on.
+	VulnerabilitySyncSchedulerInterval time.Duration
+	VulnerabilitySyncStaleAfter        time.Duration
+	VulnerabilitySyncSchedulerDispatch int
 	// VulnerabilitySourceAllowPrivateNetwork lets a vulnerability source reach RFC1918
 	// addresses. Off by default: a source is a URL the control plane fetches on a schedule,
 	// so private-range egress turns whoever can write a source into a probe of the
@@ -424,6 +442,24 @@ type Config struct {
 	// SLAEnabled turns on durable risk-based remediation deadlines, versioned tenant policy, and
 	// human lifecycle APIs. Default false until an operator explicitly opts into the new schema/path.
 	SLAEnabled bool
+	// Assessment lifecycle gates default off and use explicit tenant allowlists for staged rollout.
+	AssessmentCycleAPIEnabled           bool
+	AssessmentCycleDualWriteEnabled     bool
+	AssessmentCycleDualWriteTenants     []string
+	AssessmentSnapshotEnabled           bool
+	AssessmentSnapshotCompletionEnabled bool
+	AssessmentSnapshotCompletionTenants []string
+	AssessmentShadowEnabled             bool
+	AssessmentShadowTenants             []string
+	AssessmentLifecycleReadEnabled      bool
+	AssessmentLifecycleReadTenants      []string
+	AssessmentLifecycleUIDefault        bool
+	AssessmentLifecycleUITenants        []string
+	AssessmentClosureEnabled            bool
+	AssessmentBatchSize                 int
+	AssessmentTenantJobs                int
+	AssessmentBacklogWarning            int
+	AssessmentBacklogHardLimit          int
 	// SASTEnabled turns on the deterministic pattern-SAST analyzer in the scan pipeline; off by default.
 	SASTEnabled bool
 	// SecretScanEnabled turns on the deterministic secret scanner in the scan pipeline; off by default.
@@ -504,6 +540,10 @@ type Config struct {
 	// sidecar extracts bounded facts, but unlike Go taint this pass never compiles or imports target code.
 	// Positive paths become gated CapSAST proposals; incomplete coverage never produces a clean verdict.
 	PythonTaintEnabled bool
+	// TaintRulesFile is an optional operator-provided YAML file of CUSTOM Python taint rules (Semgrep-style
+	// user sources and sinks) merged additively into the built-in catalog at startup. Empty (the default)
+	// uses only the built-in catalog. Custom rules can only ADD detection, never suppress a built-in flow.
+	TaintRulesFile string
 	// TriScoreReassessEnabled turns on the tri-score risk reassessment surface (#594 C3/D/X5): an operator
 	// route that re-scores an incident's RiskAssessment from its factors (Threat now; Exposure/Behavior/
 	// Coverage as their producers are wired) via the deterministic Scorer. Off by default while the
@@ -740,6 +780,7 @@ func Load() Config {
 		Offline:                   getbool("SYNAPSE_OFFLINE", false),
 		MaxWorkspaceBytes:         getint64("SYNAPSE_MAX_WORKSPACE_BYTES", 2<<30),
 		ProjectUploadDir:          getenv("SYNAPSE_PROJECT_UPLOAD_DIR", "data/project-uploads"),
+		EngagementSourceDir:       engagementSourceDir(),
 		ProjectSourceArtifactDir:  projectSourceArtifactDir(),
 		ProjectSourceRetention:    getduration("SYNAPSE_PROJECT_SOURCE_RETENTION", 90*24*time.Hour),
 		ProjectSourceMaxFileBytes: getint64("SYNAPSE_PROJECT_SOURCE_MAX_FILE_BYTES", 2<<20),
@@ -788,40 +829,40 @@ func Load() Config {
 		// absent. Set the flag to false to opt out. Capabilities that need external setup or would be
 		// unsafe unsandboxed stay OFF by default (sandbox, agent/LLM, taint, maven/gradle resolvers,
 		// jarhash egress) – see their fields below.
-		JudgmentsEnabled:                            getbool("SYNAPSE_JUDGMENTS_ENABLED", true),
-		SASTEnabled:                                 getbool("SYNAPSE_SAST_ENABLED", true),
-		SecretScanEnabled:                           getbool("SYNAPSE_SECRET_SCAN_ENABLED", true),
-		SecretHistoryEnabled:                        getbool("SYNAPSE_SECRET_HISTORY_ENABLED", false),
-		MisconfigEnabled:                            getbool("SYNAPSE_MISCONFIG_ENABLED", true),
-		SuppressionEnabled:                          getbool("SYNAPSE_SUPPRESSION_ENABLED", true),
-		VEXEnabled:                                  getbool("SYNAPSE_VEX_ENABLED", true),
-		ComplianceEnabled:                           getbool("SYNAPSE_COMPLIANCE_ENABLED", true),
-		DetectionPriority:                           os.Getenv("SYNAPSE_DETECTION_PRIORITY"),
-		DBMaxAgeDays:                                getint("SYNAPSE_DB_MAX_AGE_DAYS", 30),
-		ScanCacheEnabled:                            getbool("SYNAPSE_SCAN_CACHE_ENABLED", true),
-		ScanCacheDir:                                os.Getenv("SYNAPSE_SCAN_CACHE_DIR"),
-		ImageRootFSEnabled:                          getbool("SYNAPSE_IMAGE_ROOTFS_ENABLED", true),
-		OwnedAdvisoryEnabled:                        getbool("SYNAPSE_OWNED_ADVISORY", true),
-		SymbolOverlayDir:                            getenv("SYNAPSE_SYMBOL_OVERLAY_DIR", ""),
-		ReachabilityEnabled:                         getbool("SYNAPSE_REACHABILITY_ENABLED", true),
-		PyReachabilityEnabled:                       getbool("SYNAPSE_PYREACH_ENABLED", false),
-		PySemanticReachabilityEnabled:               getbool("SYNAPSE_PYREACH_TIER2_ENABLED", false),
-		ASTBin:                                      os.Getenv("SYNAPSE_AST_BIN"),
-		PythonTaintEnabled:                          getbool("SYNAPSE_PYTAINT_ENABLED", true),
-		TriScoreReassessEnabled:                     getbool("SYNAPSE_TRISCORE_REASSESS_ENABLED", false),
-		FleetCorrelationEnabled:                     getbool("SYNAPSE_FLEET_CORRELATION_ENABLED", false),
-		FleetCorrelationWindow:                      getduration("SYNAPSE_FLEET_CORRELATION_WINDOW", 30*time.Minute),
-		FleetCorrelationAllowedLateness:             getduration("SYNAPSE_FLEET_CORRELATION_ALLOWED_LATENESS", 5*time.Minute),
-		FleetCorrelationMaxPerIncident:              getint("SYNAPSE_FLEET_CORRELATION_MAX_PER_INCIDENT", 100),
-		FleetCorrelationPageSize:                    getint("SYNAPSE_FLEET_CORRELATION_PAGE_SIZE", 100),
-		FleetCorrelationMaxActiveSessions:           getint("SYNAPSE_FLEET_CORRELATION_MAX_ACTIVE_SESSIONS", 500),
+		JudgmentsEnabled:                  getbool("SYNAPSE_JUDGMENTS_ENABLED", true),
+		SASTEnabled:                       getbool("SYNAPSE_SAST_ENABLED", true),
+		SecretScanEnabled:                 getbool("SYNAPSE_SECRET_SCAN_ENABLED", true),
+		SecretHistoryEnabled:              getbool("SYNAPSE_SECRET_HISTORY_ENABLED", false),
+		MisconfigEnabled:                  getbool("SYNAPSE_MISCONFIG_ENABLED", true),
+		SuppressionEnabled:                getbool("SYNAPSE_SUPPRESSION_ENABLED", true),
+		VEXEnabled:                        getbool("SYNAPSE_VEX_ENABLED", true),
+		ComplianceEnabled:                 getbool("SYNAPSE_COMPLIANCE_ENABLED", true),
+		DetectionPriority:                 os.Getenv("SYNAPSE_DETECTION_PRIORITY"),
+		DBMaxAgeDays:                      getint("SYNAPSE_DB_MAX_AGE_DAYS", 30),
+		ScanCacheEnabled:                  getbool("SYNAPSE_SCAN_CACHE_ENABLED", true),
+		ScanCacheDir:                      os.Getenv("SYNAPSE_SCAN_CACHE_DIR"),
+		ImageRootFSEnabled:                getbool("SYNAPSE_IMAGE_ROOTFS_ENABLED", true),
+		OwnedAdvisoryEnabled:              getbool("SYNAPSE_OWNED_ADVISORY", true),
+		SymbolOverlayDir:                  getenv("SYNAPSE_SYMBOL_OVERLAY_DIR", ""),
+		ReachabilityEnabled:               getbool("SYNAPSE_REACHABILITY_ENABLED", true),
+		PyReachabilityEnabled:             getbool("SYNAPSE_PYREACH_ENABLED", true),
+		PySemanticReachabilityEnabled:     getbool("SYNAPSE_PYREACH_TIER2_ENABLED", false),
+		ASTBin:                            os.Getenv("SYNAPSE_AST_BIN"),
+		PythonTaintEnabled:                getbool("SYNAPSE_PYTAINT_ENABLED", true),
+		TaintRulesFile:                    strings.TrimSpace(getenv("SYNAPSE_TAINT_RULES_FILE", "")),
+		TriScoreReassessEnabled:           getbool("SYNAPSE_TRISCORE_REASSESS_ENABLED", false),
+		FleetCorrelationEnabled:           getbool("SYNAPSE_FLEET_CORRELATION_ENABLED", false),
+		FleetCorrelationWindow:            getduration("SYNAPSE_FLEET_CORRELATION_WINDOW", 30*time.Minute),
+		FleetCorrelationMaxPerIncident:    getint("SYNAPSE_FLEET_CORRELATION_MAX_PER_INCIDENT", 100),
+		FleetCorrelationPageSize:          getint("SYNAPSE_FLEET_CORRELATION_PAGE_SIZE", 100),
+		FleetCorrelationMaxActiveSessions: getint("SYNAPSE_FLEET_CORRELATION_MAX_ACTIVE_SESSIONS", 500),
 		FleetCorrelationMaxTimelineRefsPerDetection: getint("SYNAPSE_FLEET_CORRELATION_MAX_TIMELINE_REFS_PER_DETECTION", 32),
 		FleetCorrelationMaxTimelineRefsPerPage:      getint("SYNAPSE_FLEET_CORRELATION_MAX_TIMELINE_REFS_PER_PAGE", 500),
-		JSReachabilityEnabled:                       getbool("SYNAPSE_JSREACH_ENABLED", false),
+		JSReachabilityEnabled:                       getbool("SYNAPSE_JSREACH_ENABLED", true),
 		JSSymbolReachabilityEnabled:                 getbool("SYNAPSE_JSREACH_TIER2_ENABLED", false),
-		RustReachabilityEnabled:                     getbool("SYNAPSE_REACH_RUST", false),
-		PHPReachabilityEnabled:                      getbool("SYNAPSE_REACH_PHP", false),
-		RubyReachabilityEnabled:                     getbool("SYNAPSE_REACH_RUBY", false),
+		RustReachabilityEnabled:                     getbool("SYNAPSE_REACH_RUST", true),
+		PHPReachabilityEnabled:                      getbool("SYNAPSE_REACH_PHP", true),
+		RubyReachabilityEnabled:                     getbool("SYNAPSE_REACH_RUBY", true),
 		CrossCheckEnabled:                           getbool("SYNAPSE_CROSSCHECK_ENABLED", true),
 		SBOMCrossCheckEnabled:                       getbool("SYNAPSE_SBOM_CROSSCHECK_ENABLED", true),
 		WriteupDraftsEnabled:                        getbool("SYNAPSE_WRITEUP_DRAFTS_ENABLED", false), // needs agent → opt-in
@@ -844,16 +885,10 @@ func Load() Config {
 		FleetAgentStaleAfter:                        getduration("SYNAPSE_FLEET_STALE_AFTER", 10*time.Minute),
 		FleetCoverageFreshnessTarget:                getduration("SYNAPSE_FLEET_COVERAGE_FRESHNESS_TARGET", 24*time.Hour),
 		FleetSignerKey:                              getenv("SYNAPSE_FLEET_SIGNER_KEY", ""),
-		ResponseExecutionEnabled:                    getbool("SYNAPSE_RESPONSE_EXECUTION_ENABLED", false),
-		ResponseCommandSigningKeyFile:               strings.TrimSpace(os.Getenv("SYNAPSE_RESPONSE_COMMAND_SIGNING_KEY_FILE")),
-		ResponseCommandTTL:                          getduration("SYNAPSE_RESPONSE_COMMAND_TTL", 2*time.Minute),
-		ResponseExecutionPollInterval:               getduration("SYNAPSE_RESPONSE_EXECUTION_POLL_INTERVAL", 100*time.Millisecond),
 		FleetCACertPEM:                              getenv("SYNAPSE_FLEET_CA_CERT", ""),
 		FleetCAKeyPEM:                               getenv("SYNAPSE_FLEET_CA_KEY", ""),
 		FleetCertTTL:                                getduration("SYNAPSE_FLEET_CERT_TTL", 720*time.Hour),
 		FleetClientCertHeader:                       getenv("SYNAPSE_FLEET_CLIENT_CERT_HEADER", ""),
-		FleetClientCertHost:                         getenv("SYNAPSE_FLEET_CLIENT_CERT_HOST", ""),
-		FleetEnrollmentHost:                         getenv("SYNAPSE_FLEET_ENROLLMENT_HOST", ""),
 		LeaderElectionEnabled:                       getbool("SYNAPSE_LEADER_ENABLED", false),
 		LeaderResource:                              getenv("SYNAPSE_LEADER_RESOURCE", "scheduler"),
 		LeaderTerm:                                  getduration("SYNAPSE_LEADER_TERM", 15*time.Second),
@@ -873,6 +908,9 @@ func Load() Config {
 		IntegrationSchedulerQueueDepth:              getint("SYNAPSE_INTEGRATION_SCHEDULER_MAX_QUEUE_DEPTH", 100),
 		IntegrationAllowPrivateNetwork:              getbool("SYNAPSE_INTEGRATION_ALLOW_PRIVATE_NETWORK", false),
 		VulnerabilityProviderSyncEnabled:            getbool("SYNAPSE_VULNERABILITY_PROVIDER_SYNC_ENABLED", false),
+		VulnerabilitySyncSchedulerInterval:          getduration("SYNAPSE_VULNERABILITY_SYNC_SCHEDULER_INTERVAL", 0),
+		VulnerabilitySyncStaleAfter:                 getduration("SYNAPSE_VULNERABILITY_SYNC_STALE_AFTER", 2*time.Hour),
+		VulnerabilitySyncSchedulerDispatch:          getint("SYNAPSE_VULNERABILITY_SYNC_SCHEDULER_DISPATCH_LIMIT", 16),
 		VulnerabilityOccurrenceWritesEnabled:        getbool("SYNAPSE_VULNERABILITY_OCCURRENCE_WRITES_ENABLED", false),
 		VulnerabilityFindingProjectionEnabled:       getbool("SYNAPSE_VULNERABILITY_FINDING_PROJECTION_ENABLED", false),
 		VulnerabilityActionsEnabled:                 getbool("SYNAPSE_VULNERABILITY_ACTIONS_ENABLED", false),
@@ -937,6 +975,30 @@ func Load() Config {
 		AlertWebhookAllowPrivate:                    getbool("SYNAPSE_ALERT_WEBHOOK_ALLOW_PRIVATE", false),
 		AlertWebhookAllowUnsigned:                   getbool("SYNAPSE_ALERT_WEBHOOK_ALLOW_UNSIGNED", false),
 		VulnerabilitySourceAllowPrivateNetwork:      getbool("SYNAPSE_VULNERABILITY_SOURCE_ALLOW_PRIVATE_NETWORK", false),
+		AssessmentCycleAPIEnabled:                   getbool("SYNAPSE_ASSESSMENT_CYCLE_API_ENABLED", false),
+		AssessmentCycleDualWriteEnabled:             getbool("SYNAPSE_ASSESSMENT_CYCLE_DUAL_WRITE_ENABLED", false),
+		AssessmentCycleDualWriteTenants:             splitList(getenv("SYNAPSE_ASSESSMENT_CYCLE_DUAL_WRITE_TENANTS", "")),
+		AssessmentSnapshotEnabled:                   getbool("SYNAPSE_ASSESSMENT_SNAPSHOT_ENABLED", false),
+		AssessmentSnapshotCompletionEnabled:         getbool("SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_ENABLED", false),
+		AssessmentSnapshotCompletionTenants:         splitList(getenv("SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_TENANTS", "")),
+		AssessmentShadowEnabled:                     getbool("SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_ENABLED", false),
+		AssessmentShadowTenants:                     splitList(getenv("SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_TENANTS", "")),
+		AssessmentLifecycleReadEnabled:              getbool("SYNAPSE_ASSESSMENT_LIFECYCLE_READ_ENABLED", false),
+		AssessmentLifecycleReadTenants:              splitList(getenv("SYNAPSE_ASSESSMENT_LIFECYCLE_READ_TENANTS", "")),
+		AssessmentLifecycleUIDefault:                getbool("SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_ENABLED", false),
+		AssessmentLifecycleUITenants:                splitList(getenv("SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_TENANTS", "")),
+		AssessmentClosureEnabled:                    getbool("SYNAPSE_ASSESSMENT_CLOSURE_REPORT_ENABLED", false),
+		AssessmentBatchSize:                         getint("SYNAPSE_ASSESSMENT_MIGRATION_BATCH_SIZE", defaultAssessmentBatchSize),
+		AssessmentTenantJobs:                        getint("SYNAPSE_ASSESSMENT_PROCESS_TENANT_JOBS", defaultAssessmentTenantJobs),
+		AssessmentBacklogWarning:                    getint("SYNAPSE_ASSESSMENT_COMPARISON_BACKLOG_WARNING", defaultComparisonBacklogWarn),
+		AssessmentBacklogHardLimit:                  getint("SYNAPSE_ASSESSMENT_COMPARISON_BACKLOG_HARD_LIMIT", defaultComparisonBacklogHard),
+		FleetCorrelationAllowedLateness:             getduration("SYNAPSE_FLEET_CORRELATION_ALLOWED_LATENESS", 5*time.Minute),
+		ResponseExecutionEnabled:                    getbool("SYNAPSE_RESPONSE_EXECUTION_ENABLED", false),
+		ResponseCommandSigningKeyFile:               strings.TrimSpace(os.Getenv("SYNAPSE_RESPONSE_COMMAND_SIGNING_KEY_FILE")),
+		ResponseCommandTTL:                          getduration("SYNAPSE_RESPONSE_COMMAND_TTL", 2*time.Minute),
+		ResponseExecutionPollInterval:               getduration("SYNAPSE_RESPONSE_EXECUTION_POLL_INTERVAL", 100*time.Millisecond),
+		FleetClientCertHost:                         getenv("SYNAPSE_FLEET_CLIENT_CERT_HOST", ""),
+		FleetEnrollmentHost:                         getenv("SYNAPSE_FLEET_ENROLLMENT_HOST", ""),
 
 		AgentApprovalMode:    getenv("SYNAPSE_AGENT_APPROVAL_MODE", "manual"),
 		AgentApprovalTimeout: getduration("SYNAPSE_AGENT_APPROVAL_TIMEOUT", 30*time.Minute),
@@ -1163,22 +1225,23 @@ type WorkerProfile string
 const (
 	WorkerProfileAll          WorkerProfile = "all"
 	WorkerProfileIntegrations WorkerProfile = "integrations"
+	WorkerProfileLifecycle    WorkerProfile = "lifecycle"
 )
 
 func (c Config) ValidateWorkerProfile() error {
 	switch c.WorkerProfile {
-	case WorkerProfileAll, WorkerProfileIntegrations:
+	case WorkerProfileAll, WorkerProfileIntegrations, WorkerProfileLifecycle:
 		return nil
 	default:
-		return fmt.Errorf("SYNAPSE_WORKER_PROFILE must be %q or %q (got %q)", WorkerProfileAll, WorkerProfileIntegrations, c.WorkerProfile)
+		return fmt.Errorf("SYNAPSE_WORKER_PROFILE must be %q, %q, or %q (got %q)", WorkerProfileAll, WorkerProfileIntegrations, WorkerProfileLifecycle, c.WorkerProfile)
 	}
 }
 
 // ValidateWorkerSandboxPosture preserves the scanner worker's production fail-closed
-// sandbox gate while allowing the integration-only worker, which never constructs or
-// claims an executable-tool handler.
+// sandbox gate while allowing data-only workers, which never construct or claim an
+// executable-tool handler.
 func (c Config) ValidateWorkerSandboxPosture() error {
-	if c.WorkerProfile == WorkerProfileIntegrations {
+	if c.WorkerProfile == WorkerProfileIntegrations || c.WorkerProfile == WorkerProfileLifecycle {
 		return nil
 	}
 	return c.ValidateSandboxPosture()
@@ -1201,7 +1264,7 @@ func (c Config) ResolveToolExecution(role ProcessRole) (ToolExecution, error) {
 		if c.DBDSN == "" {
 			return "", errors.New("synapse-worker requires SYNAPSE_DB_DSN: queued execution cannot use process-local persistence")
 		}
-		if c.IsProduction() && !c.SandboxEnabled && c.WorkerProfile != WorkerProfileIntegrations {
+		if c.IsProduction() && !c.SandboxEnabled && c.WorkerProfile != WorkerProfileIntegrations && c.WorkerProfile != WorkerProfileLifecycle {
 			return "", errors.New("production synapse-worker requires SYNAPSE_SANDBOX_ENABLED=true")
 		}
 		return ToolExecutionWorker, nil
@@ -1336,6 +1399,116 @@ func (c Config) ValidateWorkerConcurrency() error {
 		return fmt.Errorf("SYNAPSE_WORKER_CONCURRENCY must be between 1 and %d (got %d)", maxWorkerConcurrency, c.WorkerConcurrency)
 	}
 	return nil
+}
+
+// ValidateAssessmentLifecycleRollout rejects rollout settings that can create
+// unbounded migration work or expose UI/closure paths before their read inputs.
+func (c Config) ValidateAssessmentLifecycleRollout() error {
+	if c.AssessmentCycleDualWriteEnabled && len(c.AssessmentCycleDualWriteTenants) == 0 {
+		return errors.New("SYNAPSE_ASSESSMENT_CYCLE_DUAL_WRITE_ENABLED requires SYNAPSE_ASSESSMENT_CYCLE_DUAL_WRITE_TENANTS")
+	}
+	if c.AssessmentBatchSize < 1 || c.AssessmentBatchSize > maxAssessmentBatchSize {
+		return fmt.Errorf("SYNAPSE_ASSESSMENT_MIGRATION_BATCH_SIZE must be between 1 and %d (got %d)", maxAssessmentBatchSize, c.AssessmentBatchSize)
+	}
+	if c.AssessmentTenantJobs < 1 || c.AssessmentTenantJobs > maxAssessmentTenantJobs {
+		return fmt.Errorf("SYNAPSE_ASSESSMENT_PROCESS_TENANT_JOBS must be between 1 and %d (got %d)", maxAssessmentTenantJobs, c.AssessmentTenantJobs)
+	}
+	if c.AssessmentBacklogWarning < 1 || c.AssessmentBacklogWarning > defaultComparisonBacklogWarn {
+		return fmt.Errorf("SYNAPSE_ASSESSMENT_COMPARISON_BACKLOG_WARNING must be between 1 and %d (got %d)", defaultComparisonBacklogWarn, c.AssessmentBacklogWarning)
+	}
+	if c.AssessmentBacklogHardLimit < c.AssessmentBacklogWarning || c.AssessmentBacklogHardLimit > maxComparisonBacklogHard {
+		return fmt.Errorf("SYNAPSE_ASSESSMENT_COMPARISON_BACKLOG_HARD_LIMIT must be between warning threshold %d and %d (got %d)", c.AssessmentBacklogWarning, maxComparisonBacklogHard, c.AssessmentBacklogHardLimit)
+	}
+	if c.AssessmentShadowEnabled && !c.AssessmentSnapshotEnabled {
+		return errors.New("SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_ENABLED requires SYNAPSE_ASSESSMENT_SNAPSHOT_ENABLED=true")
+	}
+	if c.AssessmentShadowEnabled && len(c.AssessmentShadowTenants) == 0 {
+		return errors.New("SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_ENABLED requires SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_TENANTS")
+	}
+	if c.AssessmentLifecycleReadEnabled && (!c.AssessmentShadowEnabled || len(c.AssessmentLifecycleReadTenants) == 0) {
+		return errors.New("SYNAPSE_ASSESSMENT_LIFECYCLE_READ_ENABLED requires shadow generation and SYNAPSE_ASSESSMENT_LIFECYCLE_READ_TENANTS")
+	}
+	if !tenantAllowlistCovers(c.AssessmentShadowTenants, c.AssessmentLifecycleReadTenants) {
+		return errors.New("SYNAPSE_ASSESSMENT_LIFECYCLE_READ_TENANTS must be a subset of SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_TENANTS")
+	}
+	if c.AssessmentSnapshotCompletionEnabled && !c.AssessmentSnapshotEnabled {
+		return errors.New("SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_ENABLED requires SYNAPSE_ASSESSMENT_SNAPSHOT_ENABLED=true")
+	}
+	if c.AssessmentSnapshotCompletionEnabled && len(c.AssessmentSnapshotCompletionTenants) == 0 {
+		return errors.New("SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_ENABLED requires SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_TENANTS")
+	}
+	if c.AssessmentSnapshotCompletionEnabled && !c.AssessmentLifecycleReadEnabled {
+		return errors.New("SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_ENABLED requires SYNAPSE_ASSESSMENT_LIFECYCLE_READ_ENABLED=true")
+	}
+	if !tenantAllowlistCovers(c.AssessmentLifecycleReadTenants, c.AssessmentSnapshotCompletionTenants) {
+		return errors.New("SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_TENANTS must be a subset of SYNAPSE_ASSESSMENT_LIFECYCLE_READ_TENANTS")
+	}
+	if c.AssessmentLifecycleUIDefault && !c.AssessmentLifecycleReadEnabled {
+		return errors.New("SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_ENABLED requires SYNAPSE_ASSESSMENT_LIFECYCLE_READ_ENABLED=true")
+	}
+	if c.AssessmentLifecycleUIDefault && len(c.AssessmentLifecycleUITenants) == 0 {
+		return errors.New("SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_ENABLED requires SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_TENANTS")
+	}
+	if !tenantAllowlistCovers(c.AssessmentLifecycleReadTenants, c.AssessmentLifecycleUITenants) {
+		return errors.New("SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_TENANTS must be a subset of SYNAPSE_ASSESSMENT_LIFECYCLE_READ_TENANTS")
+	}
+	if c.AssessmentClosureEnabled && (!c.AssessmentLifecycleReadEnabled || !c.AssessmentSnapshotEnabled || !c.AssessmentShadowEnabled) {
+		return errors.New("SYNAPSE_ASSESSMENT_CLOSURE_REPORT_ENABLED requires lifecycle read, snapshots, and identity/comparison shadow generation")
+	}
+	return nil
+}
+
+func (c Config) AssessmentCycleDualWriteForTenant(tenantID string) bool {
+	return tenantFeatureEnabled(c.AssessmentCycleDualWriteEnabled, c.AssessmentCycleDualWriteTenants, tenantID)
+}
+
+func (c Config) AssessmentShadowForTenant(tenantID string) bool {
+	return tenantFeatureEnabled(c.AssessmentShadowEnabled, c.AssessmentShadowTenants, tenantID)
+}
+
+func (c Config) AssessmentLifecycleReadForTenant(tenantID string) bool {
+	return tenantFeatureEnabled(c.AssessmentLifecycleReadEnabled, c.AssessmentLifecycleReadTenants, tenantID)
+}
+
+func (c Config) AssessmentSnapshotCompletionForTenant(tenantID string) bool {
+	return tenantFeatureEnabled(c.AssessmentSnapshotCompletionEnabled, c.AssessmentSnapshotCompletionTenants, tenantID)
+}
+
+func (c Config) AssessmentLifecycleUIForTenant(tenantID string) bool {
+	return tenantFeatureEnabled(c.AssessmentLifecycleUIDefault, c.AssessmentLifecycleUITenants, tenantID)
+}
+
+func tenantFeatureEnabled(enabled bool, allowlist []string, tenantID string) bool {
+	if !enabled {
+		return false
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	for _, allowed := range allowlist {
+		if allowed == "*" || strings.TrimSpace(allowed) == tenantID {
+			return true
+		}
+	}
+	return false
+}
+
+func tenantAllowlistCovers(superset, subset []string) bool {
+	if len(subset) == 0 {
+		return true
+	}
+	allowed := make(map[string]struct{}, len(superset))
+	for _, tenantID := range superset {
+		tenantID = strings.TrimSpace(tenantID)
+		if tenantID == "*" {
+			return true
+		}
+		allowed[tenantID] = struct{}{}
+	}
+	for _, tenantID := range subset {
+		if _, ok := allowed[strings.TrimSpace(tenantID)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateOIDCPosture fails closed when the browser OIDC BFF cannot bind identity/session state to a fixed tenant.

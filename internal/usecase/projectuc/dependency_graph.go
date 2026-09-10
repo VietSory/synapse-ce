@@ -38,6 +38,7 @@ type DependencyGraphNode struct {
 	Reachability       string                         `json:"reachability,omitempty"`
 	Direct             bool                           `json:"direct"`
 	Depth              int                            `json:"depth"`
+	Synthetic          bool                           `json:"synthetic,omitempty"` // the synthetic project-root node that unifies a disconnected (monorepo) graph; not a real component
 	Licenses           []DependencyGraphLicense       `json:"licenses"`
 	LicenseRisk        bool                           `json:"license_risk"`
 	LicenseVerdict     string                         `json:"license_verdict"`
@@ -153,6 +154,7 @@ func buildProjectDependencyGraph(analysisID string, scan scauc.ScanResult) (Depe
 		byNameVersion[component.Name+"\x00"+component.Version] = append(byNameVersion[component.Name+"\x00"+component.Version], id)
 	}
 	sort.Slice(components, func(i, j int) bool { return components[i].id < components[j].id })
+	prodReach := sbom.ProductionReachable(scan.SBOM.Dependencies)
 
 	edgeSeen := make(map[string]bool)
 	children := make(map[string][]string)
@@ -267,9 +269,14 @@ func buildProjectDependencyGraph(analysisID string, scan scauc.ScanResult) (Depe
 		vulns := vulnsByID[ref.id]
 		verdict := licenseVerdict[ref.id]
 		licenseRisk := verdict == string(ports.LicenseWarn) || verdict == string(ports.LicenseDeny) || verdict == "" && riskyCategory
+		effectiveScope := ref.component.Scope
+		if reachable, ok := prodReach[ref.id]; ok && !reachable &&
+			(effectiveScope == "" || effectiveScope == sbom.ScopeProduction || effectiveScope == sbom.ScopeUnknown) {
+			effectiveScope = sbom.ScopeDevelopment
+		}
 		node := DependencyGraphNode{
 			ID: ref.id, Name: ref.component.Name, Version: ref.component.Version, PURL: ref.component.PURL,
-			Scope: ref.component.Scope, Reachability: ref.component.Reachability,
+			Scope: effectiveScope, Reachability: ref.component.Reachability,
 			Direct: itemDepth == 0, Depth: itemDepth, Licenses: licenses,
 			LicenseRisk: licenseRisk, LicenseVerdict: verdict, Vulnerabilities: vulns,
 			VulnerabilityCount: len(vulns), WorstSeverity: worstDependencySeverity(vulns),
@@ -288,8 +295,77 @@ func buildProjectDependencyGraph(analysisID string, scan scauc.ScanResult) (Depe
 			graph.Summary.LicenseRisk++
 		}
 	}
+	// EPIC #860 D3.9: a multi-manifest (monorepo) scan, or any project whose direct dependencies form
+	// independent trees, projects as a DISCONNECTED forest with no single navigable root. When the graph has
+	// more than one weakly-connected component, link every top-level dependency under one synthetic
+	// project-root node so it forms ONE connected graph with a true root. A single connected graph (the common
+	// single-tree case, and a lone rootless cycle) is left untouched, so existing single-root projections are
+	// unchanged. The synthetic node is not a real component (no PURL/version/licenses/vulnerabilities) and is
+	// excluded from the component summary; real components keep their Direct/Depth exactly as computed.
+	componentIDList := make([]string, 0, len(components))
+	for _, c := range components {
+		componentIDList = append(componentIDList, c.id)
+	}
+	if len(roots) > 0 && countWeaklyConnectedComponents(componentIDList, edges) > 1 {
+		syntheticEdges := make([]DependencyGraphEdge, 0, len(roots))
+		for _, root := range roots { // roots is already sorted, so the synthetic edges are deterministic
+			syntheticEdges = append(syntheticEdges, DependencyGraphEdge{From: syntheticProjectRootID, To: root})
+		}
+		edges = append(syntheticEdges, edges...)
+		graph.Edges = edges
+		graph.Roots = []string{syntheticProjectRootID}
+		graph.Nodes = append(graph.Nodes, DependencyGraphNode{
+			ID: syntheticProjectRootID, Name: "Project", Synthetic: true,
+			Licenses: []DependencyGraphLicense{}, Vulnerabilities: []DependencyGraphVulnerability{},
+		})
+	}
 	graph.Summary.Edges = len(edges)
 	return graph, nil
+}
+
+// syntheticProjectRootID is the reserved id of the synthetic project-root node (D3.9). It cannot collide
+// with a real component id, which is always a PURL ("pkg:…") or a "name@version".
+const syntheticProjectRootID = "synthetic:project-root"
+
+// countWeaklyConnectedComponents counts the weakly-connected components of the graph (edges treated as
+// undirected) over the given node ids, via union-find. An isolated node is its own component. It tells the
+// caller whether the graph is a disconnected forest (>1) that a synthetic root should unify.
+func countWeaklyConnectedComponents(ids []string, edges []DependencyGraphEdge) int {
+	parent := make(map[string]int, len(ids))
+	roots := make([]int, len(ids))
+	index := make(map[string]int, len(ids))
+	for i, id := range ids {
+		parent[id] = i
+		roots[i] = i
+		index[id] = i
+	}
+	var find func(int) int
+	find = func(x int) int {
+		for roots[x] != x {
+			roots[x] = roots[roots[x]]
+			x = roots[x]
+		}
+		return x
+	}
+	union := func(a, b string) {
+		ai, aok := index[a]
+		bi, bok := index[b]
+		if !aok || !bok {
+			return
+		}
+		ra, rb := find(ai), find(bi)
+		if ra != rb {
+			roots[ra] = rb
+		}
+	}
+	for _, e := range edges {
+		union(e.From, e.To)
+	}
+	seen := map[int]struct{}{}
+	for _, id := range ids {
+		seen[find(index[id])] = struct{}{}
+	}
+	return len(seen)
 }
 
 func dependencyDepths(roots []string, children map[string][]string) map[string]int {
@@ -415,7 +491,7 @@ func dependencySubtree(doc *sbom.SBOM, root string) (*sbom.SBOM, error) {
 		if !selected[dependency.Ref] {
 			continue
 		}
-		next := sbom.Dependency{Ref: dependency.Ref}
+		next := sbom.Dependency{Ref: dependency.Ref, Scope: dependency.Scope, Optional: dependency.Optional}
 		for _, child := range dependency.DependsOn {
 			if selected[child] {
 				next.DependsOn = append(next.DependsOn, child)
@@ -429,7 +505,10 @@ func dependencySubtree(doc *sbom.SBOM, root string) (*sbom.SBOM, error) {
 func cloneDependencies(in []sbom.Dependency) []sbom.Dependency {
 	out := make([]sbom.Dependency, len(in))
 	for i, dependency := range in {
-		out[i] = sbom.Dependency{Ref: dependency.Ref, DependsOn: append([]string(nil), dependency.DependsOn...)}
+		out[i] = sbom.Dependency{
+			Ref: dependency.Ref, DependsOn: append([]string(nil), dependency.DependsOn...),
+			Scope: dependency.Scope, Optional: dependency.Optional,
+		}
 	}
 	return out
 }

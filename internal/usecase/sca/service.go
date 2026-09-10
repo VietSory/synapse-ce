@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/advisory"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/asset"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/compliance"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/distro"
@@ -109,11 +110,12 @@ type Service struct {
 	taint                            ports.TaintScanner                    // optional deterministic taint-analysis → gated CapSAST proposals
 	pythonTaint                      ports.TaintScanner                    // optional Python semantic value-flow → gated CapSAST proposals
 	graphResolver                    ports.DependencyGraphResolver         // optional transitive-edge resolver (Go via `go mod graph`)
-	mavenResolver                    ports.MavenResolver                   // optional Maven transitive-tree resolver (`mvn dependency:list`)
+	mavenResolver                    ports.MavenResolver                   // optional Maven transitive-tree resolver (`mvn dependency:tree` when it also implements ports.MavenGraphResolver, else `dependency:list`)
 	gradleResolver                   ports.GradleResolver                  // optional Gradle transitive-tree resolver (`gradle dependencies`)
 	npmResolver                      ports.NPMResolver                     // optional npm resolver (`npm install --package-lock-only`) for a lockfile-less package.json
 	manifestResolvers                []ports.ManifestResolver              // optional lockfile-less resolvers for composer.json / Gemfile / pyproject.toml / ...
 	jvmReach                         ports.JVMReachabilityAnalyzer         // optional coarse JVM class-reachability tagger
+	jvmReachRecorder                 ports.JVMReachabilityRecorder         // optional: records the JVM tags as auditable Tier-1.5 judgments (D4.4)
 	sevEnricher                      ports.SeverityEnricher                // optional NVD CVSS backfill for unknown-severity vulns
 	ignoreUnfixed                    bool                                  // when set, don't promote no-fix vulns to findings (Trivy --ignore-unfixed)
 	guard                            *execution.Guard                      // shared scope + window + audit gate; built in NewService
@@ -123,11 +125,16 @@ type Service struct {
 	projectAnalysisRecorder interface {
 		RecordProjectAnalysis(context.Context, shared.ID, string, time.Time, *ScanResult) error
 	}
-	sourceArtifacts  ports.ProjectSourceArtifactStore
-	comparisonSource ports.ProjectComparisonSource
-	log              *slog.Logger
-	gateDecoder      ports.GateDecoder
-	slaAssessor      ports.FindingSLAAssessor // optional; nil while SYNAPSE_SLA_ENABLED=false
+	sourceArtifacts     ports.ProjectSourceArtifactStore
+	comparisonSource    ports.ProjectComparisonSource
+	log                 *slog.Logger
+	gateDecoder         ports.GateDecoder
+	slaAssessor         ports.FindingSLAAssessor // optional; nil while SYNAPSE_SLA_ENABLED=false
+	scanRunObserver     ScanRunObserver          // optional; tenant-gated assessment lifecycle shadow writer
+	runProvenance       ports.ScanRunProvenanceStore
+	scanRunTransactions ports.TenantTransactionRunner
+	assessmentCycles    ports.AssessmentCycleRepository
+	assessmentSnapshots ports.AssessmentSnapshotDefaultReader
 }
 
 // SetSeverityEnricher configures optional severity backfill (NVD CVSS) for vulnerabilities the
@@ -154,13 +161,7 @@ func (s *Service) UploadedSourceMetadata(ctx context.Context, tenantID, engageme
 }
 
 func (s *Service) StartUploadedSourceScanWithOptions(ctx context.Context, actor string, tenantID, engagementID shared.ID, opts ScanOptions) (ports.ScanJob, error) {
-	item, err := s.UploadedSourceMetadata(ctx, tenantID, engagementID)
-	if err != nil {
-		return ports.ScanJob{}, err
-	}
-	return s.StartScanWithOptions(ctx, actor, engagementID, ports.AcquireRequest{
-		Kind: ports.TargetUpload, Value: item.Target(), Locator: item.Locator,
-	}, opts)
+	return s.StartUploadedSourceVersionScanWithOptions(ctx, actor, tenantID, engagementID, "", opts)
 }
 
 // SetScannedImageRecorder wires the scanned-image digest index (#446). When set, a completed image
@@ -525,7 +526,13 @@ func (s *Service) SetGraphResolver(r ports.DependencyGraphResolver) { s.graphRes
 // reachability tagging (components keep an empty/unknown verdict).
 func (s *Service) SetJVMReachability(a ports.JVMReachabilityAnalyzer) { s.jvmReach = a }
 
-// SetMavenResolver configures the optional Maven transitive-tree resolver (`mvn dependency:list`). nil ⇒
+// SetJVMReachabilityRecorder configures the optional recorder that mints the coarse JVM class-reachability
+// tags as auditable Tier-1.5 judgments (feeding VEX + the SLA scorer). nil ⇒ JVM reachability stays a
+// finding tag only.
+func (s *Service) SetJVMReachabilityRecorder(r ports.JVMReachabilityRecorder) { s.jvmReachRecorder = r }
+
+// SetMavenResolver configures the optional Maven transitive-tree resolver. When it also implements
+// ports.MavenGraphResolver the pipeline runs `mvn dependency:tree` and folds in the dependency edges; nil ⇒
 // Maven projects are scanned from pom.xml only (direct deps, managed versions UNKNOWN, no transitive
 // tree → under-reports, flagged INCOMPLETE). Best-effort + opt-in: a non-Maven target / missing mvn /
 // resolution error leaves the SBOM unchanged and never fails the scan.
@@ -580,6 +587,25 @@ func mergeResolvedJVM(doc *sbom.SBOM, resolved []sbom.Component, completeScopes 
 		kept = append(kept, c)
 	}
 	doc.Components = sbom.DedupeComponents(append(kept, resolved...))
+}
+
+// mergeResolvedJVMDeps replaces syft's pkg:maven dependency edges with the resolver's authoritative tree, so
+// PathToRoot / IsDirect / IntroducedBy run over the resolved graph rather than syft's (which for a pom-only
+// scan has no transitive edges at all). Edges whose parent is a pkg:maven node are the resolver's to own;
+// every other edge (a non-JVM ecosystem) is kept. No-op on an empty resolved edge set, so a components-only
+// resolver leaves the graph untouched.
+func mergeResolvedJVMDeps(doc *sbom.SBOM, resolved []sbom.Dependency) {
+	if len(resolved) == 0 {
+		return
+	}
+	kept := make([]sbom.Dependency, 0, len(doc.Dependencies))
+	for _, d := range doc.Dependencies {
+		if strings.HasPrefix(d.Ref, "pkg:maven/") {
+			continue // the resolver owns the JVM subgraph
+		}
+		kept = append(kept, d)
+	}
+	doc.Dependencies = append(kept, resolved...)
 }
 
 // mergeResolvedNPM folds an npm resolver's pinned pkg:npm tree into doc. Like the Gradle path it drops
@@ -1565,6 +1591,10 @@ func (s *Service) ScanWithOptions(ctx context.Context, actor string, engagementI
 		return nil, err
 	}
 	req = normalizeLocalTarget(req)
+	req, err = s.pinUploadedSource(ctx, engagementID, req)
+	if err != nil {
+		return nil, err
+	}
 	if s.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)
@@ -1611,6 +1641,10 @@ func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engage
 	}
 	req = normalizeLocalTarget(req)
 	var imported importedsbom.Record
+	req, err = s.pinUploadedSource(ctx, engagementID, req)
+	if err != nil {
+		return ports.ScanJob{}, err
+	}
 	var importedDoc *sbom.SBOM
 	var useImported bool
 	if imported, importedDoc, useImported, err = s.loadImportedSBOMForRequest(ctx, engagementID, req, opts); err != nil {
@@ -1634,14 +1668,15 @@ func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engage
 		_ = importedDoc // loaded now to fail fast; worker reloads the active artifact when executing.
 	}
 	job := ports.ScanJob{
-		ID:           s.ids.NewID().String(),
-		EngagementID: engagementID.String(),
-		Target:       target,
-		Kind:         kind,
-		Status:       ports.ScanRunning,
-		Stage:        "queued",
-		StartedAt:    now,
-		DebugEvents:  []ports.ScanDebugEvent{},
+		SourcePackage: publicSourcePackage(req.SourcePackage),
+		ID:            s.ids.NewID().String(),
+		EngagementID:  engagementID.String(),
+		Target:        target,
+		Kind:          kind,
+		Status:        ports.ScanRunning,
+		Stage:         "queued",
+		StartedAt:     now,
+		DebugEvents:   []ports.ScanDebugEvent{},
 	}
 	if s.jobs != nil {
 		if err := s.jobs.CreateRunning(ctx, job); err != nil {
@@ -1855,10 +1890,25 @@ func (s *Service) SweepStaleScans(ctx context.Context, staleFor time.Duration) (
 			release()
 			continue
 		}
+		jobCtx := ctx
+		if source := job.SourcePackage; source != nil {
+			if source.TenantID.IsZero() || source.EngagementID.String() != job.EngagementID || job.Kind != ports.TargetUpload || job.Target != source.Target() {
+				release()
+				return n, fmt.Errorf("%w: stranded scan source ownership is invalid", shared.ErrValidation)
+			}
+			// The daemon sweeps across tenants. Derive each write's tenant from
+			// the frozen source binding, then verify its engagement owner before
+			// using tenant-scoped persistence; do not weaken the store's checks.
+			jobCtx = shared.WithTenant(ctx, source.TenantID)
+			if _, err := s.engagements.GetByIDInTenant(jobCtx, source.TenantID, source.EngagementID); err != nil {
+				release()
+				return n, fmt.Errorf("verify stranded scan source owner: %w", err)
+			}
+		}
 		fin := s.clock.Now()
 		job.FinishedAt, job.Progress = &fin, 100
 		job.Status, job.Stage, job.Error = ports.ScanFailed, "swept", "scan stranded running past staleFor with no live owner – reclaimed by sweeper"
-		if err := s.jobs.Save(ctx, job); err != nil {
+		if err := s.jobs.Save(jobCtx, job); err != nil {
 			release()
 			return n, fmt.Errorf("save swept scan job %s: %w", job.ID, err)
 		}
@@ -1906,12 +1956,20 @@ func (s *Service) gateAndAudit(ctx context.Context, actor string, engagementID s
 	if req.Kind == ports.TargetImage {
 		targetKind = engagement.TargetImage
 	}
+	metadata := map[string]string{"kind": kindOrLocal(req.Kind), "engagement": engagementID.String(), "mode": opts.Mode}
+	if req.SourcePackage != nil {
+		metadata["source_version_id"] = req.SourcePackage.VersionID.String()
+		metadata["source_sha256"] = req.SourcePackage.SHA256
+		if !req.SourcePackage.ReusedFromVersionID.IsZero() {
+			metadata["reused_from_version_id"] = req.SourcePackage.ReusedFromVersionID.String()
+		}
+	}
 	return s.guard.Authorize(ctx, execution.Request{
 		Actor:        actor,
 		EngagementID: engagementID,
 		Action:       "sca.scan",
 		Target:       engagement.Target{Kind: targetKind, Value: req.Value},
-		Metadata:     map[string]string{"kind": kindOrLocal(req.Kind), "engagement": engagementID.String(), "mode": opts.Mode},
+		Metadata:     metadata,
 	})
 }
 
@@ -2134,6 +2192,7 @@ func (s *Service) runImportedSBOMPipeline(ctx context.Context, actor string, eng
 		raws = append(raws, srcRaws...)
 		detectionSourceWarnings = srcWarnings
 		step = trace.start(stageVulns, "correlate", "", "Correlate and deduplicate vulnerability findings", map[string]int{"raw_findings": len(raws)})
+		raws = s.expandFindingAliases(ctx, raws) // widen cross-source aliases so one CVE under non-overlapping ids merges
 		vulns = vulnerability.Correlate(raws)
 		trace.succeed(step, "Vulnerabilities correlated", map[string]int{"raw_findings": len(raws), "vulnerabilities": len(vulns)})
 		if s.sevEnricher != nil {
@@ -2254,6 +2313,9 @@ func (s *Service) runImportedSBOMPipeline(ctx context.Context, actor string, eng
 			_, _ = s.correlation.Record(ctx, engagementID, report)
 		}
 	}
+	// The UI cache may combine different scan modes. Native comparison evidence
+	// must contain only the detections from this execution, captured beforehand.
+	assessmentResult := s.copyAssessmentScanResult(result)
 	if s.results != nil {
 		if previousData, loadErr := s.results.LatestResult(ctx, engagementID); loadErr == nil {
 			var previous ScanResult
@@ -2272,14 +2334,9 @@ func (s *Service) runImportedSBOMPipeline(ctx context.Context, actor string, eng
 	if err != nil {
 		return nil, err
 	}
-	if s.runs != nil {
-		keys := make([]string, 0, len(result.Findings))
-		for _, f := range result.Findings {
-			keys = append(keys, f.DedupKey)
-		}
-		if err := s.runs.Save(ctx, ports.ScanRun{ID: s.newRunID(), EngagementID: engagementID.String(), CreatedAt: now, Manifest: manifest, FindingKeys: keys}); err != nil {
-			return nil, fmt.Errorf("persist scan run: %w", err)
-		}
+	assessmentRunID, err := s.persistAssessmentScanRun(ctx, engagementID, evidenceID, now, ports.AcquireRequest{Kind: ports.TargetUpload, Value: record.TargetRef}, assessmentResult, record.SHA256)
+	if err != nil {
+		return nil, err
 	}
 	if s.scans != nil {
 		skipped, err := s.scans.SaveScan(ctx, engagementID, doc, vulns, snap)
@@ -2315,6 +2372,9 @@ func (s *Service) runImportedSBOMPipeline(ctx context.Context, actor string, eng
 		if data, mErr := json.Marshal(result); mErr == nil {
 			_ = s.results.SaveResult(ctx, engagementID, data)
 		}
+	}
+	if err := s.notifyAssessmentScanRun(ctx, engagementID, assessmentRunID); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -2448,6 +2508,11 @@ func importedCompleteness(doc *sbom.SBOM) ports.Completeness {
 }
 
 func (s *Service) runPipeline(ctx context.Context, actor string, engagementID shared.ID, now time.Time, req ports.AcquireRequest, opts ScanOptions, report func(stage string, pct int, events []ports.ScanDebugEvent), evidenceID shared.ID) (*ScanResult, error) {
+	var err error
+	req, err = s.pinUploadedSource(ctx, engagementID, req)
+	if err != nil {
+		return nil, err
+	}
 	stage, pct := stageAcquire, 5
 	trace := newScanDebugTrace(func(events []ports.ScanDebugEvent) { report(stage, pct, events) })
 	report(stage, pct, trace.snapshot())
@@ -2610,12 +2675,23 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	var mavenResolveErr, gradleResolveErr, npmResolveErr error // surfaced as a SourceWarning so a failed resolve is diagnosable
 	if s.mavenResolver != nil {
 		step = trace.start(stageSBOM, "maven-resolve", "maven-resolver", "Resolve Maven dependency tree", map[string]int{"components": countComponents(doc)})
-		resolvedComps, mrr := s.mavenResolver.Resolve(ctx, ws.Dir)
+		// Prefer the graph-aware resolver (`mvn dependency:tree`): it returns the dependency EDGES too, so a
+		// transitive Maven CVE gets a dependency path + its introducing direct deps. A resolver that only
+		// implements the flat MavenResolver still works (components, no edges).
+		var resolvedComps []sbom.Component
+		var resolvedDeps []sbom.Dependency
+		var mrr error
+		if gr, ok := s.mavenResolver.(ports.MavenGraphResolver); ok {
+			resolvedComps, resolvedDeps, mrr = gr.ResolveGraph(ctx, ws.Dir)
+		} else {
+			resolvedComps, mrr = s.mavenResolver.Resolve(ctx, ws.Dir)
+		}
 		before := countComponents(doc)
 		// Merge whatever resolved – a partial multi-project result still returns the projects that
 		// succeeded (alongside a non-nil error), and those must not be discarded.
 		if len(resolvedComps) > 0 {
-			mergeResolvedJVM(doc, resolvedComps, true) // dependency:list = all non-test scopes → complete
+			mergeResolvedJVM(doc, resolvedComps, true) // dependency:tree = all non-test scopes → complete
+			mergeResolvedJVMDeps(doc, resolvedDeps)    // fold the resolved edges over syft's maven subgraph
 			mavenResolved = true
 		}
 		switch {
@@ -2634,10 +2710,20 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	gradleResolved := false
 	if s.gradleResolver != nil {
 		step = trace.start(stageSBOM, "gradle-resolve", "gradle-resolver", "Resolve Gradle dependency tree", map[string]int{"components": countComponents(doc)})
-		resolvedComps, grr := s.gradleResolver.Resolve(ctx, ws.Dir)
+		// Prefer the graph-aware resolver: it returns the resolution-graph EDGES, so a transitive Gradle CVE
+		// gets a dependency path + its introducing direct deps. A components-only resolver still works.
+		var resolvedComps []sbom.Component
+		var resolvedDeps []sbom.Dependency
+		var grr error
+		if gr, ok := s.gradleResolver.(ports.GradleGraphResolver); ok {
+			resolvedComps, resolvedDeps, grr = gr.ResolveGraph(ctx, ws.Dir)
+		} else {
+			resolvedComps, grr = s.gradleResolver.Resolve(ctx, ws.Dir)
+		}
 		before := countComponents(doc)
 		if len(resolvedComps) > 0 {
 			mergeResolvedJVM(doc, resolvedComps, false) // runtimeClasspath only → keep syft's provided/compileOnly jars
+			mergeResolvedJVMDeps(doc, resolvedDeps)     // fold the resolved edges over syft's maven subgraph
 			gradleResolved = true
 		}
 		switch {
@@ -2760,6 +2846,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		raws = append(raws, srcRaws...)
 		detectionSourceWarnings = srcWarnings
 		step = trace.start(stageVulns, "correlate", "", "Correlate and deduplicate vulnerability findings", map[string]int{"raw_findings": len(raws)})
+		raws = s.expandFindingAliases(ctx, raws) // widen cross-source aliases so one CVE under non-overlapping ids merges
 		vulns = vulnerability.Correlate(raws)
 		trace.succeed(step, "Vulnerabilities correlated", map[string]int{"raw_findings": len(raws), "vulnerabilities": len(vulns)})
 		// Backfill severity for vulns the sources left unknown (e.g. OSV-only distro CVEs with
@@ -2930,6 +3017,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	sourceWarnings = append(sourceWarnings, dbFreshnessWarnings(toolVersions, now, s.dbMaxAgeDays)...) // stale-DB freshness policy
 	sourceWarnings = append(sourceWarnings, detectionSourceWarnings...)                                // sources skipped by the non-strict degrade policy
 	manifest := buildManifest(toolVersions, snap.VulnDBSnapshot, grypeDB, doc)
+	manifest.SourcePackage = publicSourcePackage(req.SourcePackage)
 
 	// Maven, once its full tree is resolved (mvn dependency:list), is no longer an under-reporting
 	// unresolved ecosystem – drop it from the completeness signal so the scan reads as complete.
@@ -3046,6 +3134,21 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 				}
 			}
 		}
+		// Image filesystem: scan the materialized rootfs too, so a credential baked into an image layer (a
+		// top container-secret finding class that a source-tree scan cannot see) is caught. Best-effort: a
+		// rootfs scan error is a warning, never a scan failure; the precise prefix detectors + allowlist
+		// bound the base-image noise and every secret is redacted. Only runs for an image target (RootFS
+		// materialized and distinct from the scanned layout).
+		if ws.RootFS != "" && ws.RootFS != ws.Dir {
+			if rootfsReport, rerr := s.secretScanner.ScanFiles(ctx, ws.RootFS); rerr != nil {
+				result.SourceWarnings = append(result.SourceWarnings, "image-filesystem secret scan skipped: "+rerr.Error())
+			} else {
+				if rootfsReport.Truncated {
+					result.SourceWarnings = append(result.SourceWarnings, "image-filesystem secret scan incomplete or truncated; secret findings are a lower bound")
+				}
+				result.Findings = append(result.Findings, buildSecretFindings(engagementID, rootfsReport.Findings, now, s.minSeverity, s.includeTestSecrets)...)
+			}
+		}
 	}
 	if opts.scansVulnerabilities() && s.misconfig != nil {
 		misRaws, merr := s.misconfig.ScanConfigs(ctx, ws.Dir)
@@ -3053,6 +3156,16 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 			return nil, fmt.Errorf("scan misconfig: %w", merr)
 		}
 		result.Findings = append(result.Findings, buildMisconfigFindings(engagementID, misRaws, now, s.minSeverity)...)
+		// Image filesystem: scan the rootfs for misconfigured configs shipped inside the image (a baked-in
+		// Dockerfile, a Kubernetes manifest, a Terraform file). Best-effort; the misconfig rules are precise
+		// attribute matches, so this adds coverage with low false-positive risk. Image targets only.
+		if ws.RootFS != "" && ws.RootFS != ws.Dir {
+			if rootfsRaws, rerr := s.misconfig.ScanConfigs(ctx, ws.RootFS); rerr != nil {
+				result.SourceWarnings = append(result.SourceWarnings, "image-filesystem misconfig scan skipped: "+rerr.Error())
+			} else {
+				result.Findings = append(result.Findings, buildMisconfigFindings(engagementID, rootfsRaws, now, s.minSeverity)...)
+			}
+		}
 	}
 	if opts.CodeQuality && s.codeQuality != nil {
 		report, qerr := s.codeQuality.BuildReport(ctx, ws.Dir)
@@ -3095,6 +3208,15 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	if opts.scansVulnerabilities() && s.reachability != nil {
 		if subs := reachabilitySubjects(result.Findings, result.Vulnerabilities); len(subs) > 0 {
 			_, _ = s.reachability.Record(ctx, engagementID, ws.Dir, subs)
+		}
+	}
+
+	// D4.4: record the coarse JVM class-reachability tags (computed in-scan by the jvmreach tagger) as
+	// auditable Tier-1.5 judgments, so the JVM signal feeds VEX + the SLA scorer, not just the finding tag.
+	// Best-effort; Tier-1.5 is never a promotable proof, so a JVM not-reachable verdict only deprioritizes.
+	if opts.scansVulnerabilities() && s.jvmReachRecorder != nil {
+		if verdicts := jvmReachabilityVerdicts(result.Findings, result.Vulnerabilities); len(verdicts) > 0 {
+			_, _ = s.jvmReachRecorder.RecordVerdicts(ctx, engagementID, verdicts)
 		}
 	}
 
@@ -3201,6 +3323,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		}
 	}
 
+	assessmentResult := s.copyAssessmentScanResult(result)
 	if s.results != nil {
 		if previousData, loadErr := s.results.LatestResult(ctx, engagementID); loadErr == nil {
 			var previous ScanResult
@@ -3224,20 +3347,9 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	if err != nil {
 		return nil, err
 	}
-	if s.runs != nil {
-		keys := make([]string, 0, len(result.Findings))
-		for _, f := range result.Findings {
-			keys = append(keys, f.DedupKey)
-		}
-		if err := s.runs.Save(ctx, ports.ScanRun{
-			ID:           s.newRunID(),
-			EngagementID: engagementID.String(),
-			CreatedAt:    now,
-			Manifest:     manifest,
-			FindingKeys:  keys,
-		}); err != nil {
-			return nil, fmt.Errorf("persist scan run: %w", err)
-		}
+	assessmentRunID, err := s.persistAssessmentScanRun(ctx, engagementID, evidenceID, now, req, assessmentResult, "")
+	if err != nil {
+		return nil, err
 	}
 
 	// The scan snapshot and the findings are written in SEPARATE transactions. A
@@ -3299,6 +3411,9 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// Record the image's manifest digest so the fleet cluster agent can correlate a running digest
 	// with this scan (#446). This is the pipeline that populates result.Image (image scans).
 	s.recordScannedImage(ctx, engagementID, result)
+	if err := s.notifyAssessmentScanRun(ctx, engagementID, assessmentRunID); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -3396,10 +3511,12 @@ func mergeCachedScanResult(current *ScanResult, previous ScanResult, opts ScanOp
 	preserved := false
 	preservedVulnerabilities := false
 	if !opts.scansVulnerabilities() {
+		source := current.Manifest.SourcePackage
 		current.Vulnerabilities = previous.Vulnerabilities
 		current.VulnDBSnapshot = previous.VulnDBSnapshot
 		current.ToolVersions = previous.ToolVersions
 		current.Manifest = previous.Manifest
+		current.Manifest.SourcePackage = source
 		current.RiskMatches = previous.RiskMatches
 		current.Findings = mergeFindingsByKind(previous.Findings, current.Findings, true)
 		current.AnalysisCoverage = cloneAnalysisCoverage(previous.AnalysisCoverage)
@@ -3624,6 +3741,53 @@ func kindOrLocal(kind string) string {
 // classifyVulns marks each vuln first-party / unversioned from its SBOM component
 // . Unversioned (no resolvable version) means the advisory cannot be
 // confirmed against an affected range – it becomes a historical advisory.
+// expandFindingAliases widens each raw finding's alias set with the owned advisory store's transitive alias
+// closure BEFORE correlation, so two findings that are the same vulnerability under non-overlapping ids (a
+// GHSA-only finding from one source, a CVE-only finding from another) cluster into one. It collects the
+// findings' ids, asks each detection source that provides alias edges (the owned advisory source) for the
+// edges touching those ids - a bounded, index-backed query, not a corpus scan - and applies the closure.
+// Best-effort: an alias-edge lookup error never fails the scan, and with no alias provider the raws are
+// returned unchanged (correlation behaves exactly as before).
+func (s *Service) expandFindingAliases(ctx context.Context, raws []vulnerability.RawFinding) []vulnerability.RawFinding {
+	if len(raws) == 0 {
+		return raws
+	}
+	idSet := map[string]struct{}{}
+	for _, r := range raws {
+		if r.AdvisoryID != "" {
+			idSet[r.AdvisoryID] = struct{}{}
+		}
+		for _, a := range r.Aliases {
+			if a != "" {
+				idSet[a] = struct{}{}
+			}
+		}
+	}
+	if len(idSet) == 0 {
+		return raws
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	var edges []advisory.AliasEdge
+	for _, src := range s.sources {
+		provider, ok := src.(ports.AliasEdgeProvider)
+		if !ok {
+			continue
+		}
+		e, err := provider.AliasEdges(ctx, ids)
+		if err != nil {
+			continue // best-effort: alias expansion never fails the scan
+		}
+		edges = append(edges, e...)
+	}
+	if len(edges) == 0 {
+		return raws
+	}
+	return vulnerability.ExpandAliases(raws, advisory.NewAliasGraph(edges).Closure)
+}
+
 func classifyVulns(doc *sbom.SBOM, vulns []vulnerability.Vulnerability) {
 	firstParty := make(map[string]bool, len(doc.Components))
 	scopeByCV := make(map[string]string, len(doc.Components))
@@ -3637,6 +3801,19 @@ func classifyVulns(doc *sbom.SBOM, vulns []vulnerability.Vulnerability) {
 		}
 		if c.Reachability != "" {
 			reachByCV[c.Name+"\x00"+c.Version] = c.Reachability
+		}
+	}
+	// Graph-propagated dependency scope: a transitive component reachable from a root ONLY through non-
+	// production (test/provided) edges is lower risk than its file-path scope suggests. ProductionReachable
+	// reports, per graph node, whether at least one all-production path exists; a graph whose edges carry no
+	// scope (every ecosystem but Maven today) returns production for everything, so nothing regresses. Keyed
+	// by name+version to meet the vuln loop below.
+	prodReach := sbom.ProductionReachable(doc.Dependencies)
+	graphProdReachByCV := make(map[string]*bool, len(doc.Components))
+	for _, c := range doc.Components {
+		if r, ok := prodReach[sbom.ComponentID(c.Name, c.Version, c.PURL)]; ok {
+			reachable := r
+			graphProdReachByCV[c.Name+"\x00"+c.Version] = &reachable
 		}
 	}
 	for i := range vulns {
@@ -3667,6 +3844,14 @@ func classifyVulns(doc *sbom.SBOM, vulns []vulnerability.Vulnerability) {
 		v.Scope = scopeByCV[v.Component+"\x00"+v.Version]
 		if v.Scope == "" {
 			v.Scope = sbom.ScopeUnknown
+		}
+		// If the dependency graph proves this component is reachable only through non-production edges,
+		// deprioritize it one tier below production, overriding a production/unknown file-path scope. This is
+		// a DOWNGRADE only (it never raises a test/dev finding to production) and fires only when the graph
+		// actually carries scope, so a scope-less graph leaves the file-path scope untouched.
+		if r := graphProdReachByCV[v.Component+"\x00"+v.Version]; r != nil && !*r &&
+			(v.Scope == sbom.ScopeProduction || v.Scope == sbom.ScopeUnknown) {
+			v.Scope = sbom.ScopeDevelopment
 		}
 		// Finding-quality signals: reachability, impact, priority. The coarse JVM
 		// class-reachability verdict rides along and DEPRIORITIZES a vuln on an unreferenced
@@ -4185,7 +4370,7 @@ type ScanDrift struct {
 
 // CompareRuns computes the drift between two runs and explains it from the
 // manifest deltas (chain-of-custody: "why does this differ from last month?").
-func (s *Service) CompareRuns(ctx context.Context, runA, runB string) (ScanDrift, error) {
+func (s *Service) CompareRuns(ctx context.Context, engagementID shared.ID, runA, runB string) (ScanDrift, error) {
 	if s.runs == nil {
 		return ScanDrift{}, fmt.Errorf("scan runs: %w", shared.ErrNotFound)
 	}
@@ -4196,6 +4381,9 @@ func (s *Service) CompareRuns(ctx context.Context, runA, runB string) (ScanDrift
 	b, err := s.runs.Get(ctx, runB)
 	if err != nil {
 		return ScanDrift{}, err
+	}
+	if a.EngagementID != engagementID.String() || b.EngagementID != engagementID.String() {
+		return ScanDrift{}, fmt.Errorf("scan runs: %w", shared.ErrNotFound)
 	}
 	return diffRuns(a, b), nil
 }

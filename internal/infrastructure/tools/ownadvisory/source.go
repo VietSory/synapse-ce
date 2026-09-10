@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/advisory"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
@@ -25,6 +26,8 @@ const sourceName = "advisory-store"
 type Source struct {
 	store   ports.AdvisoryStore
 	overlay SymbolOverlay
+	mu      sync.Mutex // guards provDB (written during Scan, read by Provenance)
+	provDB  string     // "<count> advisories@<date>" corpus-freshness marker, captured during the last Scan
 }
 
 // New returns a detection source over the given owned advisory store.
@@ -54,6 +57,35 @@ var _ ports.DetectionSource = (*Source)(nil)
 // Name identifies the source.
 func (s *Source) Name() string { return sourceName }
 
+// Provenance reports the owned source's corpus-freshness marker (D1.7). The version is empty (there is no
+// tool binary, this is an in-process matcher); the db marker is "<count> advisories@<date>" from the last
+// Scan, which the SCA freshness policy parses (the trailing "@<date>") to warn when the corpus is stale and
+// which the report lists as this feed's provenance. Empty when the store cannot report freshness or is
+// empty, so no false freshness claim is made. Implements ports.SourceProvenance.
+func (s *Source) Provenance() (version, dbVersion string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return "", s.provDB
+}
+
+// captureFreshness queries the store's corpus freshness (if it supports it) and records the marker. A store
+// that does not implement the capability, an error, or an empty corpus leaves the marker empty (no false
+// freshness). It runs once per Scan; the query is a single indexed MAX/COUNT, cheap on the scan path.
+func (s *Source) captureFreshness(ctx context.Context) {
+	fr, ok := s.store.(ports.AdvisoryCorpusFreshness)
+	if !ok {
+		return
+	}
+	latest, count, err := fr.AdvisoryFreshness(ctx)
+	marker := ""
+	if err == nil && count > 0 && !latest.IsZero() {
+		marker = fmt.Sprintf("%d advisories@%s", count, latest.UTC().Format("2006-01-02"))
+	}
+	s.mu.Lock()
+	s.provDB = marker
+	s.mu.Unlock()
+}
+
 // Scan matches every component with a resolvable version against the owned store and emits a RawFinding
 // per affected advisory. A component whose PURL ecosystem is unmapped, or with no resolvable version, is
 // skipped (it can't be soundly matched) – never a false hit. A store error fails the WHOLE scan (the SCA
@@ -67,6 +99,7 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 	if doc == nil {
 		return nil, nil
 	}
+	s.captureFreshness(ctx) // record the corpus-freshness marker so a stale owned store warns (D1.7)
 	// A withdrawn advisory is a guaranteed false positive; skip it on every path.
 	// cpeStore is the same store when it also serves NVD/CSAF CPE applicability (the Postgres repo does).
 	cpeStore, hasCPE := s.store.(ports.CPEAdvisoryStore)
@@ -106,19 +139,50 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 			}
 		}
 		if distroPackageMatchable && eco != "" && c.Name != "" && sbom.IsResolvedVersion(c.Version) {
+			// matchName queries the store for (eco, name) and emits any advisory that hits version.
+			matchName := func(name, version string) error {
+				advs, err := s.store.ByPackage(ctx, eco, name)
+				if err != nil {
+					return err
+				}
+				for _, a := range advs {
+					if a.Withdrawn {
+						continue
+					}
+					if affected, fixed := a.Match(eco, name, version); affected {
+						emit(a, c, fixed, a.AffectedSymbolsFor(eco, name))
+					}
+				}
+				return nil
+			}
 			// Normalize to the ecosystem-canonical key on the lookup side too, so a component name that
 			// isn't already normalized (e.g. a Syft-produced PyPI name) still meets the stored advisory key.
 			name := canonicalName(eco, c.Name)
-			advs, err := s.store.ByPackage(ctx, eco, name)
-			if err != nil {
+			if err := matchName(name, matchVersion); err != nil {
 				return nil, err
 			}
-			for _, a := range advs {
-				if a.Withdrawn {
-					continue
-				}
-				if affected, fixed := a.Match(eco, name, matchVersion); affected {
-					emit(a, c, fixed, a.AffectedSymbolsFor(eco, name))
+			// A Debian/Ubuntu security advisory is keyed by the SOURCE package (one openssl advisory covers
+			// the libssl1.1, libcrypto1.1, … binaries built from it), so a binary package never matches it by
+			// its own name. Also match the binary by its source-package name, which Syft records in the deb
+			// PURL "upstream=" qualifier as "<source>" or "<source>@<version>". Match against the SOURCE
+			// version when the qualifier carries one: a binNMU gives the binary a "<src>+bN" version while the
+			// source stays "<src>", and the advisory ranges are in source-version space, so using the binary
+			// version could cross a nonzero introduced/fixed boundary the source does not (a false result).
+			// Fall back to the binary version only for a name-only upstream (Syft omits the version when they
+			// are equal). The emit map dedups a binary+source double hit. Only deb: an rpm's upstream is a
+			// source-RPM filename needing NEVRA parsing, and the owned RedHat CSAF feed is binary-keyed.
+			if purlType(c.PURL) == "deb" {
+				// Decode the qualifier BEFORE splitting: PURL encodes the name/version "@" separator as %40
+				// (and an epoch ":" as %3A), so "openssl%401.1.1k" decodes to "openssl@1.1.1k" first.
+				upstreamName, upstreamVer, _ := strings.Cut(decodePURLSegment(purlQualifier(c.PURL, "upstream")), "@")
+				if src := canonicalName(eco, strings.TrimSpace(upstreamName)); src != "" && src != name {
+					srcVersion := matchVersion
+					if v := strings.TrimSpace(upstreamVer); v != "" {
+						srcVersion = v // the source version, in the space the source-keyed advisory ranges use
+					}
+					if err := matchName(src, srcVersion); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -202,7 +266,9 @@ func rawFinding(a advisory.Advisory, c sbom.Component, fixed string, symbols []s
 	// may store only the vector) – mirrors the OSV adapter so a vuln found by both correlates to one band.
 	score := a.CVSSScore
 	if score == 0 && a.CVSSVector != "" {
-		if s, ok := shared.CVSSv3BaseScore(a.CVSSVector); ok {
+		// CVSSBaseScore scores a v4.0, v3.x, or v2 vector, so a stored v4-only vector still yields a band
+		// instead of falling to Unknown.
+		if s, ok := shared.CVSSBaseScore(a.CVSSVector); ok {
 			score = s
 			rf.CVSSScore = s
 		}
@@ -409,4 +475,16 @@ func osvEcosystem(purlType string) string {
 		// Hex range ordering (a comparator in advisory.schemeFor) is a follow-up, so ranges are skipped (safe).
 	}
 	return ""
+}
+
+// AliasEdges exposes the owned store's alias edges for the given ids, so the SCA correlation step can build
+// the transitive alias closure and merge cross-source findings that carry non-overlapping ids. It delegates
+// to the store's optional AdvisoryAliasStore capability; a store without it returns no edges (correlation
+// then behaves exactly as before). Bounded to the given ids.
+func (s *Source) AliasEdges(ctx context.Context, ids []string) ([]advisory.AliasEdge, error) {
+	aliasStore, ok := s.store.(ports.AdvisoryAliasStore)
+	if !ok {
+		return nil, nil
+	}
+	return aliasStore.AdvisoryAliasEdges(ctx, ids)
 }

@@ -75,8 +75,18 @@ Metric names and label cardinality:
 | `synapse_job_queue_scrape_errors_total` | counter | none | Failed attempts to read aggregate durable job queue stats for a scrape. The three `synapse_job_queue_*` gauges above are omitted from that scrape (never a stale or bogus value) when this increments. |
 | `synapse_sca_scan_duration_seconds` | histogram | `outcome` | Completed synchronous or asynchronous SCA execution duration. For an async scan, measured from worker execution start, not from `StartScan`/enqueue time. Queue failures, dead letters, stale sweeps, and blocked gates do not record a duration. |
 | `synapse_sca_scan_outcomes_total` | counter | `outcome` | Terminal SCA outcomes: `success`, `failed`, or `blocked`. Queue failures, dead letters, and stale sweeps count as `failed` without a duration. `blocked` is recorded only for an execution-gate denial reached after a genuine scan attempt — never for a pre-gate validation failure. |
+| `synapse_finding_lineage_operations_total` | counter | `outcome`, `method`, `reason` | Finding correlation and human-review outcomes. Every label is reduced to a fixed allowlist. |
+| `synapse_finding_lineage_backfill_items_total` | counter | `outcome` | Backfill item outcomes: `observation_created`, `provisional_candidate_created`, `skipped`, or `unknown`. |
+| `synapse_finding_lineage_backfill_runs_total` | counter | `state` | Backfill terminal states: `completed`, `cancelled`, `failed`, or `unknown`. |
+| `synapse_assessment_comparison_operations_total` | counter | `status`, `mode`, `reason` | Comparison generation outcomes with allowlisted status, mode, and reason values. |
+| `synapse_assessment_comparison_backlog` | gauge | `tenant_id`, `state` | Per-tenant queued, generating, failed, and dead-lettered Comparison backlog used by rollout gates. |
+| `synapse_assessment_comparison_oldest_active_age_seconds` | gauge | `tenant_id` | Age of the oldest queued or generating Comparison for a tenant. |
+| `synapse_assessment_comparison_generation_duration_seconds` | histogram | `tenant_id`, `mode`, `status`, `fingerprint_version`, `risk_model_version`, `item_count_band` | Worker generation latency; item counts are reduced to bounded bands. |
+| `synapse_assessment_relationship_candidates_total` | counter | `outcome`, `confidence` | Historical relationship candidate generation outcomes. |
+| `synapse_assessment_relationship_decisions_total` | counter | `action`, `outcome` | Relationship review decision outcomes. |
+| `synapse_assessment_closure_reports_total` | counter | `outcome`, `reason` | Deterministic closure-report generation outcomes with bounded reasons. |
 
-No metric or access-log field ever carries a tenant id, engagement id, target, raw path, or free-form error text — the label sets above are exhaustive and deliberately bounded (unlike, for example, embedding a full URL path) to avoid unbounded label cardinality on the collector.
+Only the explicitly documented Assessment Comparison rollout series carry `tenant_id`; access logs and every other metric omit tenant, engagement, target, raw path, and free-form error text. All non-tenant label values are fixed allowlists or bounded bands.
 
 Example Prometheus scrape config:
 
@@ -104,18 +114,30 @@ The metrics listener has no authentication of its own. Keep `SYNAPSE_METRICS_ADD
 
 ## Shared artifact store (S3 or MinIO)
 
-The same object store retains evidence artifacts and Engagement source packages uploaded from the UI.
-Uploaded packages accept `.zip`, `.tar`, `.tar.gz`, and `.tgz` files up to 512 MiB compressed. API and
-worker processes must use the same bucket; the in-memory default only supports a single-process local
-development run and is not durable across restarts.
+When S3/MinIO is configured, the same object store retains evidence artifacts and Engagement source
+packages uploaded from the UI. Uploaded packages accept non-empty `.zip`, `.tar`, `.tar.gz`, and `.tgz`
+files up to 512 MiB compressed. API and worker processes must use the same endpoint and bucket.
+Without an endpoint, evidence uses the non-durable development store, but uploaded source uses a
+persistent filesystem root. Durable source metadata also requires PostgreSQL; an in-memory database
+is not a restart-safe deployment even when archive files are retained.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SYNAPSE_BLOB_ENDPOINT` | (in-memory) | Host and port without a scheme. Empty runs an in-memory blob store. |
-| `SYNAPSE_BLOB_ACCESS_KEY` | `synapse` | Access key. |
-| `SYNAPSE_BLOB_SECRET_KEY` | `synapse-secret` | Secret key. |
+| `SYNAPSE_BLOB_ENDPOINT` | (none) | Host and port without a scheme. Empty uses in-memory evidence storage and filesystem storage for uploaded Engagement source. |
+| `SYNAPSE_BLOB_ACCESS_KEY` | (none) | Object-store access key; provide through the deployment's secret-management mechanism. |
+| `SYNAPSE_BLOB_SECRET_KEY` | (none) | Object-store secret key; never commit it to configuration or logs. |
 | `SYNAPSE_BLOB_BUCKET` | `synapse-evidence` | Shared bucket for evidence artifacts and uploaded Engagement source packages. |
-| `SYNAPSE_BLOB_USE_SSL` | `false` | Set true for https endpoints. |
+| `SYNAPSE_BLOB_USE_SSL` | `false` | Set true for HTTPS endpoints; use TLS for production object-store traffic. |
+| `SYNAPSE_ENGAGEMENT_SOURCE_DIR` | OS user configuration directory + `synapse/engagement-sources` | Durable operator-owned source archive root when the blob endpoint is empty. Must be an absolute, non-root real directory, not a symlink. API and workers must use the same persistent volume and root; keep it outside scanned repositories and temporary workspaces. |
+
+The filesystem adapter creates private directories/files and refuses unsafe roots or invalid object
+paths. Do not treat this root as a disposable cache. Separate containers or hosts do not share their
+default user configuration directories: mount the same retained volume and configure the path in each
+process, or use S3/MinIO. Back up PostgreSQL and source objects consistently. Changing an existing
+filesystem root or bucket does not migrate retained objects. Source reuse verifies the actual bytes;
+metadata or SHA-256 alone cannot restore a missing archive. See the
+[uploaded-source lifecycle](assessment-lifecycle-operations.md#uploaded-source-lifecycle) for immutable
+versions, Re-test choices, legacy limitations and migrations `0159`/`0160`.
 
 ## Restore verification (synapse-verify-restore)
 
@@ -239,12 +261,12 @@ reports whether traversal was truncated; lowering a bound never produces a resul
 | `SYNAPSE_REACHABILITY_ENABLED` | `true` | Go Tier-2 call-graph reachability proof (best-effort). |
 | `SYNAPSE_REACHABILITY_BUILDER` | `owned` | Go Tier-2 call-graph producer: `owned` (Synapse's own go/ssa builder, no third-party engine) or `govulncheck`. |
 | `SYNAPSE_JVM_REACHABILITY_ENABLED` | `true` | JVM (Java/Kotlin) reachability. |
-| `SYNAPSE_PYREACH_ENABLED` | `false` | Python Tier-1 import-reachability: a declared DIRECT dependency never imported by first-party source becomes an OpenVEX `not_affected` (transitive deps are refused, not answered). |
+| `SYNAPSE_PYREACH_ENABLED` | `true` | Python Tier-1 import-reachability: a declared DIRECT dependency never imported by first-party source becomes an OpenVEX `not_affected` (transitive deps are refused, not answered). Default ON; fails to unknown on any coverage gap. Needs judgments. |
 | `SYNAPSE_PYREACH_TIER2_ENABLED` | `false` | Python Tier-2 affected-symbol semantic reachability. Requires Tier-1, judgments, and a CGO-enabled `synapse-ast`. |
 | `SYNAPSE_PYTAINT_ENABLED` | `true` | Python interprocedural semantic taint proposals (default-on when the synapse-ast sidecar resolves; a clean no-op otherwise). Requires judgments and a CGO-enabled `synapse-ast`; it does not require the target-compilation sandbox. |
 | `SYNAPSE_TRISCORE_REASSESS_ENABLED` | `false` | Tri-score risk reassessment surface (`POST /api/v1/fleet/incidents/{id}/risk/reassess`): re-scores an incident's RiskAssessment via the deterministic Scorer. Threat is live; Exposure/Behavior/Coverage abstain until their producers are wired. |
 | `SYNAPSE_AST_BIN` | bundled / `PATH` | Optional path to the `synapse-ast` sidecar used by Python Tier-2 reachability, Python taint, and code-quality analysis. |
-| `SYNAPSE_JSREACH_ENABLED` | `false` | JS/TS Tier-1 import-level reachability. |
+| `SYNAPSE_JSREACH_ENABLED` | `true` | JS/TS Tier-1 import-level reachability. Default ON; fails to unknown on any coverage gap. Needs judgments. |
 | `SYNAPSE_JSREACH_TIER2_ENABLED` | `false` | JS/TS Tier-2 symbol-level reachability. |
 
 ## Fleet, leader election, and DAST
@@ -292,7 +314,7 @@ All off by default. The fleet needs PostgreSQL + `synapse-worker`; agents run on
 | `SYNAPSE_LEADER_TERM` | `15s` | Lease term. |
 | `SYNAPSE_LEADER_RENEW` | `5s` | Renew interval. |
 | `SYNAPSE_WORKER_CONCURRENCY` | `1` | Durable queue claim loops per `synapse-worker` process; must be from 1 through 64. Jobs remain active on every worker, while maintenance sweepers are leader-gated when election is enabled. |
-| `SYNAPSE_WORKER_PROFILE` | `all` | `all` initializes hardened scanner handlers and requires the production sandbox. `integrations` initializes and claims only external-integration jobs, so a least-privilege provider worker does not need executable-tool sandbox support. |
+| `SYNAPSE_WORKER_PROFILE` | `all` | `all` initializes hardened scanner handlers and requires the production sandbox. `integrations` claims only external-integration jobs. `lifecycle` claims only Assessment comparison and closure-report jobs. The two data-only profiles do not construct executable-tool handlers or require sandbox support. |
 | `SYNAPSE_INTEGRATION_SCHEDULER_ENABLED` | `false` | Dispatch due external-integration polls. Requires PostgreSQL and `SYNAPSE_LEADER_ENABLED=true`; startup fails closed otherwise. |
 | `SYNAPSE_INTEGRATION_SCHEDULER_POLL` | `1m` | Interval for checking enabled integrations whose provider poll is due. |
 | `SYNAPSE_INTEGRATION_SCHEDULER_DISPATCH_LIMIT` | `10` | Maximum integration poll operations created per scheduler tick. |
@@ -306,6 +328,9 @@ All off by default. The fleet needs PostgreSQL + `synapse-worker`; agents run on
 | `SYNAPSE_VULNERABILITY_SCHEDULER_MAX_QUEUE_DEPTH` | `100` | Stop dispatching when the vulnerability-sync queue reaches this depth. |
 | `SYNAPSE_VULNERABILITY_SCHEDULER_RECOVERY_LIMIT` | `10` | Maximum stale runs recovered per scheduler tick. |
 | `SYNAPSE_VULNERABILITY_PROVIDER_SYNC_ENABLED` | `false` | Permit provider sync execution. This global gate also blocks already queued runs after rollback. |
+| `SYNAPSE_VULNERABILITY_SYNC_SCHEDULER_INTERVAL` | `0` (off) | Above zero, turns on the leader-gated cadence-driven sync scheduler: every interval one worker enqueues each source whose last successful sync is older than its Cadence and reclaims stranded runs. Needs `SYNAPSE_VULNERABILITY_PROVIDER_SYNC_ENABLED` and `SYNAPSE_LEADER_ENABLED`. |
+| `SYNAPSE_VULNERABILITY_SYNC_STALE_AFTER` | `2h` | A queued/running sync run older than this is reclaimed by the scheduler's stale-recovery sweep. |
+| `SYNAPSE_VULNERABILITY_SYNC_SCHEDULER_DISPATCH_LIMIT` | `16` | Maximum syncs enqueued (and stale runs recovered) per scheduler tick. |
 | `SYNAPSE_VULNERABILITY_SOURCE_ALLOW_PRIVATE_NETWORK` | `false` | Permit a vulnerability source to reach RFC1918 addresses. A source is a URL the control plane fetches on a schedule, so leaving this off keeps whoever can write a source from probing the operator's own network. Loopback, link-local and carrier-grade NAT ranges stay blocked either way. |
 | `SYNAPSE_VULNERABILITY_OCCURRENCE_WRITES_ENABLED` | `false` | Permit tenant-scoped occurrence mutations for allowlisted tenants. |
 | `SYNAPSE_VULNERABILITY_FINDING_PROJECTION_ENABLED` | `false` | Permit machine-owned finding projection updates for allowlisted tenants. |
@@ -314,6 +339,23 @@ All off by default. The fleet needs PostgreSQL + `synapse-worker`; agents run on
 | `SYNAPSE_VULNERABILITY_DRY_RUN_ENABLED` | `true` | Persist reconciliation diffs and counts without occurrence, finding, action, or notification mutations. |
 | `SYNAPSE_VULNERABILITY_TENANT_ALLOWLIST` | empty | Comma-separated tenant IDs allowed to use tenant-scoped gates and dry-run; `*` enables every tenant. Empty fails closed. |
 | `SYNAPSE_SLA_ENABLED` | `false` | Enable versioned risk-based remediation deadlines, immutable assessment history, human-only lifecycle transitions, and continuous-intelligence reassessment. See [Remediation SLA governance](sla-governance.md). |
+| `SYNAPSE_ASSESSMENT_CYCLE_API_ENABLED` | `false` | Atomically create initial Assessment Cycles and enable tenant-scoped lifecycle, Re-test, list, and archive APIs. Create/archive requests require `Idempotency-Key`; archive also requires `If-Match`. |
+| `SYNAPSE_ASSESSMENT_CYCLE_DUAL_WRITE_ENABLED` | `false` | Enable the independently gated new-Assessment Cycle/root dual-write path after schema readiness and tenant rollout checks. |
+| `SYNAPSE_ASSESSMENT_CYCLE_DUAL_WRITE_TENANTS` | empty | Comma-separated tenant allowlist for Cycle dual-write; `*` enables all tenants. Required when the dual-write gate is enabled. |
+| `SYNAPSE_ASSESSMENT_SNAPSHOT_ENABLED` | `false` | Enable immutable Assessment Snapshot generation and reads. |
+| `SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_ENABLED` | `false` | Enable finding Identity/Observation and Comparison shadow generation without changing legacy reads. Requires Snapshot generation. |
+| `SYNAPSE_ASSESSMENT_IDENTITY_COMPARISON_SHADOW_TENANTS` | empty | Comma-separated tenant allowlist for Identity/Observation and Comparison shadow generation; `*` enables all tenants. Required when shadow generation is enabled. |
+| `SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_ENABLED` | `false` | Require a finalized default Snapshot before Assessment completion for an explicit rollout cohort. Disabled preserves legacy completion behavior. |
+| `SYNAPSE_ASSESSMENT_SNAPSHOT_COMPLETION_TENANTS` | empty | Comma-separated Snapshot-completion enforcement allowlist; it must be a subset of the lifecycle-read allowlist. |
+| `SYNAPSE_ASSESSMENT_LIFECYCLE_READ_ENABLED` | `false` | Enable lifecycle read projections after backfill and integrity verification. |
+| `SYNAPSE_ASSESSMENT_LIFECYCLE_READ_TENANTS` | empty | Comma-separated tenant allowlist for lifecycle reads; must be a subset of the shadow-generation allowlist. |
+| `SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_ENABLED` | `false` | Make lifecycle UI the default; startup rejects this unless lifecycle reads are enabled. |
+| `SYNAPSE_ASSESSMENT_LIFECYCLE_UI_DEFAULT_TENANTS` | empty | Comma-separated tenant allowlist for lifecycle UI; must be a subset of the lifecycle-read allowlist. |
+| `SYNAPSE_ASSESSMENT_CLOSURE_REPORT_ENABLED` | `false` | Enable closure and report paths; requires lifecycle reads, Snapshots, and Identity/Comparison generation. |
+| `SYNAPSE_ASSESSMENT_MIGRATION_BATCH_SIZE` | `500` | Rows per committed lifecycle migration/backfill batch; maximum `2000`. |
+| `SYNAPSE_ASSESSMENT_PROCESS_TENANT_JOBS` | `4` | Maximum tenants processed concurrently by one lifecycle runner process; maximum `4`. |
+| `SYNAPSE_ASSESSMENT_COMPARISON_BACKLOG_WARNING` | `500` | Per-tenant queued/generating Comparison warning threshold; maximum `500`. |
+| `SYNAPSE_ASSESSMENT_COMPARISON_BACKLOG_HARD_LIMIT` | `1000` | Per-tenant Comparison rollout gate; must be at least the warning threshold and no more than `1000`. |
 | `SYNAPSE_DAST_RATE_PER_SEC` | `5` | DAST crawler request rate. |
 | `SYNAPSE_DAST_CONCURRENCY` | `4` | DAST crawler concurrency. |
 | `SYNAPSE_DAST_MAX_DEPTH` | `8` | Maximum crawl depth. |
@@ -382,10 +424,11 @@ All are best-effort and no-op without inputs. Set a flag to `false` to opt out.
 | `SYNAPSE_SAST_ENABLED` | `true` | Pattern SAST in the scan pipeline. |
 | `SYNAPSE_REACHABILITY_ENABLED` | `true` | Call-graph reachability proof (Go, Tier-2). Needs judgments. |
 | `SYNAPSE_REACHABILITY_BUILDER` | `owned` | Reachability call-graph producer: `owned` (go/ssa, default) or `govulncheck`. |
-| `SYNAPSE_PYREACH_ENABLED` | `false` | Python import-reachability (Tier-1 direct dead-dependency → OpenVEX). Needs judgments. |
+| `SYNAPSE_PYREACH_ENABLED` | `true` | Python import-reachability (Tier-1 direct dead-dependency → OpenVEX). Default ON. Needs judgments. |
 | `SYNAPSE_PYREACH_TIER2_ENABLED` | `false` | Python semantic call-graph reachability (Tier-2). Requires Python Tier-1 and `synapse-ast`. |
 | `SYNAPSE_TAINT_ENABLED` | `false` | Go call-graph taint proposals. Needs judgments and the target-compilation sandbox. |
 | `SYNAPSE_PYTAINT_ENABLED` | `true` | Python value-flow taint proposals (default-on when synapse-ast resolves). Needs judgments and `synapse-ast`; source-only, so the sandbox is optional. |
+| `SYNAPSE_TAINT_RULES_FILE` | empty | Optional YAML file of custom Python taint rules (`python.sources` / `python.sinks`) merged additively into the built-in catalog at startup. Custom rules only ADD detection (a new source or sink); there are no custom sanitizers, so they cannot suppress a built-in flow. A malformed or invalid file fails startup rather than silently dropping rules. |
 | `SYNAPSE_CROSSCHECK_ENABLED` | `true` | Detection-source disagreement judgments. |
 | `SYNAPSE_SBOM_CROSSCHECK_ENABLED` | `true` | Dual-producer SBOM cross-check. |
 | `SYNAPSE_GOMODGRAPH_ENABLED` | `true` | Transitive Go dependency edges via `go mod graph`. |
@@ -497,9 +540,9 @@ The following variables are read by `synapse-agent` and `synapse-cluster-agent`,
 | Variable | Default | Description |
 | --- | --- | --- |
 | `SYNAPSE_API_URL` | empty | Server base URL used by `synapse-cli publish-source`; overridden by `--server`. |
-| `SYNAPSE_REACH_RUST` | `false` | Enable conservative Rust manifest/import reachability. |
-| `SYNAPSE_REACH_RUBY` | `false` | Enable conservative Ruby manifest/import reachability. |
-| `SYNAPSE_REACH_PHP` | `false` | Enable conservative PHP manifest/import reachability. |
+| `SYNAPSE_REACH_RUST` | `true` | Conservative Rust manifest/import reachability (Tier-1). Default ON; fails to unknown on any coverage gap. Needs judgments. |
+| `SYNAPSE_REACH_RUBY` | `true` | Conservative Ruby manifest/import reachability (Tier-1). Default ON; fails to unknown on any coverage gap. Needs judgments. |
+| `SYNAPSE_REACH_PHP` | `true` | Conservative PHP manifest/import reachability (Tier-1). Default ON; fails to unknown on any coverage gap. Needs judgments. |
 
 ## MCP server (synapse-mcp)
 

@@ -12,7 +12,8 @@ import (
 // AdvisoryStore is the in-memory owned-advisory store (dev/tests, mirrors the Postgres adapter). It
 // is GLOBAL reference data – NOT tenant-scoped. Advisories are indexed by every affected (ecosystem,
 // package) so ByPackage is a map lookup, and Upsert is idempotent by advisory id (re-syncable reference
-// data, replaced in place – not append-only). The stored ecosystem+package keys are the ingester-normalized,
+// data, replaced in place – not append-only – except the exploitation-risk enrichment carried forward
+// raise-only via advisory.Advisory.PreserveEnrichment). The stored ecosystem+package keys are the ingester-normalized,
 // OSV-canonical ids per the ports.AdvisoryStore KEY CONTRACT.
 type AdvisoryStore struct {
 	mu    sync.RWMutex
@@ -26,8 +27,9 @@ func NewAdvisoryStore() *AdvisoryStore {
 }
 
 var (
-	_ ports.AdvisoryStore  = (*AdvisoryStore)(nil)
-	_ ports.AdvisoryWriter = (*AdvisoryStore)(nil) // the ingester loads via the narrow writer port
+	_ ports.AdvisoryStore      = (*AdvisoryStore)(nil)
+	_ ports.AdvisoryWriter     = (*AdvisoryStore)(nil) // the ingester loads via the narrow writer port
+	_ ports.AdvisoryAliasStore = (*AdvisoryStore)(nil)
 )
 
 // Upsert inserts or replaces an advisory by id and (re)builds its (ecosystem, package) index entries. A
@@ -35,7 +37,11 @@ var (
 func (s *AdvisoryStore) Upsert(_ context.Context, a advisory.Advisory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, existed := s.byID[a.ID]; existed {
+	if prior, existed := s.byID[a.ID]; existed {
+		// Carry the prior row's exploitation-risk enrichment forward: the bulk feed has no KEV/EPSS, so a
+		// blind replace would LOWER the signals the risk pipeline merged in. Mirrors the Postgres adapter;
+		// the single mutex serializes writers here.
+		a = a.PreserveEnrichment(prior)
 		s.removeFromIndex(a.ID)
 	}
 	s.byID[a.ID] = a
@@ -86,4 +92,39 @@ func (s *AdvisoryStore) ByPackage(_ context.Context, ecosystem, name string) ([]
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID }) // byte order, parity with the pg adapter
 	return out, nil
+}
+
+// AdvisoryAliasEdges returns the alias edges for advisories whose id is in ids or whose Aliases intersect
+// ids, mirroring the Postgres adapter. Bounded to the given ids. Empty ids -> no edges.
+func (s *AdvisoryStore) AdvisoryAliasEdges(_ context.Context, ids []string) ([]advisory.AliasEdge, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var edges []advisory.AliasEdge
+	for id, a := range s.byID {
+		match := want[id]
+		if !match {
+			for _, alias := range a.Aliases {
+				if want[alias] {
+					match = true
+					break
+				}
+			}
+		}
+		if !match {
+			continue
+		}
+		for _, alias := range a.Aliases {
+			if alias != "" && alias != id {
+				edges = append(edges, advisory.AliasEdge{AliasID: alias, CanonicalID: id})
+			}
+		}
+	}
+	return edges, nil
 }

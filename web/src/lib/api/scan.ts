@@ -1,3 +1,4 @@
+import { mapUploadedSource } from './engagements'
 import type {
   AITriage,
   CodeQualityReport,
@@ -35,7 +36,7 @@ function mapComponent(r: any): Component {
   }
 }
 
-function mapVuln(r: any): Vulnerability {
+export function mapVuln(r: any): Vulnerability {
   return {
     id: r.ID,
     source: r.Source ?? '',
@@ -59,6 +60,7 @@ function mapVuln(r: any): Vulnerability {
     epss: r.EPSS ?? 0,
     path: r.Path ?? [],
     direct: r.Direct ?? false,
+    introducers: r.Introducers ?? undefined,
     sources: r.Sources ?? [],
     confidence: r.Confidence ?? '',
     detections: (r.Detections ?? []).map((d: any) => ({
@@ -308,6 +310,9 @@ function mapScanRun(r: any): ScanRun {
     manifestHash: r?.manifest_hash ?? '',
     laneCount: r?.lane_count ?? 0,
     completeCoverage: r?.complete_coverage === true,
+    sourcePackage: r?.source_package ? mapUploadedSource(r.source_package) : undefined,
+    targetKind: r?.target_kind || undefined,
+    target: r?.target || undefined,
   }
 }
 

@@ -3,9 +3,12 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/advisory"
@@ -18,6 +21,24 @@ import (
 // GLOBAL reference data (NOT tenant-scoped): the full advisory is a JSONB blob in `advisories`, with one
 // `advisory_affects` row per affected (ecosystem, package) for the indexed ByPackage lookup.
 type AdvisoryRepository struct{ pool *pgxpool.Pool }
+
+var _ ports.AdvisoryCorpusFreshness = (*AdvisoryRepository)(nil)
+var _ ports.AdvisoryAliasStore = (*AdvisoryRepository)(nil)
+
+// AdvisoryFreshness reports the newest advisory timestamp and the corpus row count so a scan can warn when
+// the owned advisory store is stale. Advisories are global reference data (not tenant-scoped), so the query
+// is unfiltered. An empty corpus yields the zero time and count 0.
+func (r *AdvisoryRepository) AdvisoryFreshness(ctx context.Context) (time.Time, int, error) {
+	var latest time.Time
+	var count int
+	if err := r.pool.QueryRow(ctx, `SELECT COALESCE(MAX(updated_at), to_timestamp(0)), COUNT(*) FROM advisories`).Scan(&latest, &count); err != nil {
+		return time.Time{}, 0, fmt.Errorf("advisory corpus freshness: %w", err)
+	}
+	if count == 0 {
+		return time.Time{}, 0, nil // empty corpus: no meaningful date
+	}
+	return latest, count, nil
+}
 
 // NewAdvisoryRepository returns a repository backed by the given pool.
 func NewAdvisoryRepository(pool *pgxpool.Pool) *AdvisoryRepository {
@@ -37,15 +58,39 @@ func (r *AdvisoryRepository) Upsert(ctx context.Context, a advisory.Advisory) er
 	if a.ID == "" {
 		return fmt.Errorf("%w: advisory id is empty", shared.ErrValidation)
 	}
-	blob, err := json.Marshal(a)
-	if err != nil {
-		return fmt.Errorf("marshal advisory: %w", err)
-	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin advisory upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit succeeds; matches the package norm
+	// Serialize every writer of this advisory identity on a transaction-scoped advisory lock, then carry the
+	// prior row's exploitation-risk enrichment forward instead of overwriting it to zero. The bulk feed this
+	// writer serves has no KEV/EPSS/PublicExploit, so a blind `data = EXCLUDED.data` would LOWER the signals
+	// the canonical materializer merged in (the corpus clobber). The advisory lock is the same primitive
+	// advisory_materializer.Materialize takes per identity, keyed on the normalized id via the identical
+	// hashtextextended($1,0), so it holds regardless of whether the row already exists - a plain
+	// SELECT ... FOR UPDATE cannot lock a not-yet-inserted row, so two concurrent inserts of a new id would
+	// still clobber. Under the lock the read-then-write cannot lose an update.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, strings.ToUpper(strings.TrimSpace(a.ID))); err != nil {
+		return fmt.Errorf("lock advisory identity %s: %w", a.ID, err)
+	}
+	var priorBlob []byte
+	switch err := tx.QueryRow(ctx, `SELECT data FROM advisories WHERE id = $1`, a.ID).Scan(&priorBlob); {
+	case err == nil:
+		var prior advisory.Advisory
+		if uerr := json.Unmarshal(priorBlob, &prior); uerr != nil {
+			return fmt.Errorf("decode prior advisory %s: %w", a.ID, uerr)
+		}
+		a = a.PreserveEnrichment(prior)
+	case errors.Is(err, pgx.ErrNoRows):
+		// New advisory: nothing to preserve.
+	default:
+		return fmt.Errorf("load prior advisory %s: %w", a.ID, err)
+	}
+	blob, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Errorf("marshal advisory: %w", err)
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO advisories (id, data, created_at, updated_at) VALUES ($1, $2, now(), now())
 		 ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
@@ -144,4 +189,45 @@ func (r *AdvisoryRepository) ByCPE(ctx context.Context, part, vendor, product st
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+// AdvisoryAliasEdges returns the alias edges (alias id -> canonical id, the row id) for every advisory whose
+// id is in ids OR whose stored Aliases array intersects ids. The `?|` intersection is backed by the
+// advisories alias GIN index (migration 0145), so the query is bounded to the finding ids rather than a
+// full-corpus scan. Ids are matched as stored; the caller normalizes for the alias graph. An empty ids slice
+// returns no edges (no findings to expand).
+func (r *AdvisoryRepository) AdvisoryAliasEdges(ctx context.Context, ids []string) ([]advisory.AliasEdge, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, data->'Aliases' FROM advisories WHERE id = ANY($1) OR data->'Aliases' ?| $1`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("query advisory alias edges: %w", err)
+	}
+	defer rows.Close()
+	var edges []advisory.AliasEdge
+	for rows.Next() {
+		var canonical string
+		var aliasesRaw []byte
+		if err := rows.Scan(&canonical, &aliasesRaw); err != nil {
+			return nil, fmt.Errorf("scan advisory alias edge: %w", err)
+		}
+		if len(aliasesRaw) == 0 {
+			continue
+		}
+		var aliases []string
+		if err := json.Unmarshal(aliasesRaw, &aliases); err != nil {
+			continue // a malformed Aliases blob is skipped, never a fatal scan error
+		}
+		for _, alias := range aliases {
+			if alias != "" && alias != canonical {
+				edges = append(edges, advisory.AliasEdge{AliasID: alias, CanonicalID: canonical})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate advisory alias edges: %w", err)
+	}
+	return edges, nil
 }

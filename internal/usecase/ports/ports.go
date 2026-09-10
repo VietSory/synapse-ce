@@ -325,6 +325,32 @@ type EngagementSourceStore interface {
 	Materialize(ctx context.Context, locator string) (string, sourcepackage.Package, func() error, error)
 }
 
+type EngagementSourceReuser interface {
+	Reuse(ctx context.Context, tenantID, parentEngagementID, childEngagementID, expectedVersionID shared.ID, actor string, at time.Time) (sourcepackage.Package, error)
+}
+
+type EngagementSourceVersionReader interface {
+	GetByVersion(ctx context.Context, tenantID, engagementID, versionID shared.ID) (sourcepackage.Package, error)
+}
+
+// EngagementSourceCompensator releases a newly uploaded, unpublished object after
+// the enclosing metadata transaction has rolled back. Reused objects are retained.
+type EngagementSourceCompensator interface {
+	DiscardUnpublished(ctx context.Context, item sourcepackage.Package) error
+}
+
+// EngagementSourceRepository retains one immutable, versioned package binding per
+// engagement. Delete removes only an unreferenced binding; its boolean is true
+// only when no retained package references the returned object's storage key.
+type EngagementSourceRepository interface {
+	Create(ctx context.Context, item sourcepackage.Package) (sourcepackage.Package, bool, error)
+	Get(ctx context.Context, tenantID, engagementID shared.ID) (sourcepackage.Package, error)
+	GetByVersion(ctx context.Context, tenantID, engagementID, versionID shared.ID) (sourcepackage.Package, error)
+	GetByLocator(ctx context.Context, tenantID shared.ID, locator string) (sourcepackage.Package, error)
+	Delete(ctx context.Context, tenantID, engagementID shared.ID) (sourcepackage.Package, bool, error)
+	ObjectUnreferenced(ctx context.Context, tenantID shared.ID, objectKey string) (bool, error)
+}
+
 // EngagementRepository persists engagements. Returned aggregates are read-only –
 // callers must not mutate them (implementations may return shared instances).
 type EngagementRepository interface {
@@ -620,14 +646,17 @@ type ScanSnapshot struct {
 // ScanManifest captures everything needed to explain + replay a scan result
 // (reproducibility / chain-of-custody). Stored per run.
 type ScanManifest struct {
-	ToolVersions       map[string]string `json:"tool_versions"`       // syft/grype/enry/synapse + *-db
-	VulnDBSnapshot     string            `json:"vuln_db_snapshot"`    // osv.dev@<time> (live source marker)
-	GrypeDBVersion     string            `json:"grype_db_version"`    // pinned grype DB schema@built
-	CorrelationVersion int               `json:"correlation_version"` // bumped when merge logic changes
-	SBOMSHA256         string            `json:"sbom_sha256"`         // hash of the generator's raw SBOM
-	ReproScore         int               `json:"repro_score"`         // 0..100, fraction of pinned inputs
-	PinnedInputs       []string          `json:"pinned_inputs"`       // which inputs are version-pinned
-	UnpinnedInputs     []string          `json:"unpinned_inputs"`     // which are live (e.g. osv.dev)
+	// SourcePackage is frozen at scan admission, never resolved from current
+	// engagement state when rendering historical scan results.
+	SourcePackage      *sourcepackage.Package `json:"source_package,omitempty"`
+	ToolVersions       map[string]string      `json:"tool_versions"`       // syft/grype/enry/synapse + *-db
+	VulnDBSnapshot     string                 `json:"vuln_db_snapshot"`    // osv.dev@<time> (live source marker)
+	GrypeDBVersion     string                 `json:"grype_db_version"`    // pinned grype DB schema@built
+	CorrelationVersion int                    `json:"correlation_version"` // bumped when merge logic changes
+	SBOMSHA256         string                 `json:"sbom_sha256"`         // hash of the generator's raw SBOM
+	ReproScore         int                    `json:"repro_score"`         // 0..100, fraction of pinned inputs
+	PinnedInputs       []string               `json:"pinned_inputs"`       // which inputs are version-pinned
+	UnpinnedInputs     []string               `json:"unpinned_inputs"`     // which are live (e.g. osv.dev)
 }
 
 // ScanRun is one persisted scan execution: its manifest plus the finding identity
@@ -861,17 +890,18 @@ type ScanDebugEvent struct {
 // ScanJob tracks the progress of an asynchronous scan so the UI can show a
 // progress bar and survive a page reload (the pipeline runs server-side).
 type ScanJob struct {
-	ID           string           `json:"id"`
-	EngagementID string           `json:"engagement_id"`
-	Target       string           `json:"target"`
-	Kind         string           `json:"kind"`
-	Status       ScanStatus       `json:"status"`
-	Stage        string           `json:"stage"`
-	Progress     int              `json:"progress"` // 0..100
-	Error        string           `json:"error,omitempty"`
-	StartedAt    time.Time        `json:"started_at"`
-	FinishedAt   *time.Time       `json:"finished_at,omitempty"`
-	DebugEvents  []ScanDebugEvent `json:"debug_events"`
+	SourcePackage *sourcepackage.Package `json:"source_package,omitempty"`
+	ID            string                 `json:"id"`
+	EngagementID  string                 `json:"engagement_id"`
+	Target        string                 `json:"target"`
+	Kind          string                 `json:"kind"`
+	Status        ScanStatus             `json:"status"`
+	Stage         string                 `json:"stage"`
+	Progress      int                    `json:"progress"` // 0..100
+	Error         string                 `json:"error,omitempty"`
+	StartedAt     time.Time              `json:"started_at"`
+	FinishedAt    *time.Time             `json:"finished_at,omitempty"`
+	DebugEvents   []ScanDebugEvent       `json:"debug_events"`
 }
 
 // ScanJobStore persists scan-job status (upserted as the pipeline progresses).
@@ -1357,12 +1387,15 @@ const (
 
 // AcquireRequest identifies a scan target and how to obtain it.
 type AcquireRequest struct {
-	Kind       string // local | git | archive | upload | image (default: local)
-	Value      string // path, git URL, archive path, or image ref
-	Locator    string // internal locator for a server-owned uploaded source package
-	Ref        string // optional git branch/tag to clone (git kind only)
-	BaseRef    string // optional validated Git comparison base ref
-	BaseCommit string // optional immutable base commit from a previous analysis
+	// SourcePackage is server-resolved and pinned before an upload scan is queued.
+	// HTTP adapters must never accept caller-supplied package metadata or locators.
+	SourcePackage *sourcepackage.Package
+	Kind          string // local | git | archive | upload | image (default: local)
+	Value         string // path, git URL, archive path, or image ref
+	Locator       string // internal locator for a server-owned uploaded source package
+	Ref           string // optional git branch/tag to clone (git kind only)
+	BaseRef       string // optional validated Git comparison base ref
+	BaseCommit    string // optional immutable base commit from a previous analysis
 }
 
 // Workspace is an isolated directory holding a target to analyze (never execute).
@@ -1524,6 +1557,21 @@ type JVMReachabilityAnalyzer interface {
 	Analyze(ctx context.Context, wsDir string, comps []sbom.Component) (int, error)
 }
 
+// JVMReachabilityVerdict is one finding's pre-computed JVM class-reachability result (the JVMReachabilityAnalyzer
+// tags components in-scan; this carries the per-finding verdict to the recorder).
+type JVMReachabilityVerdict struct {
+	FindingID shared.ID
+	Reachable bool
+}
+
+// JVMReachabilityRecorder mints an auditable Tier-1.5 JVM class-reachability judgment per finding from the
+// pre-computed verdicts, so the coarse JVM signal feeds VEX and (for a reachable verdict) the SLA scorer, not
+// just an ephemeral finding tag. A Tier-1.5 verdict is never a promotable proof, so a not-reachable verdict
+// only deprioritizes, never suppresses. Optional; nil ⇒ JVM reachability stays a finding tag only.
+type JVMReachabilityRecorder interface {
+	RecordVerdicts(ctx context.Context, engagementID shared.ID, verdicts []JVMReachabilityVerdict) (int, error)
+}
+
 // CallGraphBuilder is the deterministic call-graph PRODUCER port: an implementation
 // runs a language's builder (the Go MVP shells govulncheck-class via argv, sandboxed) over a target and
 // returns the NORMALIZED domain callgraph.Graph – no tool/analysis type crosses this boundary. The Graph
@@ -1551,6 +1599,11 @@ type PyImportGraph struct {
 	FirstPartyModules []string // the project's own top-level modules (import roots), for provenance
 	DynamicImports    bool     // first-party code uses __import__ / importlib – a not-imported conclusion is unsafe
 	FilesScanned      int
+	// CoverageDegraded is true when some first-party source could not be fully observed (an unreadable entry,
+	// the per-file byte cap truncated a file, or the file-count cap stopped the walk). A missed import in the
+	// unscanned region would be a false "not imported", so the analyzer must refuse a not-reachable verdict
+	// when this is set – matching the Complete()/Coverage refusal the Rust/PHP/Ruby and JS scanners already do.
+	CoverageDegraded bool
 }
 
 // PyImportScanner reads a target's FIRST-PARTY Python source and returns its import surface. It is
@@ -1598,6 +1651,15 @@ type MavenResolver interface {
 	Resolve(ctx context.Context, dir string) ([]sbom.Component, error)
 }
 
+// MavenGraphResolver is the optional graph-aware capability of a MavenResolver: it returns the resolved
+// components AND the dependency EDGES (with per-edge Maven scope), from `mvn dependency:tree`. A resolver
+// that implements it lets the SCA pipeline attach a dependency path and the introducing direct dependencies
+// to a transitive Maven CVE, and deprioritize a provided-only transitive by graph-propagated scope. It is
+// separate from MavenResolver so a static (no-tree) resolver can still satisfy the base contract.
+type MavenGraphResolver interface {
+	ResolveGraph(ctx context.Context, dir string) ([]sbom.Component, []sbom.Dependency, error)
+}
+
 // GradleResolver resolves a Gradle project's FULL dependency tree (direct + transitive, with the
 // resolved versions) from its build script – which a static parse cannot do, because Gradle versions
 // are often supplied by a platform/BOM or version catalog (absent from the declaration ⇒ UNKNOWN) and
@@ -1611,6 +1673,14 @@ type MavenResolver interface {
 // missing gradle binary, or any resolution error returns no components and never fails the scan.
 type GradleResolver interface {
 	Resolve(ctx context.Context, dir string) ([]sbom.Component, error)
+}
+
+// GradleGraphResolver is the optional graph-aware capability of a GradleResolver: it returns the resolved
+// components AND the dependency EDGES (with per-edge scope) from the resolution-result graph. A resolver
+// implementing it lets the SCA pipeline attach a dependency path and the introducing direct deps to a
+// transitive Gradle CVE. Separate from GradleResolver so a components-only resolver still satisfies the base.
+type GradleGraphResolver interface {
+	ResolveGraph(ctx context.Context, dir string) ([]sbom.Component, []sbom.Dependency, error)
 }
 
 // NPMResolver resolves an npm project's FULL dependency tree (direct + transitive, with pinned versions)
@@ -1692,6 +1762,32 @@ type CPEAdvisoryStore interface {
 	ByCPE(ctx context.Context, part, vendor, product string) ([]advisory.Advisory, error)
 }
 
+// AdvisoryCorpusFreshness is an OPTIONAL capability of an AdvisoryStore: it reports how current the owned
+// advisory corpus is, so a scan can WARN when the store is stale instead of silently under-reporting
+// against a six-month-old corpus. Latest is the newest advisory row's timestamp (zero when the corpus is
+// empty); Count is the number of stored advisories. A store that cannot report this (memory/file) simply
+// does not implement it, and the owned source emits no freshness marker.
+type AdvisoryCorpusFreshness interface {
+	AdvisoryFreshness(ctx context.Context) (latest time.Time, count int, err error)
+}
+
+// AdvisoryAliasStore is an OPTIONAL capability of an AdvisoryStore: it returns the alias edges (alias id ->
+// canonical id) for the advisories touching a set of ids, so correlation can resolve the transitive alias
+// closure of a scan's findings and merge two findings that are the same vulnerability under non-overlapping
+// ids. The query is bounded to the given ids (backed by the advisories alias GIN index), so it is O(matching
+// advisories), not a full-corpus scan. An empty ids slice returns no edges.
+type AdvisoryAliasStore interface {
+	AdvisoryAliasEdges(ctx context.Context, ids []string) ([]advisory.AliasEdge, error)
+}
+
+// AliasEdgeProvider is an OPTIONAL capability of a DetectionSource: it supplies the alias edges for a set of
+// advisory ids so the SCA correlation step can resolve the transitive alias closure of its findings. The
+// owned advisory source implements it over its store's AdvisoryAliasStore; a source without it contributes
+// no edges.
+type AliasEdgeProvider interface {
+	AliasEdges(ctx context.Context, ids []string) ([]advisory.AliasEdge, error)
+}
+
 // CorrelationRecorder turns a cross-check DISAGREEMENT report into Judgments for human review.
 // The SCA pipeline computes the report (vulnerability.CrossCheck over its multi-source
 // RawFindings) and hands it here; the recorder proposes one UNGATED CapCorrelation judgment per NEW
@@ -1765,8 +1861,12 @@ type ThreatModelStore interface {
 // SEPARATE from the read-only AdvisoryStore so a read consumer (the owned DetectionSource) cannot reach the
 // mutator – only the ingester holds this narrow writer (mirrors how the score-mover is kept off the broad
 // JudgmentStore). Upsert is idempotent by advisory id: advisories are re-syncable reference data, so a
-// re-ingest REPLACES in place (not append-only). The ingester must pass ingester-NORMALIZED keys per the
-// AdvisoryStore KEY CONTRACT.
+// re-ingest REPLACES the base advisory in place (not append-only), with one exception - the exploitation-risk
+// enrichment (KEV/EPSS/EPSSPercentile/PublicExploit) is carried forward raise-only via
+// advisory.Advisory.PreserveEnrichment, because the bulk feed does not carry it and a blind replace would
+// clobber the signals the canonical materializer merged in. Writers of one identity serialize on a
+// transaction advisory lock so a concurrent insert of a new id cannot lose the merge. The ingester must pass
+// ingester-NORMALIZED keys per the AdvisoryStore KEY CONTRACT.
 type AdvisoryWriter interface {
 	Upsert(ctx context.Context, a advisory.Advisory) error
 }
