@@ -613,9 +613,9 @@ func TestExternalSetupDefaultsOff(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	c := Load()
-	// Python semantic taint is deliberately NOT in this off-by-default set: it is source-only (synapse-ast
-	// parses target code with tree-sitter, never compiling or executing it) and degrades to a clean no-op
-	// when the sidecar is absent, so it is safe to run in the default scan (see TestPythonTaintDefaultsOn).
+	// Python and JavaScript semantic taint are deliberately NOT in this off-by-default set: synapse-ast
+	// parses target code with tree-sitter, never compiling or executing it, and the scanner is a clean
+	// no-op when the sidecar is absent, so both are safe in the default scan.
 	off := map[string]bool{
 		"Sandbox": c.SandboxEnabled, "Agent": c.AgentEnabled, "Taint": c.TaintEnabled,
 		"PythonTier2": c.PySemanticReachabilityEnabled, "SecretHistory": c.SecretHistoryEnabled,
@@ -936,6 +936,17 @@ func TestPythonTaintDefaultsOn(t *testing.T) {
 	t.Setenv("SYNAPSE_PYTAINT_ENABLED", "false")
 	if Load().PythonTaintEnabled {
 		t.Error("SYNAPSE_PYTAINT_ENABLED=false must disable Python taint")
+	}
+}
+
+func TestJSTaintDefaultsOn(t *testing.T) {
+	t.Setenv("SYNAPSE_JSTAINT_ENABLED", "")
+	if !Load().JSTaintEnabled {
+		t.Error("JavaScript semantic taint must be ON by default (source-only, sidecar-gated)")
+	}
+	t.Setenv("SYNAPSE_JSTAINT_ENABLED", "false")
+	if Load().JSTaintEnabled {
+		t.Error("SYNAPSE_JSTAINT_ENABLED=false must disable JavaScript taint")
 	}
 }
 

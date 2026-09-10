@@ -549,6 +549,10 @@ type Config struct {
 	// sidecar extracts bounded facts, but unlike Go taint this pass never compiles or imports target code.
 	// Positive paths become gated CapSAST proposals; incomplete coverage never produces a clean verdict.
 	PythonTaintEnabled bool
+	// JSTaintEnabled turns on source-only JavaScript/TypeScript semantic value-flow analysis. The
+	// synapse-ast sidecar parses bounded facts only; it never runs, imports, or compiles target code.
+	// Positive paths become gated CapSAST proposals; incomplete coverage never produces a clean verdict.
+	JSTaintEnabled bool
 	// TaintRulesFile is an optional operator-provided YAML file of CUSTOM Python taint rules (Semgrep-style
 	// user sources and sinks) merged additively into the built-in catalog at startup. Empty (the default)
 	// uses only the built-in catalog. Custom rules can only ADD detection, never suppress a built-in flow.
@@ -865,6 +869,7 @@ func Load() Config {
 		PySemanticReachabilityEnabled:     getbool("SYNAPSE_PYREACH_TIER2_ENABLED", false),
 		ASTBin:                            os.Getenv("SYNAPSE_AST_BIN"),
 		PythonTaintEnabled:                getbool("SYNAPSE_PYTAINT_ENABLED", true),
+		JSTaintEnabled:                    getbool("SYNAPSE_JSTAINT_ENABLED", true),
 		TaintRulesFile:                    strings.TrimSpace(getenv("SYNAPSE_TAINT_RULES_FILE", "")),
 		TriScoreReassessEnabled:           getbool("SYNAPSE_TRISCORE_REASSESS_ENABLED", false),
 		FleetCorrelationEnabled:           getbool("SYNAPSE_FLEET_CORRELATION_ENABLED", false),

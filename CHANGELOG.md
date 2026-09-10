@@ -9,6 +9,7 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Added
 
+- **JavaScript/TypeScript source-only value-flow taint runs in every default SCA scan.** The new semantic analyzer now reaches both `synapse-api` and queued `synapse-worker` scans through `scacompose.ConfigureJudgmentScanners`, so parser, resolver, catalog, and coordinator work is no longer unreachable. `SYNAPSE_JSTAINT_ENABLED` defaults to true and can disable it explicitly; the sidecar only parses bounded source facts and degrades to an observable no-op when unavailable. Positive source-to-sink witnesses create gated, propose-only `CapSAST` judgments under a dedicated JavaScript actor; incomplete coverage records warnings and never yields a clean conclusion. The reviewed catalog covers request input flowing to command/eval, SQL/NoSQL, path, SSRF, XSS, redirect, template, and deserialization sinks.
 - **`synapse-bench` now reduces detection accuracy, not only throughput.** The detection-accuracy reducer (`benchmark.EvaluateAccuracy`: precision, recall, F1, false-discovery and false-negative rates, overall and per group, schema `synapse-accuracy-input-v1`) was reachable only from the in-process golden-corpus gate. `synapse-bench -mode accuracy` now decodes an accuracy input document and emits the precision/recall report deterministically, so the owned engine's own detection rates can be measured from the command line, distinct from the AI-triage metrics. `-mode throughput` (the default) is unchanged. This completes EPIC #860 D8.2.
 
 - **NuGet dependency edges are now recovered from `project.assets.json`, not only the opt-in lockfile.** The owned .NET parser read only `packages.lock.json`, which exists only when a project opts into `RestorePackagesWithLockFile`, so most .NET projects had a flat NuGet component list with no transitivity. `project.assets.json` (the restore graph `dotnet restore` always writes to `obj/`) is now parsed too: each target framework's resolved `<Name>/<Version>` packages become components and their `dependencies` are resolved to concrete versions in the same framework (resolution-as-filter, so an edge is emitted only when its target actually resolved there, never synthesized). Project references are skipped. A transitive NuGet CVE now reports its dependency path even without the lockfile. This completes EPIC #860 D3.7.
@@ -255,8 +256,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   top-level `execution.mode`: `controlPlaneOnly` (default — offline scanner console that boots on any node,
   including managed EKS and `kind`), `externalNative` (production control plane on k8s, execution tier on
   native EC2 per ADR 0008), and `inClusterBroker` (execution in-cluster via an opt-in privileged
-  `synapse-egress-broker` DaemonSet on capable nodes). Render guards fail closed with a clear message instead
-  of shipping a chart that CrashLoopBackOffs, and the `synapse-egress-broker` binary now ships in the
+  `synapse-egress-broker` DaemonSet on capable nodes). Render guards fail closed with a clear message
+  instead of shipping a chart that CrashLoopBackOffs, and the `synapse-egress-broker` binary now ships in the
   production image. Added `deploy/kind/` (a control-plane smoke: `make kind-smoke`) and `make
   helm-render-test`. Documented the three placements and the requirement that the runtime DB role be
   `NOSUPERUSER NOBYPASSRLS` (Synapse refuses to serve on a superuser role because it bypasses RLS).

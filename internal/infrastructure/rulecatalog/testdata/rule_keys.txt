@@ -1491,6 +1491,16 @@ java-xxe-transformer-factory
 java-xxe-xmlinput-factory
 java-xxe-xmlreaderfactory
 java-zip-slip
+javascript-taint-command
+javascript-taint-deserialization
+javascript-taint-eval
+javascript-taint-nosql
+javascript-taint-open-redirect
+javascript-taint-path
+javascript-taint-sqli
+javascript-taint-ssrf
+javascript-taint-ssti
+javascript-taint-xss
 jenkins-api-token
 jfrog-token
 js-a11y-anchor-href-hash
