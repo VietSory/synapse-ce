@@ -1,0 +1,64 @@
+name: D3.3 review reconciliation
+
+on:
+  push:
+    branches:
+      - ci/d3-3-reconcile-review
+
+permissions:
+  contents: write
+
+jobs:
+  reconcile:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ci/d3-3-reconcile-review
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply review reconciliation
+        run: python3 .github/scripts/d3_reconcile.py
+
+      - name: Format touched Go files
+        run: |
+          gofmt -w \
+            internal/infrastructure/tools/ownsbom/cargo.go \
+            internal/infrastructure/tools/ownsbom/conan.go \
+            internal/infrastructure/tools/ownsbom/conan_test.go \
+            internal/infrastructure/tools/ownsbom/npm.go \
+            internal/infrastructure/tools/ownsbom/npm_edge_scope_test.go \
+            internal/infrastructure/tools/ownsbom/nuget.go \
+            internal/infrastructure/tools/ownsbom/pnpm.go \
+            internal/infrastructure/tools/ownsbom/pnpm_test.go \
+            internal/infrastructure/tools/ownsbom/poetry.go \
+            internal/infrastructure/tools/ownsbom/source_scope_test.go \
+            internal/infrastructure/tools/ownsbom/uv.go \
+            internal/infrastructure/tools/ownsbom/yarn.go \
+            internal/usecase/projectuc/dependency_graph.go \
+            internal/usecase/projectuc/dependency_scope_test.go \
+            internal/usecase/sca/dependency_scope_test.go
+
+      - name: Diff hygiene
+        run: git diff --check
+
+      - name: Targeted tests
+        run: go test -count=1 ./internal/domain/sbom ./internal/infrastructure/tools/ownsbom ./internal/usecase/sca ./internal/usecase/projectuc
+
+      - name: Targeted vet
+        run: go vet ./internal/domain/sbom ./internal/infrastructure/tools/ownsbom ./internal/usecase/sca ./internal/usecase/projectuc
+
+      - name: Commit validated reconciliation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md internal/domain/sbom internal/infrastructure/tools/ownsbom internal/usecase/projectuc internal/usecase/sca/dependency_scope_test.go
+          git commit -m "test(d3.3): validate review reconciliation"
+          git push origin HEAD:ci/d3-3-reconcile-review
