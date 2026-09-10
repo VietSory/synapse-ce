@@ -256,8 +256,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   top-level `execution.mode`: `controlPlaneOnly` (default — offline scanner console that boots on any node,
   including managed EKS and `kind`), `externalNative` (production control plane on k8s, execution tier on
   native EC2 per ADR 0008), and `inClusterBroker` (execution in-cluster via an opt-in privileged
-  `synapse-egress-broker` DaemonSet on capable nodes). Render guards fail closed with a clear message
-  instead of shipping a chart that CrashLoopBackOffs, and the `synapse-egress-broker` binary now ships in the
+  `synapse-egress-broker` DaemonSet on capable nodes). Render guards fail closed with a clear message instead
+  of shipping a chart that CrashLoopBackOffs, and the `synapse-egress-broker` binary now ships in the
   production image. Added `deploy/kind/` (a control-plane smoke: `make kind-smoke`) and `make
   helm-render-test`. Documented the three placements and the requirement that the runtime DB role be
   `NOSUPERUSER NOBYPASSRLS` (Synapse refuses to serve on a superuser role because it bypasses RLS).
