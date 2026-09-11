@@ -74,6 +74,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/qualityprofile"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/risk"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/sast"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/secretverify"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/secretscan"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/syft"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/vexfile"
@@ -1577,9 +1578,17 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 		fmt.Fprintln(os.Stderr, "synapse-cli: image mode – source SAST skipped (run SAST at source; image scan covers SCA/OS-CVE + secret + misconfig)")
 	}
 	if cfg.SecretScanEnabled {
-		sca.SetSecretScanner(secretscan.New())                // deterministic, redacted secret scan (CI-friendly)
-		sca.SetIncludeTestSecrets(includeTest)                // by default suppress test/fixture/docs/detector-pattern secrets (fake creds)
-		sca.SetSecretHistoryEnabled(cfg.SecretHistoryEnabled) // opt-in: also scan git history for committed-then-removed secrets
+		baseSecrets := secretscan.New()
+		if verification := cfg.SecretVerification(); verification.Enabled {
+			verifier, err := secretverify.New(baseSecrets, verification.VaultAddr)
+			if err != nil { fmt.Fprintln(os.Stderr, "synapse-cli: configure active secret verification:", err); os.Exit(2) }
+			scanner, err := secretverify.WrapScanner(baseSecrets, verifier)
+			if err != nil { fmt.Fprintln(os.Stderr, "synapse-cli: wrap active secret verification scanner:", err); os.Exit(2) }
+			sca.SetSecretScanner(scanner)
+			sca.SetSecretVerificationEnabled(true)
+		} else { sca.SetSecretScanner(baseSecrets) }
+		sca.SetIncludeTestSecrets(includeTest)
+		sca.SetSecretHistoryEnabled(cfg.SecretHistoryEnabled)
 	}
 	if cfg.MisconfigEnabled {
 		// Trusted-local model (like the CLI's maven/gradle resolvers): render Helm charts via a direct

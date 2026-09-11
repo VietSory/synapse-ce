@@ -81,6 +81,7 @@ type Service struct {
 	secretScanner                    ports.SecretScanner                   // optional deterministic secret scan over the live workspace
 	secretHistory                    bool                                  // also scan git history for committed-then-removed secrets
 	includeTestSecrets               bool                                  // report secrets in test/fixture/docs paths (default false: suppress)
+	secretVerificationEnabled        bool                                  // opt-in active, read-only checks for workspace secret findings only
 	misconfig                        ports.MisconfigScanner                // optional deterministic IaC/config misconfig scan over the live workspace
 	imageConfig                      ports.ImageConfigChecker              // optional owned image config + build-history hardening checks (D7.10)
 	fpTriager                        ports.FPTriager                       // optional LLM false-positive critique of production-scope source findings
@@ -265,6 +266,10 @@ func (s *Service) SetSASTAnalyzer(a ports.SASTAnalyzer) { s.sastAnalyzer = a }
 
 // SetSecretScanner configures the optional deterministic secret scanner. nil ⇒ no secret scanning.
 func (s *Service) SetSecretScanner(sc ports.SecretScanner) { s.secretScanner = sc }
+
+// SetSecretVerificationEnabled permits the separate active verification lane. Detection remains strictly offline
+// unless this switch is true; history and image-rootfs findings are never passed to a network verifier.
+func (s *Service) SetSecretVerificationEnabled(enabled bool) { s.secretVerificationEnabled = enabled }
 
 // SetSecretHistoryEnabled turns on git-history secret scanning: when the workspace is a git repository and the
 // secret scanner supports it, every blob in the repository's history is scanned so a committed-then-removed
@@ -754,6 +759,8 @@ type ScanResult struct {
 	Licenses          []ports.LicenseFinding        `json:"licenses"`
 	ComponentLicenses []ComponentLicenseAudit       `json:"component_licenses"`
 	Findings          []finding.Finding             `json:"findings"`
+	// SecretVerifications is scrubbed, structured active-verification provenance. It never contains raw material.
+	SecretVerifications []ports.SecretVerification `json:"secret_verifications,omitempty"`
 	// SLAs is populated only when SLA governance is enabled. Each entry joins immutable scoring
 	// provenance with the separately human-owned remediation lifecycle.
 	SLAs []sla.View `json:"slas,omitempty"`
@@ -3196,7 +3203,20 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// Deterministic secret scan over the LIVE workspace: hardcoded credentials, redacted before they
 	// leave the scanner. Ungated Kind=secret findings, publishable like SCA. Best-effort.
 	if opts.scansVulnerabilities() && s.secretScanner != nil {
-		secretReport, serr := s.secretScanner.ScanFiles(ctx, ws.Dir)
+		var (
+			secretReport ports.SecretScanReport
+			verifications []ports.SecretVerification
+			serr error
+		)
+		if s.secretVerificationEnabled {
+			verifier, ok := s.secretScanner.(ports.SecretVerificationScanner)
+			if !ok {
+				return nil, fmt.Errorf("active secret verification enabled but scanner does not support it")
+			}
+			secretReport, verifications, serr = verifier.ScanFilesVerified(ctx, ws.Dir)
+		} else {
+			secretReport, serr = s.secretScanner.ScanFiles(ctx, ws.Dir)
+		}
 		if serr != nil {
 			return nil, fmt.Errorf("scan secrets: %w", serr)
 		}
@@ -3204,6 +3224,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 			result.SourceWarnings = append(result.SourceWarnings, "secret scan incomplete or truncated; secret findings are a lower bound")
 		}
 		result.Findings = append(result.Findings, buildSecretFindings(engagementID, secretReport.Findings, now, s.minSeverity, s.includeTestSecrets)...)
+		applySecretVerification(result, secretReport.Findings, verifications)
 		// Git-history secret scan (opt-in): catch a secret committed then removed, which the working-tree scan
 		// above cannot see. Best-effort: a non-git workspace or a git failure is a warning, never a scan
 		// failure, and the secret is redacted like any other finding.
@@ -4266,6 +4287,7 @@ type scanEvidencePayload struct {
 	AITriageBudget    *AITriageBudget          `json:"ai_triage_budget,omitempty"`
 	AITriageTelemetry *ports.FPTriageTelemetry `json:"ai_triage_telemetry,omitempty"`
 	AITriageAlerts    []AITriageAlert          `json:"ai_triage_alerts,omitempty"`
+	SecretVerifications []ports.SecretVerification `json:"secret_verifications,omitempty"`
 	Manifest          ports.ScanManifest       `json:"manifest"`
 	SealedAt          string                   `json:"sealed_at"`
 	Actor             string                   `json:"actor"`
@@ -4371,6 +4393,7 @@ func scanEvidenceContent(actor string, now time.Time, result *ScanResult) ([]byt
 		AITriageBudget:    result.AITriageBudget,
 		AITriageTelemetry: result.AITriageTelemetry,
 		AITriageAlerts:    result.AITriageAlerts,
+		SecretVerifications: result.SecretVerifications,
 		Manifest:          result.Manifest,
 		SealedAt:          now.UTC().Format(time.RFC3339),
 		Actor:             actor,

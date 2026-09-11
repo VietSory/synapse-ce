@@ -18,6 +18,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/cache/sbomcache"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/llm/openai"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/sandbox"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/secretverify"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/sourcesnippet"
 	asttool "github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/ast"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/bincat"
@@ -368,7 +369,25 @@ func Configure(svc *scauc.Service, cfg config.Config, sb *sandbox.Runner, log *s
 		log.Info("pattern-SAST ENABLED (weak crypto / hardcoded secrets / insecure config)")
 	}
 	if cfg.SecretScanEnabled {
-		svc.SetSecretScanner(secretscan.New()) // deterministic, redacted secret scan in the scan pipeline
+		baseSecrets := secretscan.New()
+		svc.SetSecretScanner(baseSecrets)
+		if verification := cfg.SecretVerification(); verification.Enabled {
+			verifier, err := secretverify.New(baseSecrets, verification.VaultAddr)
+			if err != nil {
+				// Startup validates this configuration. Keep deterministic detection
+				// available if a caller bypasses that validation.
+				log.Error("active secret verification DISABLED: invalid configuration", "err", err)
+			} else {
+				scanner, err := secretverify.WrapScanner(baseSecrets, verifier)
+				if err != nil {
+					log.Error("active secret verification DISABLED: scanner wiring failed", "err", err)
+				} else {
+					svc.SetSecretScanner(scanner)
+					svc.SetSecretVerificationEnabled(true)
+					log.Info("active secret verification ENABLED (read-only, workspace findings only)")
+				}
+			}
+		}
 		log.Info("secret scanning ENABLED (hardcoded credentials; matches redacted)")
 		if cfg.SecretHistoryEnabled {
 			svc.SetSecretHistoryEnabled(true) // also scan git history for committed-then-removed secrets

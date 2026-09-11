@@ -53,6 +53,8 @@ value. Any authenticated role may read it.
 | `SYNAPSE_AUP_VERSION` | `1.0` | Acceptable Use Policy version the operator accepts on first run. |
 | `SYNAPSE_AUP_FILE` | `data/aup-accepted.json` | File-backed path, in-memory mode only. |
 | `SYNAPSE_AUDIT_FILE` | `data/audit.jsonl` | File-backed path, in-memory mode only. |
+| `SYNAPSE_SECRET_VERIFY_ENABLED` | `false` | Opt in to active, read-only verification of newly detected GitHub, AWS, and Vault credentials. Default-off: ordinary secret scanning remains offline and never egresses a detected value. Verification evidence is scrubbed and sealed; rejected or unknown results never remove a finding. |
+| `SYNAPSE_SECRET_VERIFY_VAULT_ADDR` | (none) | Absolute HTTPS Vault API address used only when active secret verification is enabled. Required to verify Vault tokens; this value is an endpoint, not a credential. |
 | `SYNAPSE_MEASURE_CURSOR_SECRET` | Ephemeral in development; required in production | HMAC key for signing Measures pagination cursors; minimum 32 bytes |
 
 ## Observability
