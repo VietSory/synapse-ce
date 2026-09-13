@@ -65,6 +65,80 @@ type PrivilegeEvent struct {
 	Kind    string // setuid | setgid | capset
 }
 
+// RuntimeEvidenceKind names a POSITIVE observation relevant to vulnerability reachability. Runtime
+// evidence is deliberately not another detection Class: it never participates in the blue-team rule
+// matcher, and it has no negative/unreachable state. If the runtime sensor cannot observe something it
+// emits nothing, so an observation gap can never be mistaken for proof that vulnerable code did not run.
+type RuntimeEvidenceKind string
+
+const (
+	RuntimeEvidenceBinaryExec    RuntimeEvidenceKind = "binary_exec"
+	RuntimeEvidenceLibraryLoaded RuntimeEvidenceKind = "library_loaded"
+	RuntimeEvidenceSymbolHit     RuntimeEvidenceKind = "symbol_hit"
+)
+
+// Valid reports whether k is one of the three positive runtime reachability evidence kinds.
+func (k RuntimeEvidenceKind) Valid() bool {
+	switch k {
+	case RuntimeEvidenceBinaryExec, RuntimeEvidenceLibraryLoaded, RuntimeEvidenceSymbolHit:
+		return true
+	default:
+		return false
+	}
+}
+
+// RuntimeEvidence is one positive runtime observation. Path is the concrete executable/shared-object
+// path as seen through the observed process, while Device+Inode pin the underlying file identity so the
+// package-ownership join in #1061 never has to trust a bare path string. Symbol is present only for a
+// symbol_hit; library_loaded must never be promoted to the stronger symbol_hit meaning.
+//
+// Deleted records represent a still-mapped executable/object whose pathname has been unlinked. They
+// retain Device+Inode identity for later package-ownership disambiguation.
+type RuntimeEvidence struct {
+	Kind    RuntimeEvidenceKind
+	At      time.Time
+	Host    shared.ID
+	PID     int
+	UID     int
+	Comm    string
+	Path    string
+	Symbol  string
+	Device  uint64
+	Inode   uint64
+	Deleted bool
+}
+
+// Validate rejects ambiguous or identity-free runtime evidence. There is intentionally no validation
+// path for an absence/negative result: the runtime track is raise-only by construction.
+func (e RuntimeEvidence) Validate() error {
+	if !e.Kind.Valid() {
+		return fmt.Errorf("%w: runtime evidence has unknown kind %q", shared.ErrValidation, e.Kind)
+	}
+	if e.At.IsZero() {
+		return fmt.Errorf("%w: runtime evidence %s has no timestamp", shared.ErrValidation, e.Kind)
+	}
+	if e.Host.IsZero() {
+		return fmt.Errorf("%w: runtime evidence %s has no host", shared.ErrValidation, e.Kind)
+	}
+	if e.PID <= 0 {
+		return fmt.Errorf("%w: runtime evidence %s has non-positive pid %d", shared.ErrValidation, e.Kind, e.PID)
+	}
+	if e.Path == "" {
+		return fmt.Errorf("%w: runtime evidence %s has no path", shared.ErrValidation, e.Kind)
+	}
+	if e.Inode == 0 {
+		return fmt.Errorf("%w: runtime evidence %s has no inode identity", shared.ErrValidation, e.Kind)
+	}
+	if e.Kind == RuntimeEvidenceSymbolHit {
+		if e.Symbol == "" {
+			return fmt.Errorf("%w: symbol_hit runtime evidence has no symbol", shared.ErrValidation)
+		}
+	} else if e.Symbol != "" {
+		return fmt.Errorf("%w: runtime evidence %s must not carry a symbol", shared.ErrValidation, e.Kind)
+	}
+	return nil
+}
+
 // payloadClass reports which class actually carries a payload, and whether exactly one does. An event
 // whose payload does not match its Class (or sets none/several) cannot be matched and is rejected by
 // Validate — a malformed event must never silently match or silently miss.

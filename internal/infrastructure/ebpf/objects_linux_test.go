@@ -26,7 +26,11 @@ type artifactExpectation struct {
 
 var artifactExpectations = []artifactExpectation{
 	{base: "connlog", programs: []string{"connlog_connect4", "connlog_connect6"}, maps: []string{"conn_events"}},
-	{base: "exec", programs: []string{"detect_execve"}, maps: []string{"exec_events"}},
+	{base: "exec", programs: []string{
+		"detect_execve", "runtime_binary_exec", "runtime_mmap_enter", "runtime_mmap_exit", "runtime_symbol_hit",
+	}, maps: []string{
+		"exec_events", "runtime_exec_events", "runtime_mmap_args", "runtime_map_events", "runtime_symbol_events",
+	}},
 	{base: "file", programs: []string{"detect_openat"}, maps: []string{"file_events"}},
 	{base: "priv", programs: []string{"detect_setuid", "detect_setresuid"}, maps: []string{"priv_events"}},
 	{base: "netconn", programs: []string{"detect_udp_sendmsg", "detect_tcp_connect"}, maps: []string{"net_events"}},
