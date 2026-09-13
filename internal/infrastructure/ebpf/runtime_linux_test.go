@@ -38,6 +38,40 @@ func TestParseProcMapLinePreservesStableIdentity(t *testing.T) {
 	}
 }
 
+func TestPathMatchesFileIdentityRejectsPathReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mapped.so")
+	original, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create original: %v", err)
+	}
+	defer original.Close()
+	info, err := original.Stat()
+	if err != nil {
+		t.Fatalf("stat original: %v", err)
+	}
+	device, inode, ok := fileInfoIdentity(info)
+	if !ok || inode == 0 {
+		t.Fatal("original file has no stable identity")
+	}
+	if matches, err := pathMatchesFileIdentity(path, device, inode); err != nil || !matches {
+		t.Fatalf("original identity mismatch: matches=%t err=%v", matches, err)
+	}
+
+	replacement := filepath.Join(dir, "replacement.so")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replace path: %v", err)
+	}
+	if matches, err := pathMatchesFileIdentity(path, device, inode); err != nil {
+		t.Fatalf("check replacement identity: %v", err)
+	} else if matches {
+		t.Fatal("replacement path incorrectly accepted as the original mapping identity")
+	}
+}
+
 func TestParseProcMapLineRejectsMalformedInput(t *testing.T) {
 	for _, line := range []string{
 		"",
@@ -133,32 +167,9 @@ func TestRuntimeSensorCapturesExecStartupLibraryAndSymbolHit(t *testing.T) {
 	}
 	defer func() { _ = sensor.Close() }()
 
-	// Discover a real shared object defining malloc from a live dynamically-linked process. This makes
-	// symbol_hit acceptance exercise the library use-case #1060 needs, rather than only /bin/bash::main.
-	discovery := exec.Command("/bin/bash", "-c", "sleep 5; :")
-	if err := discovery.Start(); err != nil {
-		t.Fatalf("start shared-library discovery fixture: %v", err)
-	}
-	discoveryPID := discovery.Process.Pid
-	defer func() {
-		_ = discovery.Process.Kill()
-		_ = discovery.Wait()
-	}()
-	libraryPath, err := waitForMappedELFDefiningSymbol("/proc", discoveryPID, "malloc", 2*time.Second)
-	if err != nil {
-		t.Fatalf("find mapped shared object defining malloc: %v", err)
-	}
-
-	probe := RuntimeSymbolProbe{Path: libraryPath, Symbol: "malloc"}
-	if err := sensor.AttachSymbolProbe(t.Context(), probe); err != nil {
-		t.Fatalf("attach shared-library malloc uprobe: %v", err)
-	}
-	// Duplicate configuration is deliberately idempotent; it must not install a second symbol observer.
-	if err := sensor.AttachSymbolProbe(t.Context(), probe); err != nil {
-		t.Fatalf("reattach shared-library malloc uprobe: %v", err)
-	}
-
-	cmd := exec.Command("/bin/bash", "-c", "sleep 1; echo >/dev/null")
+	// Start the fixture before attaching the uprobe so the probe can be PID-scoped. Keeping malloc
+	// scoped to this process avoids host-wide libc traffic making the acceptance test noisy/flaky.
+	cmd := exec.Command("/bin/bash", "-c", "sleep 2; printf -v synapse_runtime_probe '%65536s' x; : \"$synapse_runtime_probe\"; sleep 1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start bash fixture: %v", err)
 	}
@@ -167,6 +178,23 @@ func TestRuntimeSensorCapturesExecStartupLibraryAndSymbolHit(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	}()
+
+	libraryPath, err := waitForMappedELFDefiningSymbol("/proc", pid, "malloc", 2*time.Second)
+	if err != nil {
+		t.Fatalf("find mapped shared object defining malloc: %v", err)
+	}
+	probe := RuntimeSymbolProbe{Path: libraryPath, Symbol: "malloc", PID: pid}
+	if err := sensor.AttachSymbolProbe(t.Context(), probe); err != nil {
+		t.Fatalf("attach PID-scoped shared-library malloc uprobe: %v", err)
+	}
+	// Duplicate configuration is deliberately idempotent; it must not install a second symbol observer.
+	if err := sensor.AttachSymbolProbe(t.Context(), probe); err != nil {
+		t.Fatalf("reattach shared-library malloc uprobe: %v", err)
+	}
+	executableDevice, executableInode, err := processExecutableFileIdentity("/proc", pid)
+	if err != nil {
+		t.Fatalf("resolve fixture executable identity: %v", err)
+	}
 
 	var sawExec, sawLibrary, sawSymbol bool
 	deadline := time.NewTimer(5 * time.Second)
@@ -189,6 +217,9 @@ func TestRuntimeSensorCapturesExecStartupLibraryAndSymbolHit(t *testing.T) {
 			case detection.RuntimeEvidenceLibraryLoaded:
 				if event.Symbol != "" {
 					t.Fatalf("library evidence upgraded to symbol evidence: %+v", event)
+				}
+				if event.Device == executableDevice && event.Inode == executableInode {
+					t.Fatalf("PIE main executable misclassified as library_loaded: %+v", event)
 				}
 				sawLibrary = true
 			case detection.RuntimeEvidenceSymbolHit:

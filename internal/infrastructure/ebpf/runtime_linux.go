@@ -365,6 +365,16 @@ func (s *RuntimeSensor) drainRuntimeMap(rd *ringbuf.Reader) {
 		if mapping.Inode == 0 || mapping.Path == "" || !strings.Contains(mapping.Perms, "x") {
 			continue
 		}
+		executableDevice, executableInode, err := processExecutableFileIdentity(s.procRoot, int(raw.PID))
+		if err != nil {
+			s.dropped.Add(1)
+			continue
+		}
+		// ET_DYN is not sufficient to mean shared library: PIE main executables are ET_DYN too.
+		// Compare stable file identity, not a pathname, so binary_exec and library_loaded remain distinct.
+		if mapping.Device == executableDevice && mapping.Inode == executableInode {
+			continue
+		}
 		isShared, err := mappingIsELFDynamic(s.procRoot, int(raw.PID), mapping)
 		if err != nil {
 			s.dropped.Add(1)
@@ -505,15 +515,26 @@ func processExecutableIdentity(procRoot string, pid int) (path string, device, i
 		return "", 0, 0, false, err
 	}
 	path, deleted = splitDeletedPath(path)
-	info, err := os.Stat(linkPath)
-	if err != nil {
+	device, inode, err = processExecutableFileIdentity(procRoot, pid)
+	if err != nil || path == "" {
+		if err == nil {
+			err = fmt.Errorf("executable identity is incomplete")
+		}
 		return "", 0, 0, false, err
 	}
-	device, inode, ok := fileInfoIdentity(info)
-	if !ok || inode == 0 || path == "" {
-		return "", 0, 0, false, fmt.Errorf("executable identity is incomplete")
-	}
 	return path, device, inode, deleted, nil
+}
+
+func processExecutableFileIdentity(procRoot string, pid int) (device, inode uint64, err error) {
+	info, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return 0, 0, err
+	}
+	device, inode, ok := fileInfoIdentity(info)
+	if !ok || inode == 0 {
+		return 0, 0, fmt.Errorf("executable identity is incomplete")
+	}
+	return device, inode, nil
 }
 
 func fileInfoIdentity(info os.FileInfo) (device, inode uint64, ok bool) {
@@ -634,9 +655,20 @@ func mappingIsELFDynamic(procRoot string, pid int, mapping procMapping) (bool, e
 	}
 	rootPath := filepath.Join(procRoot, strconv.Itoa(pid), "root", strings.TrimPrefix(mapping.Path, string(filepath.Separator)))
 	mapFile := filepath.Join(procRoot, strconv.Itoa(pid), "map_files", mapping.Range)
-	candidates := []string{rootPath, mapFile}
+	// map_files names the actual mapped file and therefore survives unlink/path replacement. Prefer it;
+	// root/<path> is only a fallback and is accepted only while it still names the mapping identity.
+	candidates := []string{mapFile, rootPath}
 	var lastErr error
 	for _, candidate := range candidates {
+		matches, err := pathMatchesFileIdentity(candidate, mapping.Device, mapping.Inode)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !matches {
+			lastErr = fmt.Errorf("ELF candidate %s no longer names mapping identity", candidate)
+			continue
+		}
 		object, err := elf.Open(candidate)
 		if err != nil {
 			lastErr = err
@@ -650,4 +682,16 @@ func mappingIsELFDynamic(procRoot string, pid int, mapping procMapping) (bool, e
 		lastErr = fmt.Errorf("no ELF candidate")
 	}
 	return false, lastErr
+}
+
+func pathMatchesFileIdentity(path string, device, inode uint64) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	gotDevice, gotInode, ok := fileInfoIdentity(info)
+	if !ok || gotInode == 0 {
+		return false, fmt.Errorf("file identity is incomplete")
+	}
+	return gotDevice == device && gotInode == inode, nil
 }
