@@ -23,31 +23,13 @@ jobs:
           from pathlib import Path
           p = Path('.github/workflows/tmp-1060-symbol-hit-build.yml')
           s = p.read_text()
-
           start = s.index('      - name: Generate pinned objects\n')
           end = s.index('      - name: Prove pre-existing objects did not drift\n', start)
-          replacement = '''      - name: Generate only the new pinned symbol objects
-        run: |
-          repo_root="$PWD"
-          src_dir="$repo_root/internal/infrastructure/ebpf/c"
-          multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
-          include_flags=(-I "$src_dir")
-          if [[ -n "$multiarch" && -d "/usr/include/$multiarch" ]]; then
-            include_flags+=(-I "/usr/include/$multiarch")
-          fi
-          common_flags=(-target bpfel -O2 -g -Wall -Werror "-fdebug-prefix-map=$repo_root=." "${include_flags[@]}")
-          clang-15 "${common_flags[@]}" -D__TARGET_ARCH_x86 -c "$src_dir/symbol.bpf.c" -o "$src_dir/symbol.bpf.o"
-          llvm-strip-15 -g "$src_dir/symbol.bpf.o"
-          clang-15 "${common_flags[@]}" -D__TARGET_ARCH_arm64 -c "$src_dir/symbol.bpf.c" -o "$src_dir/symbol.arm64.bpf.o"
-          llvm-strip-15 -g "$src_dir/symbol.arm64.bpf.o"
-'''
+          replacement = "      - name: Generate only the new pinned symbol objects\n        run: |\n          repo_root=\"$PWD\"\n          src_dir=\"$repo_root/internal/infrastructure/ebpf/c\"\n          multiarch=\"$(gcc -print-multiarch 2>/dev/null || true)\"\n          include_flags=(-I \"$src_dir\")\n          if [[ -n \"$multiarch\" && -d \"/usr/include/$multiarch\" ]]; then\n            include_flags+=(-I \"/usr/include/$multiarch\")\n          fi\n          common_flags=(-target bpfel -O2 -g -Wall -Werror \"-fdebug-prefix-map=$repo_root=.\" \"${include_flags[@]}\")\n          clang-15 \"${common_flags[@]}\" -D__TARGET_ARCH_x86 -c \"$src_dir/symbol.bpf.c\" -o \"$src_dir/symbol.bpf.o\"\n          llvm-strip-15 -g \"$src_dir/symbol.bpf.o\"\n          clang-15 \"${common_flags[@]}\" -D__TARGET_ARCH_arm64 -c \"$src_dir/symbol.bpf.c\" -o \"$src_dir/symbol.arm64.bpf.o\"\n          llvm-strip-15 -g \"$src_dir/symbol.arm64.bpf.o\"\n"
           s = s[:start] + replacement + s[end:]
-
           start = s.index('      - name: Verify domain and eBPF package\n')
           end = s.index('      - name: Commit candidate and remove temporary workflow\n', start)
-          replacement = '''      - name: Verify domain and eBPF package
-        run: go test -count=1 ./internal/domain/detection ./internal/infrastructure/ebpf
-'''
+          replacement = "      - name: Verify domain and eBPF package\n        run: go test -count=1 ./internal/domain/detection ./internal/infrastructure/ebpf\n"
           s = s[:start] + replacement + s[end:]
           p.write_text(s)
           PY
