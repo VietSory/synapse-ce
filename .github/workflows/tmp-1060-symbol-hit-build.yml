@@ -1,0 +1,752 @@
+name: Temporary 1060 Symbol Hit Build
+
+on:
+  push:
+    branches:
+      - audit/1060-symbol-hit-rebase
+    paths:
+      - .github/workflows/tmp-1060-symbol-hit-build.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: audit/1060-symbol-hit-rebase
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install pinned eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-15 llvm-15 libbpf-dev
+          clang-15 --version
+      - name: Apply symbol-hit implementation
+        run: |
+          cat > internal/infrastructure/ebpf/c/symbol.bpf.c <<'EOF'
+          // symbol.bpf.c — exact positive runtime symbol-hit observer for reachability (#1060).
+          //
+          // Userspace attaches this program as a uprobe to one curated affected function. A hit is
+          // positive evidence only: failure to attach, a full ring buffer, or silence never means the
+          // function did not execute.
+          #include "detect.bpf.h"
+
+          struct runtime_symbol_event {
+          	__u64 ktime_ns;
+          	__u32 pid;
+          	__u32 uid;
+          	char comm[COMM_LEN];
+          };
+
+          struct {
+          	__uint(type, BPF_MAP_TYPE_RINGBUF);
+          	__uint(max_entries, RINGBUF_BYTES);
+          } runtime_symbol_events SEC(".maps");
+
+          SEC("uprobe")
+          int runtime_symbol_hit(void *ctx)
+          {
+          	struct runtime_symbol_event *e = bpf_ringbuf_reserve(&runtime_symbol_events, sizeof(*e), 0);
+          	if (!e)
+          		return 0;
+
+          	e->ktime_ns = bpf_ktime_get_ns();
+          	e->pid = bpf_get_current_pid_tgid() >> 32;
+          	e->uid = bpf_get_current_uid_gid() & 0xffffffff;
+          	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+          	bpf_ringbuf_submit(e, 0);
+          	return 0;
+          }
+
+          char _license[] SEC("license") = "GPL";
+          EOF
+
+          cat > internal/infrastructure/ebpf/symbolhit.go <<'EOF'
+          package ebpf
+
+          import (
+          	"errors"
+          	"fmt"
+          	"path"
+          	"strings"
+
+          	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+          )
+
+          // ErrSymbolHitUnavailable means this host cannot produce positive runtime symbol-hit evidence.
+          // Callers must treat it as no evidence, never as proof that the symbol did not execute.
+          var ErrSymbolHitUnavailable = errors.New("ebpf runtime symbol-hit sensor unavailable")
+
+          // RuntimeSymbolProbe identifies one exact file-backed function to observe. PID==0 is host-wide;
+          // a positive PID scopes the uprobe to one process. Fan-out/package matching belongs to #1061.
+          type RuntimeSymbolProbe struct {
+          	Path   string
+          	Symbol string
+          	PID    int
+          }
+
+          func (p RuntimeSymbolProbe) validate() (RuntimeSymbolProbe, error) {
+          	p.Path = path.Clean(strings.TrimSpace(p.Path))
+          	p.Symbol = strings.TrimSpace(p.Symbol)
+          	if p.Path == "." || p.Path == "" || !strings.HasPrefix(p.Path, "/") {
+          		return RuntimeSymbolProbe{}, fmt.Errorf("%w: runtime symbol probe path must be an absolute Linux path", shared.ErrValidation)
+          	}
+          	if p.Symbol == "" {
+          		return RuntimeSymbolProbe{}, fmt.Errorf("%w: runtime symbol probe requires a symbol", shared.ErrValidation)
+          	}
+          	if p.PID < 0 {
+          		return RuntimeSymbolProbe{}, fmt.Errorf("%w: runtime symbol probe has negative pid %d", shared.ErrValidation, p.PID)
+          	}
+          	return p, nil
+          }
+          EOF
+
+          cat > internal/infrastructure/ebpf/symbolhit_linux.go <<'EOF'
+          //go:build linux
+
+          package ebpf
+
+          import (
+          	"bytes"
+          	"context"
+          	"encoding/binary"
+          	"fmt"
+          	"os"
+          	"path/filepath"
+          	"runtime"
+          	"strconv"
+          	"sync"
+          	"syscall"
+          	"time"
+
+          	"github.com/cilium/ebpf"
+          	"github.com/cilium/ebpf/link"
+          	"github.com/cilium/ebpf/ringbuf"
+          	"github.com/cilium/ebpf/rlimit"
+
+          	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
+          )
+
+          type rawRuntimeSymbol struct {
+          	Ktime uint64
+          	PID   uint32
+          	UID   uint32
+          	Comm  [16]byte
+          }
+
+          // SymbolHitSensor observes one exact uprobe target. The opened target FD stays live for the
+          // sensor lifetime, and Device+Inode are captured from that FD before attachment. Path is only
+          // the attach-time label; stable identity is authoritative if the pathname is later replaced.
+          type SymbolHitSensor struct {
+          	mu        sync.Mutex
+          	probe     RuntimeSymbolProbe
+          	events    chan detection.RuntimeEvidence
+          	closeDone chan struct{}
+          	started   bool
+          	closed    bool
+
+          	file   *os.File
+          	device uint64
+          	inode  uint64
+          	coll   *ebpf.Collection
+          	lnk    link.Link
+          	rd     *ringbuf.Reader
+          	epoch  time.Time
+          	wg     sync.WaitGroup
+          }
+
+          func NewSymbolHitSensor(raw RuntimeSymbolProbe) (*SymbolHitSensor, error) {
+          	probe, err := raw.validate()
+          	if err != nil {
+          		return nil, err
+          	}
+          	return &SymbolHitSensor{
+          		probe: probe, events: make(chan detection.RuntimeEvidence, 1024), closeDone: make(chan struct{}),
+          	}, nil
+          }
+
+          // Start pins the target by FD and attaches exactly one uprobe. Setup is serialized with Close,
+          // so a concurrent shutdown can never close the event channel underneath a late-started drain.
+          func (s *SymbolHitSensor) Start(ctx context.Context) error {
+          	s.mu.Lock()
+          	defer s.mu.Unlock()
+          	if s.closed {
+          		return fmt.Errorf("%w: sensor already closed", ErrSymbolHitUnavailable)
+          	}
+          	if s.started {
+          		return fmt.Errorf("%w: sensor already started", ErrSymbolHitUnavailable)
+          	}
+          	if err := ctx.Err(); err != nil {
+          		return fmt.Errorf("%w: %v", ErrSymbolHitUnavailable, err)
+          	}
+          	if embeddedObjectArch == "" {
+          		return fmt.Errorf("%w: no architecture-matched object for linux/%s", ErrSymbolHitUnavailable, runtime.GOARCH)
+          	}
+          	if err := rlimit.RemoveMemlock(); err != nil {
+          		return fmt.Errorf("%w: memlock: %v", ErrSymbolHitUnavailable, err)
+          	}
+
+          	file, err := os.Open(s.probe.Path)
+          	if err != nil {
+          		return fmt.Errorf("%w: open target %s: %v", ErrSymbolHitUnavailable, s.probe.Path, err)
+          	}
+          	cleanupFile := true
+          	defer func() {
+          		if cleanupFile {
+          			_ = file.Close()
+          		}
+          	}()
+          	info, err := file.Stat()
+          	if err != nil {
+          		return fmt.Errorf("%w: stat target %s: %v", ErrSymbolHitUnavailable, s.probe.Path, err)
+          	}
+          	if !info.Mode().IsRegular() {
+          		return fmt.Errorf("%w: target %s is not a regular file", ErrSymbolHitUnavailable, s.probe.Path)
+          	}
+          	device, inode, ok := symbolFileIdentity(info)
+          	if !ok || inode == 0 {
+          		return fmt.Errorf("%w: target %s has no stable file identity", ErrSymbolHitUnavailable, s.probe.Path)
+          	}
+
+          	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(symbolObj))
+          	if err != nil {
+          		return fmt.Errorf("%w: load symbol spec: %v", ErrSymbolHitUnavailable, err)
+          	}
+          	if spec.Programs["runtime_symbol_hit"] == nil || spec.Maps["runtime_symbol_events"] == nil {
+          		return fmt.Errorf("%w: symbol object is missing required program/map", ErrSymbolHitUnavailable)
+          	}
+          	coll, err := ebpf.NewCollection(spec)
+          	if err != nil {
+          		return fmt.Errorf("%w: load symbol program: %v", ErrSymbolHitUnavailable, err)
+          	}
+          	cleanupColl := true
+          	defer func() {
+          		if cleanupColl {
+          			coll.Close()
+          		}
+          	}()
+
+          	pinnedPath := filepath.Join("/proc/self/fd", strconv.Itoa(int(file.Fd())))
+          	executable, err := link.OpenExecutable(pinnedPath)
+          	if err != nil {
+          		return fmt.Errorf("%w: open pinned uprobe target: %v", ErrSymbolHitUnavailable, err)
+          	}
+          	s.epoch = captureKtimeEpoch()
+          	lnk, err := executable.Uprobe(s.probe.Symbol, coll.Programs["runtime_symbol_hit"], &link.UprobeOptions{PID: s.probe.PID})
+          	if err != nil {
+          		return fmt.Errorf("%w: attach %s:%s: %v", ErrSymbolHitUnavailable, s.probe.Path, s.probe.Symbol, err)
+          	}
+          	cleanupLink := true
+          	defer func() {
+          		if cleanupLink {
+          			_ = lnk.Close()
+          		}
+          	}()
+          	if err := ctx.Err(); err != nil {
+          		return fmt.Errorf("%w: %v", ErrSymbolHitUnavailable, err)
+          	}
+          	rd, err := ringbuf.NewReader(coll.Maps["runtime_symbol_events"])
+          	if err != nil {
+          		return fmt.Errorf("%w: symbol ring buffer: %v", ErrSymbolHitUnavailable, err)
+          	}
+
+          	s.file, s.device, s.inode = file, device, inode
+          	s.coll, s.lnk, s.rd = coll, lnk, rd
+          	s.started = true
+          	cleanupFile, cleanupColl, cleanupLink = false, false, false
+          	s.wg.Add(1)
+          	go s.drain()
+          	return nil
+          }
+
+          func (s *SymbolHitSensor) drain() {
+          	defer s.wg.Done()
+          	for {
+          		rec, err := s.rd.Read()
+          		if err != nil {
+          			return
+          		}
+          		var raw rawRuntimeSymbol
+          		if binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &raw) != nil {
+          			continue
+          		}
+          		ev := detection.RuntimeEvidence{
+          			Kind: detection.RuntimeEvidenceSymbolHit,
+          			At: kernelOccurredAt(s.epoch, raw.Ktime), PID: raw.PID, UID: raw.UID,
+          			Comm: cstr(raw.Comm[:]), Path: s.probe.Path, Symbol: s.probe.Symbol,
+          			Device: s.device, Inode: s.inode,
+          		}
+          		if ev.Validate() != nil {
+          			continue
+          		}
+          		select {
+          		case s.events <- ev:
+          		default:
+          			// Raise-only: losing a positive event can only forgo an urgency raise. It can never
+          			// become a negative/not_reachable claim.
+          		}
+          	}
+          }
+
+          func symbolFileIdentity(info os.FileInfo) (device, inode uint64, ok bool) {
+          	stat, ok := info.Sys().(*syscall.Stat_t)
+          	if !ok || stat == nil {
+          		return 0, 0, false
+          	}
+          	return uint64(stat.Dev), uint64(stat.Ino), true
+          }
+
+          func (s *SymbolHitSensor) Events() <-chan detection.RuntimeEvidence { return s.events }
+
+          // Close is synchronous and idempotent. Concurrent callers wait for the first close to finish.
+          func (s *SymbolHitSensor) Close() error {
+          	s.mu.Lock()
+          	if s.closed {
+          		done := s.closeDone
+          		s.mu.Unlock()
+          		<-done
+          		return nil
+          	}
+          	s.closed = true
+          	rd := s.rd
+          	s.mu.Unlock()
+
+          	if rd != nil {
+          		_ = rd.Close()
+          	}
+          	s.wg.Wait()
+
+          	s.mu.Lock()
+          	if s.lnk != nil {
+          		_ = s.lnk.Close()
+          		s.lnk = nil
+          	}
+          	if s.coll != nil {
+          		s.coll.Close()
+          		s.coll = nil
+          	}
+          	if s.file != nil {
+          		_ = s.file.Close()
+          		s.file = nil
+          	}
+          	close(s.events)
+          	close(s.closeDone)
+          	s.mu.Unlock()
+          	return nil
+          }
+          EOF
+
+          cat > internal/infrastructure/ebpf/symbolhit_other.go <<'EOF'
+          //go:build !linux
+
+          package ebpf
+
+          import (
+          	"context"
+          	"fmt"
+          	"sync"
+
+          	"github.com/KKloudTarus/synapse-ce/internal/domain/detection"
+          )
+
+          type SymbolHitSensor struct {
+          	events chan detection.RuntimeEvidence
+          	once   sync.Once
+          }
+
+          func NewSymbolHitSensor(raw RuntimeSymbolProbe) (*SymbolHitSensor, error) {
+          	if _, err := raw.validate(); err != nil {
+          		return nil, err
+          	}
+          	return &SymbolHitSensor{events: make(chan detection.RuntimeEvidence)}, nil
+          }
+
+          func (s *SymbolHitSensor) Start(ctx context.Context) error {
+          	if err := ctx.Err(); err != nil {
+          		return fmt.Errorf("%w: %v", ErrSymbolHitUnavailable, err)
+          	}
+          	return fmt.Errorf("%w: Linux only", ErrSymbolHitUnavailable)
+          }
+
+          func (s *SymbolHitSensor) Events() <-chan detection.RuntimeEvidence { return s.events }
+          func (s *SymbolHitSensor) Close() error {
+          	s.once.Do(func() { close(s.events) })
+          	return nil
+          }
+          EOF
+
+          cat > internal/infrastructure/ebpf/symbolhit_test.go <<'EOF'
+          package ebpf
+
+          import (
+          	"errors"
+          	"testing"
+
+          	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+          )
+
+          func TestRuntimeSymbolProbeValidation(t *testing.T) {
+          	valid, err := (RuntimeSymbolProbe{Path: " /usr/lib/libexample.so ", Symbol: " vulnerable ", PID: 7}).validate()
+          	if err != nil {
+          		t.Fatalf("valid probe rejected: %v", err)
+          	}
+          	if valid.Path != "/usr/lib/libexample.so" || valid.Symbol != "vulnerable" || valid.PID != 7 {
+          		t.Fatalf("probe normalization = %+v", valid)
+          	}
+          	for _, probe := range []RuntimeSymbolProbe{
+          		{Path: "relative/lib.so", Symbol: "f"},
+          		{Path: "/usr/lib/lib.so", Symbol: ""},
+          		{Path: "/usr/lib/lib.so", Symbol: "f", PID: -1},
+          	} {
+          		if _, err := probe.validate(); !errors.Is(err, shared.ErrValidation) {
+          			t.Fatalf("expected validation error for %+v, got %v", probe, err)
+          		}
+          	}
+          }
+          EOF
+
+          cat > internal/infrastructure/ebpf/symbolhit_linux_test.go <<'EOF'
+          //go:build linux
+
+          package ebpf
+
+          import (
+          	"bufio"
+          	"debug/elf"
+          	"fmt"
+          	"os"
+          	"os/exec"
+          	"path/filepath"
+          	"strconv"
+          	"strings"
+          	"testing"
+          	"time"
+          )
+
+          func mappedELFDefiningRuntimeSymbol(procRoot string, pid int, symbol string) (string, error) {
+          	f, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "maps"))
+          	if err != nil {
+          		return "", err
+          	}
+          	defer f.Close()
+          	seen := map[string]bool{}
+          	s := bufio.NewScanner(f)
+          	for s.Scan() {
+          		fields := strings.Fields(s.Text())
+          		if len(fields) < 6 || !strings.Contains(fields[1], "x") {
+          			continue
+          		}
+          		path := strings.Join(fields[5:], " ")
+          		path = strings.TrimSuffix(path, " (deleted)")
+          		if !filepath.IsAbs(path) || seen[path] {
+          			continue
+          		}
+          		seen[path] = true
+          		candidate := filepath.Join(procRoot, strconv.Itoa(pid), "root", strings.TrimPrefix(path, "/"))
+          		obj, err := elf.Open(candidate)
+          		if err != nil {
+          			continue
+          		}
+          		syms, err := obj.DynamicSymbols()
+          		_ = obj.Close()
+          		if err != nil {
+          			continue
+          		}
+          		for _, sym := range syms {
+          			if sym.Name == symbol && sym.Value != 0 && elf.ST_TYPE(sym.Info) == elf.STT_FUNC {
+          				return path, nil
+          			}
+          		}
+          	}
+          	if err := s.Err(); err != nil {
+          		return "", err
+          	}
+          	return "", fmt.Errorf("no mapped object defines %q", symbol)
+          }
+
+          func waitForRuntimeSymbol(procRoot string, pid int, symbol string, timeout time.Duration) (string, error) {
+          	deadline := time.Now().Add(timeout)
+          	var last error
+          	for time.Now().Before(deadline) {
+          		path, err := mappedELFDefiningRuntimeSymbol(procRoot, pid, symbol)
+          		if err == nil {
+          			return path, nil
+          		}
+          		last = err
+          		time.Sleep(10 * time.Millisecond)
+          	}
+          	return "", last
+          }
+
+          func TestSymbolHitSensorCapturesPIDScopedSharedLibrarySymbol(t *testing.T) {
+          	if os.Geteuid() != 0 {
+          		t.Skip("symbol-hit sensor needs root; run under sudo")
+          	}
+          	if embeddedObjectArch == "" {
+          		t.Skip("no embedded eBPF object for this architecture")
+          	}
+          	if _, err := os.Stat("/bin/bash"); err != nil {
+          		t.Skipf("/bin/bash unavailable: %v", err)
+          	}
+
+          	cmd := exec.Command("/bin/bash", "-c", "sleep 2; printf -v synapse_runtime_probe '%65536s' x; : \"$synapse_runtime_probe\"; sleep 1")
+          	if err := cmd.Start(); err != nil {
+          		t.Fatalf("start fixture: %v", err)
+          	}
+          	pid := cmd.Process.Pid
+          	defer func() {
+          		_ = cmd.Process.Kill()
+          		_ = cmd.Wait()
+          	}()
+
+          	libraryPath, err := waitForRuntimeSymbol("/proc", pid, "malloc", 2*time.Second)
+          	if err != nil {
+          		t.Fatalf("find mapped shared object defining malloc: %v", err)
+          	}
+          	sensor, err := NewSymbolHitSensor(RuntimeSymbolProbe{Path: libraryPath, Symbol: "malloc", PID: pid})
+          	if err != nil {
+          		t.Fatalf("new sensor: %v", err)
+          	}
+          	if err := sensor.Start(t.Context()); err != nil {
+          		t.Fatalf("start symbol-hit sensor: %v", err)
+          	}
+          	defer func() { _ = sensor.Close() }()
+
+          	deadline := time.NewTimer(5 * time.Second)
+          	defer deadline.Stop()
+          	for {
+          		select {
+          		case ev, ok := <-sensor.Events():
+          			if !ok {
+          				t.Fatal("event stream closed before symbol hit")
+          			}
+          			if err := ev.Validate(); err != nil {
+          				t.Fatalf("invalid symbol-hit evidence: %+v: %v", ev, err)
+          			}
+          			if ev.PID != uint32(pid) {
+          				t.Fatalf("PID-scoped uprobe emitted another pid: got %d want %d", ev.PID, pid)
+          			}
+          			if ev.Symbol != "malloc" || ev.Path != libraryPath || ev.Inode == 0 {
+          				t.Fatalf("wrong symbol evidence: %+v", ev)
+          			}
+          			return
+          		case <-deadline.C:
+          			t.Fatalf("timed out waiting for %s:malloc hit from pid %d", libraryPath, pid)
+          		}
+          	}
+          }
+          EOF
+
+          cat > internal/domain/detection/runtime_evidence_test.go <<'EOF'
+          package detection
+
+          import (
+          	"errors"
+          	"testing"
+          	"time"
+
+          	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+          )
+
+          func TestRuntimeEvidenceKindsStayDistinct(t *testing.T) {
+          	if RuntimeEvidenceBinaryExec == RuntimeEvidenceLibraryLoaded || RuntimeEvidenceLibraryLoaded == RuntimeEvidenceSymbolHit || RuntimeEvidenceBinaryExec == RuntimeEvidenceSymbolHit {
+          		t.Fatal("runtime evidence kinds must remain distinct")
+          	}
+          	for _, kind := range []RuntimeEvidenceKind{RuntimeEvidenceBinaryExec, RuntimeEvidenceLibraryLoaded, RuntimeEvidenceSymbolHit} {
+          		if !kind.Valid() {
+          			t.Fatalf("known runtime kind %q rejected", kind)
+          		}
+          	}
+          }
+
+          func TestRuntimeEvidenceValidationIsRaiseOnly(t *testing.T) {
+          	base := RuntimeEvidence{Kind: RuntimeEvidenceSymbolHit, At: time.Unix(100, 0).UTC(), PID: 42, Path: "/usr/lib/libx.so", Symbol: "vuln", Inode: 7}
+          	if err := base.Validate(); err != nil {
+          		t.Fatalf("valid symbol hit rejected: %v", err)
+          	}
+          	for _, mutate := range []func(*RuntimeEvidence){
+          		func(e *RuntimeEvidence) { e.Kind = "not_reachable" },
+          		func(e *RuntimeEvidence) { e.At = time.Time{} },
+          		func(e *RuntimeEvidence) { e.PID = 0 },
+          		func(e *RuntimeEvidence) { e.Path = "" },
+          		func(e *RuntimeEvidence) { e.Symbol = "" },
+          		func(e *RuntimeEvidence) { e.Inode = 0 },
+          	} {
+          		ev := base
+          		mutate(&ev)
+          		if err := ev.Validate(); !errors.Is(err, shared.ErrValidation) {
+          			t.Fatalf("expected validation error, got %v for %+v", err, ev)
+          		}
+          	}
+          	weak := RuntimeEvidence{Kind: RuntimeEvidenceLibraryLoaded, At: base.At, PID: 42, Path: "/usr/lib/libx.so"}
+          	weak.Symbol = "must-not-upgrade"
+          	if err := weak.Validate(); !errors.Is(err, shared.ErrValidation) {
+          		t.Fatalf("weak evidence carrying symbol must be rejected, got %v", err)
+          	}
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('internal/domain/detection/event.go')
+          s = p.read_text()
+          anchor = '''type PrivilegeEvent struct {
+          \tPID     int
+          \tComm    string
+          \tFromUID int
+          \tToUID   int
+          \tCap     string // capability gained, if any
+          \tKind    string // setuid | setgid | capset
+          }
+          '''
+          addition = anchor + '''
+          // RuntimeEvidenceKind names positive runtime observations used by the reachability track. These
+          // are deliberately separate from detection Class and contain no negative/not-reachable state.
+          type RuntimeEvidenceKind string
+
+          const (
+          \tRuntimeEvidenceBinaryExec    RuntimeEvidenceKind = "binary_exec"
+          \tRuntimeEvidenceLibraryLoaded RuntimeEvidenceKind = "library_loaded"
+          \tRuntimeEvidenceSymbolHit     RuntimeEvidenceKind = "symbol_hit"
+          )
+
+          func (k RuntimeEvidenceKind) Valid() bool {
+          \tswitch k {
+          \tcase RuntimeEvidenceBinaryExec, RuntimeEvidenceLibraryLoaded, RuntimeEvidenceSymbolHit:
+          \t\treturn true
+          \tdefault:
+          \t\treturn false
+          \t}
+          }
+
+          // RuntimeEvidence is the normalized positive telemetry shape consumed by the runtime
+          // reachability join. Existing exec/library producers can be normalized by #1061; symbol_hit is
+          // emitted directly in this shape. Device+Inode, when present, are authoritative over Path.
+          type RuntimeEvidence struct {
+          \tKind   RuntimeEvidenceKind
+          \tAt     time.Time
+          \tPID    uint32
+          \tUID    uint32
+          \tComm   string
+          \tPath   string
+          \tSymbol string
+          \tDevice uint64
+          \tInode  uint64
+          }
+
+          // Validate accepts positive evidence only. symbol_hit requires stable file identity and an exact
+          // symbol; weaker evidence must never carry a symbol and thereby masquerade as execution proof.
+          func (e RuntimeEvidence) Validate() error {
+          \tif !e.Kind.Valid() {
+          \t\treturn fmt.Errorf("%w: unknown runtime evidence kind %q", shared.ErrValidation, e.Kind)
+          \t}
+          \tif e.At.IsZero() {
+          \t\treturn fmt.Errorf("%w: runtime evidence %s has no timestamp", shared.ErrValidation, e.Kind)
+          \t}
+          \tif e.PID == 0 {
+          \t\treturn fmt.Errorf("%w: runtime evidence %s has no pid", shared.ErrValidation, e.Kind)
+          \t}
+          \tif e.Path == "" {
+          \t\treturn fmt.Errorf("%w: runtime evidence %s has no path", shared.ErrValidation, e.Kind)
+          \t}
+          \tif e.Kind == RuntimeEvidenceSymbolHit {
+          \t\tif e.Symbol == "" {
+          \t\t\treturn fmt.Errorf("%w: symbol_hit has no symbol", shared.ErrValidation)
+          \t\t}
+          \t\tif e.Inode == 0 {
+          \t\t\treturn fmt.Errorf("%w: symbol_hit has no stable inode identity", shared.ErrValidation)
+          \t\t}
+          \t} else if e.Symbol != "" {
+          \t\treturn fmt.Errorf("%w: runtime evidence %s must not carry a symbol", shared.ErrValidation, e.Kind)
+          \t}
+          \treturn nil
+          }
+          '''
+          if anchor not in s:
+              raise SystemExit('event.go insertion anchor not found')
+          p.write_text(s.replace(anchor, addition, 1))
+
+          p = Path('scripts/ebpf/build.sh')
+          s = p.read_text()
+          old = 'sources=(connlog exec file priv netconn library)'
+          if old not in s:
+              raise SystemExit('build.sh source list anchor not found')
+          p.write_text(s.replace(old, 'sources=(connlog exec file priv netconn library symbol)', 1))
+
+          for path, old, new in [
+              ('internal/infrastructure/ebpf/objects_amd64.go', '//go:embed c/library.bpf.o\nvar libraryObj []byte', '//go:embed c/library.bpf.o\nvar libraryObj []byte\n\n//go:embed c/symbol.bpf.o\nvar symbolObj []byte'),
+              ('internal/infrastructure/ebpf/objects_arm64.go', '//go:embed c/library.arm64.bpf.o\nvar libraryObj []byte', '//go:embed c/library.arm64.bpf.o\nvar libraryObj []byte\n\n//go:embed c/symbol.arm64.bpf.o\nvar symbolObj []byte'),
+              ('internal/infrastructure/ebpf/objects_unsupported.go', '\tlibraryObj []byte\n', '\tlibraryObj []byte\n\tsymbolObj  []byte\n'),
+          ]:
+              p = Path(path); s = p.read_text()
+              if old not in s: raise SystemExit(f'{path} anchor not found')
+              p.write_text(s.replace(old, new, 1))
+
+          p = Path('internal/infrastructure/ebpf/objects_linux_test.go')
+          s = p.read_text()
+          old = '\t{base: "exec", programs: []string{"detect_execve"}, maps: []string{"exec_events"}},\n'
+          new = old + '\t{base: "symbol", programs: []string{"runtime_symbol_hit"}, maps: []string{"runtime_symbol_events"}},\n'
+          if old not in s: raise SystemExit('object expectation anchor not found')
+          s = s.replace(old, new, 1)
+          old = '\t\t"netconn": netObj,\n'
+          new = old + '\t\t"symbol":  symbolObj,\n'
+          if old not in s: raise SystemExit('native embed anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('.github/workflows/ebpf-compat.yml')
+          s = p.read_text()
+          old = "-run '^Test(SensorLoadsAndDisablesEachClassIndependently|NetworkSensorCapturesNativeKprobeArguments)$' -v"
+          new = "-run '^Test(SensorLoadsAndDisablesEachClassIndependently|NetworkSensorCapturesNativeKprobeArguments|SymbolHitSensorCapturesPIDScopedSharedLibrarySymbol)$' -v"
+          if old not in s: raise SystemExit('ebpf compat test regex anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('CHANGELOG.md')
+          s = p.read_text()
+          anchor = '- **Runtime library-load eBPF capture (EPIC #1042, #1060).**'
+          idx = s.find(anchor)
+          if idx < 0: raise SystemExit('changelog runtime anchor not found')
+          bullet = '- **Runtime affected-symbol hit capture (EPIC #1042, #1060).** Adds a standalone, raise-only `SymbolHitSensor` that attaches a PID-scoped or host-wide uprobe to one curated function in an exact file-backed object and emits `symbol_hit` only when that function actually executes. The target is pinned by an open file descriptor before attachment and evidence carries its device/inode identity, so later pathname replacement cannot relabel the hit. The new domain runtime-evidence vocabulary keeps `binary_exec`, `library_loaded`, and `symbol_hit` distinct and has no negative state. Together with the existing exec telemetry and the library-load producer from #1107, this completes the D.1 capture primitives consumed by #1061.\n\n'
+          p.write_text(s[:idx] + bullet + s[idx:])
+          PY
+
+          gofmt -w internal/domain/detection/event.go internal/domain/detection/runtime_evidence_test.go internal/infrastructure/ebpf/symbolhit.go internal/infrastructure/ebpf/symbolhit_linux.go internal/infrastructure/ebpf/symbolhit_other.go internal/infrastructure/ebpf/symbolhit_test.go internal/infrastructure/ebpf/symbolhit_linux_test.go internal/infrastructure/ebpf/objects_amd64.go internal/infrastructure/ebpf/objects_arm64.go internal/infrastructure/ebpf/objects_unsupported.go internal/infrastructure/ebpf/objects_linux_test.go
+
+      - name: Generate pinned objects
+        env:
+          CLANG: clang-15
+          LLVM_STRIP: llvm-strip-15
+        run: make ebpf-generate
+      - name: Prove pre-existing objects did not drift
+        run: |
+          git diff --exit-code -- \
+            internal/infrastructure/ebpf/c/connlog.bpf.o internal/infrastructure/ebpf/c/connlog.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/exec.bpf.o internal/infrastructure/ebpf/c/exec.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/file.bpf.o internal/infrastructure/ebpf/c/file.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/priv.bpf.o internal/infrastructure/ebpf/c/priv.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/netconn.bpf.o internal/infrastructure/ebpf/c/netconn.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/library.bpf.o internal/infrastructure/ebpf/c/library.arm64.bpf.o
+      - name: Verify domain and eBPF package
+        env:
+          CLANG: clang-15
+          LLVM_STRIP: llvm-strip-15
+        run: go test -count=1 ./internal/domain/detection ./internal/infrastructure/ebpf
+      - name: Commit candidate and remove temporary workflow
+        run: |
+          git config user.name "Vietsory"
+          git config user.email "121284939+VietSory@users.noreply.github.com"
+          git rm .github/workflows/tmp-1060-symbol-hit-build.yml
+          git add CHANGELOG.md scripts/ebpf/build.sh .github/workflows/ebpf-compat.yml \
+            internal/domain/detection/event.go internal/domain/detection/runtime_evidence_test.go \
+            internal/infrastructure/ebpf/c/symbol.bpf.c internal/infrastructure/ebpf/c/symbol.bpf.o internal/infrastructure/ebpf/c/symbol.arm64.bpf.o \
+            internal/infrastructure/ebpf/symbolhit.go internal/infrastructure/ebpf/symbolhit_linux.go internal/infrastructure/ebpf/symbolhit_other.go \
+            internal/infrastructure/ebpf/symbolhit_test.go internal/infrastructure/ebpf/symbolhit_linux_test.go \
+            internal/infrastructure/ebpf/objects_amd64.go internal/infrastructure/ebpf/objects_arm64.go internal/infrastructure/ebpf/objects_unsupported.go internal/infrastructure/ebpf/objects_linux_test.go
+          git commit -m "feat(reach): add runtime symbol-hit uprobe evidence"
+          git push origin HEAD:audit/1060-symbol-hit-rebase
