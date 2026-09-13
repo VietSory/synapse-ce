@@ -23,3 +23,6 @@ var netObj []byte
 
 //go:embed c/library.bpf.o
 var libraryObj []byte
+
+//go:embed c/symbol.bpf.o
+var symbolObj []byte

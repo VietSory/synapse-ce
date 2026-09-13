@@ -13,4 +13,5 @@ var (
 	privObj    []byte
 	netObj     []byte
 	libraryObj []byte
+	symbolObj  []byte
 )

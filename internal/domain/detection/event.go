@@ -65,6 +65,68 @@ type PrivilegeEvent struct {
 	Kind    string // setuid | setgid | capset
 }
 
+// RuntimeEvidenceKind names positive runtime observations used by the reachability track. These
+// are deliberately separate from detection Class and contain no negative/not-reachable state.
+type RuntimeEvidenceKind string
+
+const (
+	RuntimeEvidenceBinaryExec    RuntimeEvidenceKind = "binary_exec"
+	RuntimeEvidenceLibraryLoaded RuntimeEvidenceKind = "library_loaded"
+	RuntimeEvidenceSymbolHit     RuntimeEvidenceKind = "symbol_hit"
+)
+
+func (k RuntimeEvidenceKind) Valid() bool {
+	switch k {
+	case RuntimeEvidenceBinaryExec, RuntimeEvidenceLibraryLoaded, RuntimeEvidenceSymbolHit:
+		return true
+	default:
+		return false
+	}
+}
+
+// RuntimeEvidence is the normalized positive telemetry shape consumed by the runtime
+// reachability join. Existing exec/library producers can be normalized by #1061; symbol_hit is
+// emitted directly in this shape. Device+Inode, when present, are authoritative over Path.
+type RuntimeEvidence struct {
+	Kind   RuntimeEvidenceKind
+	At     time.Time
+	PID    uint32
+	UID    uint32
+	Comm   string
+	Path   string
+	Symbol string
+	Device uint64
+	Inode  uint64
+}
+
+// Validate accepts positive evidence only. symbol_hit requires stable file identity and an exact
+// symbol; weaker evidence must never carry a symbol and thereby masquerade as execution proof.
+func (e RuntimeEvidence) Validate() error {
+	if !e.Kind.Valid() {
+		return fmt.Errorf("%w: unknown runtime evidence kind %q", shared.ErrValidation, e.Kind)
+	}
+	if e.At.IsZero() {
+		return fmt.Errorf("%w: runtime evidence %s has no timestamp", shared.ErrValidation, e.Kind)
+	}
+	if e.PID == 0 {
+		return fmt.Errorf("%w: runtime evidence %s has no pid", shared.ErrValidation, e.Kind)
+	}
+	if e.Path == "" {
+		return fmt.Errorf("%w: runtime evidence %s has no path", shared.ErrValidation, e.Kind)
+	}
+	if e.Kind == RuntimeEvidenceSymbolHit {
+		if e.Symbol == "" {
+			return fmt.Errorf("%w: symbol_hit has no symbol", shared.ErrValidation)
+		}
+		if e.Inode == 0 {
+			return fmt.Errorf("%w: symbol_hit has no stable inode identity", shared.ErrValidation)
+		}
+	} else if e.Symbol != "" {
+		return fmt.Errorf("%w: runtime evidence %s must not carry a symbol", shared.ErrValidation, e.Kind)
+	}
+	return nil
+}
+
 // payloadClass reports which class actually carries a payload, and whether exactly one does. An event
 // whose payload does not match its Class (or sets none/several) cannot be matched and is rejected by
 // Validate — a malformed event must never silently match or silently miss.
