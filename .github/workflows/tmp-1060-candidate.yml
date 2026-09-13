@@ -1,0 +1,82 @@
+name: Temporary 1060 Candidate
+
+on:
+  push:
+    branches:
+      - audit/1060-symbol-hit-rebase
+    paths:
+      - .github/workflows/tmp-1060-candidate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: audit/1060-symbol-hit-rebase
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install pinned eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-15 llvm-15 libbpf-dev
+      - name: Apply feature source from audited builder
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('.github/workflows/tmp-1060-symbol-hit-build.yml').read_text()
+          step = s.index('      - name: Apply symbol-hit implementation\n')
+          start = s.index('        run: |\n', step) + len('        run: |\n')
+          end = s.index('\n      - name: Generate pinned objects\n', start)
+          lines = []
+          for line in s[start:end].splitlines():
+              lines.append(line[10:] if line.startswith('          ') else line)
+          Path('/tmp/apply-symbol-hit.sh').write_text('\n'.join(lines) + '\n')
+          PY
+          bash /tmp/apply-symbol-hit.sh
+      - name: Generate only new symbol objects
+        run: |
+          repo_root="$PWD"
+          src_dir="$repo_root/internal/infrastructure/ebpf/c"
+          multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+          include_flags=(-I "$src_dir")
+          if [[ -n "$multiarch" && -d "/usr/include/$multiarch" ]]; then
+            include_flags+=(-I "/usr/include/$multiarch")
+          fi
+          common_flags=(-target bpfel -O2 -g -Wall -Werror "-fdebug-prefix-map=$repo_root=." "${include_flags[@]}")
+          clang-15 "${common_flags[@]}" -D__TARGET_ARCH_x86 -c "$src_dir/symbol.bpf.c" -o "$src_dir/symbol.bpf.o"
+          llvm-strip-15 -g "$src_dir/symbol.bpf.o"
+          clang-15 "${common_flags[@]}" -D__TARGET_ARCH_arm64 -c "$src_dir/symbol.bpf.c" -o "$src_dir/symbol.arm64.bpf.o"
+          llvm-strip-15 -g "$src_dir/symbol.arm64.bpf.o"
+      - name: Prove old eBPF objects are untouched
+        run: |
+          git diff --exit-code -- \
+            internal/infrastructure/ebpf/c/connlog.bpf.o internal/infrastructure/ebpf/c/connlog.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/exec.bpf.o internal/infrastructure/ebpf/c/exec.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/file.bpf.o internal/infrastructure/ebpf/c/file.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/priv.bpf.o internal/infrastructure/ebpf/c/priv.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/netconn.bpf.o internal/infrastructure/ebpf/c/netconn.arm64.bpf.o \
+            internal/infrastructure/ebpf/c/library.bpf.o internal/infrastructure/ebpf/c/library.arm64.bpf.o
+      - name: Package verification
+        run: go test -count=1 ./internal/domain/detection ./internal/infrastructure/ebpf
+      - name: Native symbol-hit acceptance
+        run: sudo --preserve-env=PATH go test -count=1 ./internal/infrastructure/ebpf -run '^TestSymbolHitSensorCapturesPIDScopedSharedLibrarySymbol$' -v
+      - name: Commit feature files only
+        run: |
+          git config user.name "Vietsory"
+          git config user.email "121284939+VietSory@users.noreply.github.com"
+          git add CHANGELOG.md scripts/ebpf/build.sh \
+            internal/domain/detection/event.go internal/domain/detection/runtime_evidence_test.go \
+            internal/infrastructure/ebpf/c/symbol.bpf.c internal/infrastructure/ebpf/c/symbol.bpf.o internal/infrastructure/ebpf/c/symbol.arm64.bpf.o \
+            internal/infrastructure/ebpf/symbolhit.go internal/infrastructure/ebpf/symbolhit_linux.go internal/infrastructure/ebpf/symbolhit_other.go \
+            internal/infrastructure/ebpf/symbolhit_test.go internal/infrastructure/ebpf/symbolhit_linux_test.go \
+            internal/infrastructure/ebpf/objects_amd64.go internal/infrastructure/ebpf/objects_arm64.go \
+            internal/infrastructure/ebpf/objects_unsupported.go internal/infrastructure/ebpf/objects_linux_test.go
+          git commit -m "feat(reach): add runtime symbol-hit uprobe evidence"
+          git push origin HEAD:audit/1060-symbol-hit-rebase
