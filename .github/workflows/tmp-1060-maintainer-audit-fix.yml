@@ -1,0 +1,297 @@
+name: Temporary 1060 Maintainer Audit Fix
+
+on:
+  push:
+    branches:
+      - feat/1060-runtime-ebpf-evidence
+    paths:
+      - .github/workflows/tmp-1060-maintainer-audit-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/1060-runtime-ebpf-evidence
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply strict-audit fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('internal/infrastructure/ebpf/runtime_linux.go')
+          s = p.read_text()
+
+          old = '''\t\tif mapping.Inode == 0 || mapping.Path == "" || !strings.Contains(mapping.Perms, "x") {
+          \t\t\tcontinue
+          \t\t}
+          \t\tisShared, err := mappingIsELFDynamic(s.procRoot, int(raw.PID), mapping)
+          '''
+          new = '''\t\tif mapping.Inode == 0 || mapping.Path == "" || !strings.Contains(mapping.Perms, "x") {
+          \t\t\tcontinue
+          \t\t}
+          \t\texecutableDevice, executableInode, err := processExecutableFileIdentity(s.procRoot, int(raw.PID))
+          \t\tif err != nil {
+          \t\t\ts.dropped.Add(1)
+          \t\t\tcontinue
+          \t\t}
+          \t\t// ET_DYN is not sufficient to mean shared library: PIE main executables are ET_DYN too.
+          \t\t// Compare stable file identity, not a pathname, so binary_exec and library_loaded remain distinct.
+          \t\tif mapping.Device == executableDevice && mapping.Inode == executableInode {
+          \t\t\tcontinue
+          \t\t}
+          \t\tisShared, err := mappingIsELFDynamic(s.procRoot, int(raw.PID), mapping)
+          '''
+          if old not in s:
+              raise SystemExit('drainRuntimeMap anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''func processExecutableIdentity(procRoot string, pid int) (path string, device, inode uint64, deleted bool, err error) {
+          \tlinkPath := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
+          \tpath, err = os.Readlink(linkPath)
+          \tif err != nil {
+          \t\treturn "", 0, 0, false, err
+          \t}
+          \tpath, deleted = splitDeletedPath(path)
+          \tinfo, err := os.Stat(linkPath)
+          \tif err != nil {
+          \t\treturn "", 0, 0, false, err
+          \t}
+          \tdevice, inode, ok := fileInfoIdentity(info)
+          \tif !ok || inode == 0 || path == "" {
+          \t\treturn "", 0, 0, false, fmt.Errorf("executable identity is incomplete")
+          \t}
+          \treturn path, device, inode, deleted, nil
+          }
+          '''
+          new = '''func processExecutableIdentity(procRoot string, pid int) (path string, device, inode uint64, deleted bool, err error) {
+          \tlinkPath := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
+          \tpath, err = os.Readlink(linkPath)
+          \tif err != nil {
+          \t\treturn "", 0, 0, false, err
+          \t}
+          \tpath, deleted = splitDeletedPath(path)
+          \tdevice, inode, err = processExecutableFileIdentity(procRoot, pid)
+          \tif err != nil || path == "" {
+          \t\tif err == nil {
+          \t\t\terr = fmt.Errorf("executable identity is incomplete")
+          \t\t}
+          \t\treturn "", 0, 0, false, err
+          \t}
+          \treturn path, device, inode, deleted, nil
+          }
+
+          func processExecutableFileIdentity(procRoot string, pid int) (device, inode uint64, err error) {
+          \tinfo, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(pid), "exe"))
+          \tif err != nil {
+          \t\treturn 0, 0, err
+          \t}
+          \tdevice, inode, ok := fileInfoIdentity(info)
+          \tif !ok || inode == 0 {
+          \t\treturn 0, 0, fmt.Errorf("executable identity is incomplete")
+          \t}
+          \treturn device, inode, nil
+          }
+          '''
+          if old not in s:
+              raise SystemExit('processExecutableIdentity anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''func mappingIsELFDynamic(procRoot string, pid int, mapping procMapping) (bool, error) {
+          \tif mapping.Path == "" || !filepath.IsAbs(mapping.Path) {
+          \t\treturn false, nil
+          \t}
+          \trootPath := filepath.Join(procRoot, strconv.Itoa(pid), "root", strings.TrimPrefix(mapping.Path, string(filepath.Separator)))
+          \tmapFile := filepath.Join(procRoot, strconv.Itoa(pid), "map_files", mapping.Range)
+          \tcandidates := []string{rootPath, mapFile}
+          \tvar lastErr error
+          \tfor _, candidate := range candidates {
+          \t\tobject, err := elf.Open(candidate)
+          \t\tif err != nil {
+          \t\t\tlastErr = err
+          \t\t\tcontinue
+          \t\t}
+          \t\tisDynamic := object.FileHeader.Type == elf.ET_DYN
+          \t\t_ = object.Close()
+          \t\treturn isDynamic, nil
+          \t}
+          \tif lastErr == nil {
+          \t\tlastErr = fmt.Errorf("no ELF candidate")
+          \t}
+          \treturn false, lastErr
+          }
+          '''
+          new = '''func mappingIsELFDynamic(procRoot string, pid int, mapping procMapping) (bool, error) {
+          \tif mapping.Path == "" || !filepath.IsAbs(mapping.Path) {
+          \t\treturn false, nil
+          \t}
+          \trootPath := filepath.Join(procRoot, strconv.Itoa(pid), "root", strings.TrimPrefix(mapping.Path, string(filepath.Separator)))
+          \tmapFile := filepath.Join(procRoot, strconv.Itoa(pid), "map_files", mapping.Range)
+          \t// map_files names the actual mapped file and therefore survives unlink/path replacement. Prefer it;
+          \t// root/<path> is only a fallback and is accepted only while it still names the mapping identity.
+          \tcandidates := []string{mapFile, rootPath}
+          \tvar lastErr error
+          \tfor _, candidate := range candidates {
+          \t\tmatches, err := pathMatchesFileIdentity(candidate, mapping.Device, mapping.Inode)
+          \t\tif err != nil {
+          \t\t\tlastErr = err
+          \t\t\tcontinue
+          \t\t}
+          \t\tif !matches {
+          \t\t\tlastErr = fmt.Errorf("ELF candidate %s no longer names mapping identity", candidate)
+          \t\t\tcontinue
+          \t\t}
+          \t\tobject, err := elf.Open(candidate)
+          \t\tif err != nil {
+          \t\t\tlastErr = err
+          \t\t\tcontinue
+          \t\t}
+          \t\tisDynamic := object.FileHeader.Type == elf.ET_DYN
+          \t\t_ = object.Close()
+          \t\treturn isDynamic, nil
+          \t}
+          \tif lastErr == nil {
+          \t\tlastErr = fmt.Errorf("no ELF candidate")
+          \t}
+          \treturn false, lastErr
+          }
+
+          func pathMatchesFileIdentity(path string, device, inode uint64) (bool, error) {
+          \tinfo, err := os.Stat(path)
+          \tif err != nil {
+          \t\treturn false, err
+          \t}
+          \tgotDevice, gotInode, ok := fileInfoIdentity(info)
+          \tif !ok || gotInode == 0 {
+          \t\treturn false, fmt.Errorf("file identity is incomplete")
+          \t}
+          \treturn gotDevice == device && gotInode == inode, nil
+          }
+          '''
+          if old not in s:
+              raise SystemExit('mappingIsELFDynamic anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('internal/infrastructure/ebpf/runtime_linux_test.go')
+          s = p.read_text()
+          marker = '''func TestParseProcMapLineRejectsMalformedInput(t *testing.T) {
+          '''
+          test = '''func TestPathMatchesFileIdentityRejectsPathReplacement(t *testing.T) {
+          \tdir := t.TempDir()
+          \tpath := filepath.Join(dir, "mapped.so")
+          \toriginal, err := os.Create(path)
+          \tif err != nil {
+          \t\tt.Fatalf("create original: %v", err)
+          \t}
+          \tdefer original.Close()
+          \tinfo, err := original.Stat()
+          \tif err != nil {
+          \t\tt.Fatalf("stat original: %v", err)
+          \t}
+          \tdevice, inode, ok := fileInfoIdentity(info)
+          \tif !ok || inode == 0 {
+          \t\tt.Fatal("original file has no stable identity")
+          \t}
+          \tif matches, err := pathMatchesFileIdentity(path, device, inode); err != nil || !matches {
+          \t\tt.Fatalf("original identity mismatch: matches=%t err=%v", matches, err)
+          \t}
+
+          \treplacement := filepath.Join(dir, "replacement.so")
+          \tif err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+          \t\tt.Fatalf("write replacement: %v", err)
+          \t}
+          \tif err := os.Rename(replacement, path); err != nil {
+          \t\tt.Fatalf("replace path: %v", err)
+          \t}
+          \tif matches, err := pathMatchesFileIdentity(path, device, inode); err != nil {
+          \t\tt.Fatalf("check replacement identity: %v", err)
+          \t} else if matches {
+          \t\tt.Fatal("replacement path incorrectly accepted as the original mapping identity")
+          \t}
+          }
+
+          '''
+          if marker not in s:
+              raise SystemExit('test insertion anchor not found')
+          s = s.replace(marker, test + marker, 1)
+
+          start = s.index('// Discover a real shared object defining malloc')
+          end = s.index('\n\tvar sawExec, sawLibrary, sawSymbol bool', start)
+          replacement = '''// Start the fixture before attaching the uprobe so the probe can be PID-scoped. Keeping malloc
+          \t// scoped to this process avoids host-wide libc traffic making the acceptance test noisy/flaky.
+          \tcmd := exec.Command("/bin/bash", "-c", "sleep 2; printf -v synapse_runtime_probe '%65536s' x; : \\\"$synapse_runtime_probe\\\"; sleep 1")
+          \tif err := cmd.Start(); err != nil {
+          \t\tt.Fatalf("start bash fixture: %v", err)
+          \t}
+          \tpid := cmd.Process.Pid
+          \tdefer func() {
+          \t\t_ = cmd.Process.Kill()
+          \t\t_ = cmd.Wait()
+          \t}()
+
+          \tlibraryPath, err := waitForMappedELFDefiningSymbol("/proc", pid, "malloc", 2*time.Second)
+          \tif err != nil {
+          \t\tt.Fatalf("find mapped shared object defining malloc: %v", err)
+          \t}
+          \tprobe := RuntimeSymbolProbe{Path: libraryPath, Symbol: "malloc", PID: pid}
+          \tif err := sensor.AttachSymbolProbe(t.Context(), probe); err != nil {
+          \t\tt.Fatalf("attach PID-scoped shared-library malloc uprobe: %v", err)
+          \t}
+          \t// Duplicate configuration is deliberately idempotent; it must not install a second symbol observer.
+          \tif err := sensor.AttachSymbolProbe(t.Context(), probe); err != nil {
+          \t\tt.Fatalf("reattach shared-library malloc uprobe: %v", err)
+          \t}
+          \texecutableDevice, executableInode, err := processExecutableFileIdentity("/proc", pid)
+          \tif err != nil {
+          \t\tt.Fatalf("resolve fixture executable identity: %v", err)
+          \t}
+          '''
+          s = s[:start] + replacement + s[end:]
+
+          old = '''\t\t\tcase detection.RuntimeEvidenceLibraryLoaded:
+          \t\t\t\tif event.Symbol != "" {
+          \t\t\t\t\tt.Fatalf("library evidence upgraded to symbol evidence: %+v", event)
+          \t\t\t\t}
+          \t\t\t\tsawLibrary = true
+          '''
+          new = '''\t\t\tcase detection.RuntimeEvidenceLibraryLoaded:
+          \t\t\t\tif event.Symbol != "" {
+          \t\t\t\t\tt.Fatalf("library evidence upgraded to symbol evidence: %+v", event)
+          \t\t\t\t}
+          \t\t\t\tif event.Device == executableDevice && event.Inode == executableInode {
+          \t\t\t\t\tt.Fatalf("PIE main executable misclassified as library_loaded: %+v", event)
+          \t\t\t\t}
+          \t\t\t\tsawLibrary = true
+          '''
+          if old not in s:
+              raise SystemExit('library assertion anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          gofmt -w internal/infrastructure/ebpf/runtime_linux.go internal/infrastructure/ebpf/runtime_linux_test.go
+
+      - name: Unit verification
+        run: go test -count=1 ./internal/domain/detection ./internal/infrastructure/ebpf
+
+      - name: Native runtime acceptance
+        run: sudo --preserve-env=PATH go test -count=1 ./internal/infrastructure/ebpf -run '^TestRuntimeSensorCapturesExecStartupLibraryAndSymbolHit$' -v
+
+      - name: Commit audited fix and remove temporary workflow
+        run: |
+          git config user.name "Vietsory"
+          git config user.email "121284939+VietSory@users.noreply.github.com"
+          git rm .github/workflows/tmp-1060-maintainer-audit-fix.yml
+          git add internal/infrastructure/ebpf/runtime_linux.go internal/infrastructure/ebpf/runtime_linux_test.go
+          git commit -m "fix(reach): harden runtime evidence identity"
+          git push origin HEAD:feat/1060-runtime-ebpf-evidence
