@@ -994,7 +994,7 @@ func Load() Config {
 		PoetryBin:                                   getenv("SYNAPSE_POETRY_BIN", "poetry"),
 		ManifestRegistryHosts:                       splitList(getenv("SYNAPSE_MANIFEST_REGISTRY_HOSTS", "")),
 		BundlerResolveEnabled:                       getbool("SYNAPSE_BUNDLER_RESOLVE_ENABLED", false),
-		JVMReachabilityEnabled:                      getbool("SYNAPSE_JVM_REACHABILITY_ENABLED", true),
+		JVMReachabilityEnabled:                      getbool("SYNAPSE_JVM_REACHABILITY_ENABLED", false),
 		JarHashOnlineEnabled:                        getbool("SYNAPSE_JARHASH_ONLINE_ENABLED", false),
 		JarHashBaseURL:                              getenv("SYNAPSE_JARHASH_BASE_URL", ""),
 		JarHashDBPath:                               getenv("SYNAPSE_JARHASH_DB_PATH", ""),
