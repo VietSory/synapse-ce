@@ -108,9 +108,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "synapse-cli:", err)
 			os.Exit(1)
 		}
-	// validate-sarif is named for what it does: it reports what the server would accept or refuse and
-	// writes nothing. `import-sarif` is kept as an alias so an existing invocation still works, but it
-	// prints the same "persisted: false" contract rather than implying an ingest happened.
 	case "validate-sarif", "import-sarif":
 		if err := validateSARIF(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "synapse-cli:", err)
@@ -118,7 +115,7 @@ func main() {
 		}
 	case "sync-advisories":
 		if len(os.Args) < 3 {
-			usage() // missing <dir> exits 2, consistent with scan's missing-path
+			usage()
 		}
 		if err := syncAdvisories(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "synapse-cli:", err)
@@ -126,7 +123,7 @@ func main() {
 		}
 	case "build-cvss-db":
 		if len(os.Args) < 4 {
-			usage() // need <out> + at least one NVD json input
+			usage()
 		}
 		if err := runBuildCVSSDB(os.Args[2], os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "synapse-cli:", err)
@@ -134,7 +131,7 @@ func main() {
 		}
 	case "inventory":
 		if len(os.Args) < 3 {
-			usage() // missing <dir> exits 2
+			usage()
 		}
 		if err := runInventory(os.Args[2]); err != nil {
 			fmt.Fprintln(os.Stderr, "synapse-cli:", err)
@@ -198,8 +195,6 @@ func main() {
 	}
 }
 
-// runDoctor prints an offline pre-scan readiness report. It never runs a scan, installs tools, or uses
-// the network; tool probes are limited to PATH lookups and cheap version commands.
 func runDoctor(args []string) error {
 	dir := "."
 	pathSet := false
@@ -299,12 +294,6 @@ func printable(s string) string {
 	}, s)
 }
 
-// runInventory prints a per-language code-size inventory for a local source tree (the Phase-0
-// code-quality surface). Pure-Go, read-only; no engagement/DB needed.
-// runBuildCVSSDB parses NVD JSON feed files into a compact local CVSS database (JSONL, gzip if the
-// out path ends .gz) that the offline severity enricher (SYNAPSE_NVD_CVSS_DB) reads to backfill CVSS
-// with no network and no rate limit. Inputs may be plain or .gz NVD JSON (API 2.0 or legacy 1.1) and
-// may be shell globs.
 func runBuildCVSSDB(out string, inputs []string) error {
 	var paths []string
 	for _, in := range inputs {
@@ -337,10 +326,7 @@ func runBuildCVSSDB(out string, inputs []string) error {
 }
 
 func runInventory(dir string) error {
-	// Wire the synapse-ast sidecar so non-Go languages get accurate function counts too. If the binary is
-	// absent or built without the tree-sitter backend, the provider reports unavailable and the inventory
-	// falls back to Go-only function counts – no error.
-	astBin := os.Getenv("SYNAPSE_AST_BIN") // else "synapse-ast" in PATH
+	astBin := os.Getenv("SYNAPSE_AST_BIN")
 	inv, err := codeinventory.New(codeinventory.WithASTProvider(ast.New(astBin))).Inventory(context.Background(), dir)
 	if err != nil {
 		return fmt.Errorf("inventory: %w", err)
@@ -367,12 +353,9 @@ func runInventory(dir string) error {
 	return nil
 }
 
-// runMetrics prints per-function complexity (cyclomatic + cognitive) hotspots for a local source tree and
-// optionally gates on cyclomatic complexity. Backed by the synapse-ast sidecar; if it is absent or built
-// without the tree-sitter backend, this reports that and (for the gate) does not fail.
 func runMetrics(args []string) error {
 	dir := args[0]
-	failOn := 0 // 0 = no gate
+	failOn := 0
 	top := 10
 	for i := 1; i < len(args); i++ {
 		switch {
@@ -427,15 +410,13 @@ func runMetrics(args []string) error {
 	return nil
 }
 
-// runDuplication prints a copy-paste (clone) report for a local source tree and optionally gates on the
-// duplicated-lines density. Pure-Go, read-only; no DB, no sidecar.
 func runDuplication(args []string) error {
 	dir := args[0]
 	if strings.HasPrefix(dir, "-") {
 		return fmt.Errorf("first argument must be a path, got option %q", dir)
 	}
 	minTokens := duplication.DefaultMinTokens
-	failOnPct := -1.0 // <0 = no gate
+	failOnPct := -1.0
 	top := 10
 	for i := 1; i < len(args); i++ {
 		switch {
@@ -464,7 +445,6 @@ func runDuplication(args []string) error {
 			return fmt.Errorf("unknown or incomplete option %q", args[i])
 		}
 	}
-
 	report, err := duplication.New(minTokens).Duplication(context.Background(), dir)
 	if err != nil {
 		return fmt.Errorf("duplication: %w", err)
@@ -473,8 +453,7 @@ func runDuplication(args []string) error {
 	if report.Truncated {
 		fmt.Println("  ! result truncated at the file cap; metrics are a lower bound")
 	}
-	fmt.Printf("  duplicated blocks: %d · duplicated lines: %d / %d code lines · density: %.1f%% · files: %d (min-tokens %d)\n",
-		len(report.Blocks), report.DuplicatedLines, report.TotalLines, report.Density(), report.Files, minTokens)
+	fmt.Printf("  duplicated blocks: %d · duplicated lines: %d / %d code lines · density: %.1f%% · files: %d (min-tokens %d)\n", len(report.Blocks), report.DuplicatedLines, report.TotalLines, report.Density(), report.Files, minTokens)
 	if len(report.Blocks) > 0 {
 		fmt.Printf("  top %d duplicated blocks:\n", top)
 		for _, b := range report.TopBlocks(top) {
@@ -490,15 +469,8 @@ func runDuplication(args []string) error {
 	return nil
 }
 
-// runQuality runs the maintainability + reliability rules (plus duplication and, when the synapse-ast
-// sidecar is available, high-complexity) over a local source tree and reports the findings, optionally
-// emitting SARIF or gating on severity.
 func runQuality(args []string) error { return runQualityTo(os.Stdout, args) }
 
-// runQualityTo is runQuality with the report stream injected, so a test can assert what was written.
-// The report (SARIF or the human summary) is ALWAYS written before the --fail-on decision: the gate
-// result belongs in the exit code, and a caller redirecting stdout to a file must still get the report
-// on a failing gate.
 func runQualityTo(w io.Writer, args []string) error {
 	dir := args[0]
 	if strings.HasPrefix(dir, "-") {
@@ -535,21 +507,12 @@ func runQualityTo(w io.Writer, args []string) error {
 			return fmt.Errorf("invalid --fail-on %q (want critical|high|medium|low|info)", failOn)
 		}
 	}
-
 	astProvider := ast.New(os.Getenv("SYNAPSE_AST_BIN"))
-	svc := codequality.New(
-		codeanalysis.New(),
-		codequality.WithDuplication(duplication.New(0)),
-		codequality.WithComplexity(astProvider, complexityMin),
-		codequality.WithBugs(astProvider),
-		codequality.WithStructuralAnalyzer(astProvider),
-		codequality.WithTestScopedSmells(includeTestSmells),
-	)
+	svc := codequality.New(codeanalysis.New(), codequality.WithDuplication(duplication.New(0)), codequality.WithComplexity(astProvider, complexityMin), codequality.WithBugs(astProvider), codequality.WithStructuralAnalyzer(astProvider), codequality.WithTestScopedSmells(includeTestSmells))
 	findings, err := svc.Analyze(context.Background(), dir)
 	if err != nil {
 		return fmt.Errorf("quality: %w", err)
 	}
-
 	if sarifOut {
 		out, merr := exportuc.MarshalSARIF(findings, buildinfo.App(), exportuc.SARIFOptions{})
 		if merr != nil {
@@ -576,9 +539,6 @@ func runQualityTo(w io.Writer, args []string) error {
 			return fmt.Errorf("write report: %w", werr)
 		}
 	}
-
-	// Gate LAST, on purpose: the report above is already out, so a non-zero exit never costs the caller
-	// the findings it is exiting over.
 	if failOn != "" {
 		gate := shared.SeverityRank(shared.Severity(failOn))
 		over := 0
@@ -594,9 +554,6 @@ func runQualityTo(w io.Writer, args []string) error {
 	return nil
 }
 
-// runRating computes the deterministic A-E health grades (security / reliability / maintainability) and
-// the technical-debt estimate for a local source tree, from the code-quality findings + first-party SAST
-// + the code-size inventory. Read-only, no DB.
 func runRating(args []string) error {
 	dir := args[0]
 	if strings.HasPrefix(dir, "-") {
@@ -615,31 +572,18 @@ func runRating(args []string) error {
 			return fmt.Errorf("unknown or incomplete option %q", args[i])
 		}
 	}
-	// The standalone CLI is the single-tenant deployment boundary. Bind the same canonical tenant
-	// the API's in-memory mode uses so optional tenant-aware services (including SLA governance) do
-	// not need a weaker persistence contract just for dogfood scans.
 	ctx := shared.WithTenant(context.Background(), shared.DefaultTenant)
-
 	inv, err := codeinventory.New().Inventory(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("inventory: %w", err)
 	}
 	loc := inv.Totals().CodeLines
-
 	astProvider := ast.New(os.Getenv("SYNAPSE_AST_BIN"))
-	svc := codequality.New(
-		codeanalysis.New(),
-		codequality.WithDuplication(duplication.New(0)),
-		codequality.WithComplexity(astProvider, codequality.DefaultComplexityThreshold),
-		codequality.WithBugs(astProvider),
-		codequality.WithStructuralAnalyzer(astProvider),
-	)
+	svc := codequality.New(codeanalysis.New(), codequality.WithDuplication(duplication.New(0)), codequality.WithComplexity(astProvider, codequality.DefaultComplexityThreshold), codequality.WithBugs(astProvider), codequality.WithStructuralAnalyzer(astProvider))
 	findings, err := svc.Analyze(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("code quality: %w", err)
 	}
-	// First-party security signal for the security grade (SCA dep vulns fold in when rating runs over a
-	// full scan's findings; this standalone command uses the SAST analyzer).
 	sastRaws, err := sast.New().AnalyzeSource(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("sast: %w", err)
@@ -647,9 +591,7 @@ func runRating(args []string) error {
 	for _, sr := range sastRaws {
 		findings = append(findings, finding.Finding{Kind: finding.KindSAST, Severity: sr.Severity})
 	}
-
 	rep := rating.Compute(findings, loc)
-
 	if jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -663,7 +605,6 @@ func runRating(args []string) error {
 		fmt.Printf("  maintainability: %s\n", rep.Maintainability)
 		fmt.Printf("  technical debt:  %dh %dm (ratio %.1f%% of ~%d code lines)\n", rep.TechDebtMinutes/60, rep.TechDebtMinutes%60, rep.DebtRatioPct, rep.LinesOfCode)
 	}
-
 	if failBelow != "" {
 		order := map[string]int{"A": 1, "B": 2, "C": 3, "D": 4, "E": 5}
 		threshold, ok := order[failBelow]
@@ -683,11 +624,6 @@ func runRating(args []string) error {
 	return nil
 }
 
-// runGate is the unified Clean-as-You-Code quality gate: it gathers the code-quality + first-party
-// security findings, applies the rule profile (.synapse-rules.yaml), optionally scopes to new/changed
-// code (git diff vs a base ref), builds the metric snapshot (+ ratings + duplication density), and
-// evaluates the quality gate (.synapse-gate.yaml or the built-in default). Exits non-zero when the gate
-// fails, printing the exact conditions that failed.
 func runGate(args []string) error {
 	dir := args[0]
 	if strings.HasPrefix(dir, "-") {
@@ -726,16 +662,8 @@ func runGate(args []string) error {
 		}
 	}
 	ctx := context.Background()
-
-	// 1. Gather findings: code quality (quality+reliability, + duplication/complexity bridges) + SAST.
 	astProvider := ast.New(os.Getenv("SYNAPSE_AST_BIN"))
-	svc := codequality.New(
-		codeanalysis.New(),
-		codequality.WithDuplication(duplication.New(0)),
-		codequality.WithComplexity(astProvider, codequality.DefaultComplexityThreshold),
-		codequality.WithBugs(astProvider),
-		codequality.WithStructuralAnalyzer(astProvider),
-	)
+	svc := codequality.New(codeanalysis.New(), codequality.WithDuplication(duplication.New(0)), codequality.WithComplexity(astProvider, codequality.DefaultComplexityThreshold), codequality.WithBugs(astProvider), codequality.WithStructuralAnalyzer(astProvider))
 	findings, err := svc.Analyze(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("code quality: %w", err)
@@ -745,25 +673,13 @@ func runGate(args []string) error {
 		return fmt.Errorf("sast: %w", err)
 	}
 	for _, sr := range sastRaws {
-		findings = append(findings, finding.Finding{
-			Kind:           finding.KindSAST,
-			Severity:       sr.Severity,
-			RuleKey:        sr.RuleID,
-			DedupKey:       "sast:" + sr.RuleID + ":" + sr.File + ":" + strconv.Itoa(sr.Line),
-			SourceLocation: sastLocation(sr.File, sr.Line),
-		})
+		findings = append(findings, finding.Finding{Kind: finding.KindSAST, Severity: sr.Severity, RuleKey: sr.RuleID, DedupKey: "sast:" + sr.RuleID + ":" + sr.File + ":" + strconv.Itoa(sr.Line), SourceLocation: sastLocation(sr.File, sr.Line)})
 	}
-
-	// 2. Apply the rule profile (enable/disable + severity override).
 	profile, _, err := qualityprofile.LoadProfile(rulesPath)
 	if err != nil {
 		return fmt.Errorf("load rules profile: %w", err)
 	}
 	findings = profile.Apply(findings)
-
-	// 3. Scope to new/changed code if requested (Clean as You Code): the gate then judges only what this
-	// change introduced. Ratings are computed over the SAME scope, so "reliability_rating A" means "no
-	// reliability issue in new code", the adoption-friendly semantic.
 	scoped := findings
 	var changed gitdiff.ChangedLines
 	if newCodeOnly {
@@ -774,8 +690,6 @@ func runGate(args []string) error {
 		}
 		scoped = filterNewCode(findings, changed)
 	}
-
-	// 4. Ratings over the scope + whole-codebase duplication density.
 	inv, err := codeinventory.New().Inventory(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("inventory: %w", err)
@@ -792,8 +706,6 @@ func runGate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("duplication: %w", err)
 	}
-
-	// 5. Coverage (optional): overall line coverage, or coverage on new code when scoping to a diff.
 	coverageMeasured := false
 	var snapCoverage float64
 	if covPath != "" {
@@ -806,8 +718,6 @@ func runGate(args []string) error {
 				snapCoverage = pct
 				coverageMeasured = true
 			} else {
-				// No changed line matched the report (paths differ, or the diff touched no measurable
-				// line). Note it so an operator is not misled by a silently-absent coverage condition.
 				fmt.Fprintln(os.Stderr, "synapse-cli: note: coverage report matched no changed line (check its paths are repo-relative); coverage condition skipped")
 			}
 		} else {
@@ -815,8 +725,6 @@ func runGate(args []string) error {
 			coverageMeasured = true
 		}
 	}
-
-	// 6. Build the snapshot + evaluate the gate.
 	snap := buildSnapshot(scoped, rep, dupRep.Density())
 	if coverageMeasured {
 		snap[qualitygate.MetricCoveragePct] = snapCoverage
@@ -829,7 +737,6 @@ func runGate(args []string) error {
 		gate = qualitygate.Default()
 	}
 	result := qualitygate.Evaluate(gate, snap)
-
 	scopeLabel := "whole codebase"
 	if newCodeOnly {
 		scopeLabel = "new code vs " + base
@@ -838,8 +745,9 @@ func runGate(args []string) error {
 	if coverageMeasured {
 		covLabel = fmt.Sprintf("%.1f%%", snapCoverage)
 	}
+	summary := qualitygate.RenderMarkdown(scopeLabel, rep, dupRep.Density(), covLabel, result)
 	if markdown {
-		printGateMarkdown(dir, scopeLabel, rep, dupRep.Density(), covLabel, result)
+		fmt.Print(summary)
 	} else {
 		fmt.Printf("\nSynapse quality gate – %s (%s)\n", dir, scopeLabel)
 		fmt.Printf("  ratings: security %s · reliability %s · maintainability %s · duplication %.1f%% · coverage %s\n", rep.Security, rep.Reliability, rep.Maintainability, dupRep.Density(), covLabel)
@@ -851,6 +759,7 @@ func runGate(args []string) error {
 			fmt.Printf("  [%s] %s (actual %g)\n", mark, cr.Condition, cr.Actual)
 		}
 	}
+	triggerGateDecorationFromEnv(ctx, cliPRDecorator, result, summary, scoped)
 	if !result.Passed {
 		return fmt.Errorf("quality gate FAILED: %d condition(s) not met", len(result.Failures()))
 	}
@@ -860,8 +769,6 @@ func runGate(args []string) error {
 	return nil
 }
 
-// runCoverage parses a coverage report (lcov / cobertura / jacoco, auto-detected) and prints the overall
-// line coverage + the least-covered files, optionally gating on a minimum percentage.
 func runCoverage(args []string) error {
 	path := args[0]
 	if strings.HasPrefix(path, "-") {
@@ -908,35 +815,12 @@ func runCoverage(args []string) error {
 	return nil
 }
 
-// printGateMarkdown renders the gate result as a Markdown summary suitable for a PR comment (gh pr comment
-// --body-file). Failed conditions are listed first so a reviewer sees the blockers immediately.
-func printGateMarkdown(dir, scope string, rep rating.Report, dupDensity float64, coverage string, result qualitygate.Result) {
-	status := "✅ **Quality gate passed**"
-	if !result.Passed {
-		status = "❌ **Quality gate failed**"
-	}
-	fmt.Printf("## Synapse quality gate\n\n%s _(%s)_\n\n", status, scope)
-	fmt.Printf("| Rating | Grade |\n|---|---|\n| Security | %s |\n| Reliability | %s |\n| Maintainability | %s |\n", rep.Security, rep.Reliability, rep.Maintainability)
-	fmt.Printf("\nDuplication %.1f%% · Coverage %s\n\n", dupDensity, coverage)
-	fmt.Printf("| Condition | Actual | |\n|---|---|---|\n")
-	for _, cr := range result.Results {
-		mark := "✅"
-		if !cr.Passed {
-			mark = "❌"
-		}
-		fmt.Printf("| `%s` | %g | %s |\n", cr.Condition, cr.Actual, mark)
-	}
-}
-
-// filterNewCode keeps only line-anchored findings that sit on a changed line.
-// SourceLocation (when valid) is preferred over DedupKey parsing so text:*
-// findings that carry structured SourceLocation are handled correctly.
 func filterNewCode(findings []finding.Finding, changed gitdiff.ChangedLines) []finding.Finding {
 	var out []finding.Finding
 	for _, f := range findings {
 		file, line, ok := findingFileLine(f)
 		if !ok {
-			continue // not line-anchored (e.g. SCA): not attributable to a changed line
+			continue
 		}
 		if changed.Has(file, line) {
 			out = append(out, f)
@@ -945,8 +829,6 @@ func filterNewCode(findings []finding.Finding, changed gitdiff.ChangedLines) []f
 	return out
 }
 
-// findingFileLine extracts the source file and 1-based line from a finding.
-// SourceLocation is preferred when it validates; DedupKey is the fallback.
 func findingFileLine(f finding.Finding) (string, int, bool) {
 	if f.SourceLocation != nil && f.SourceLocation.Validate() == nil {
 		return f.SourceLocation.File, f.SourceLocation.StartLine, true
@@ -963,13 +845,9 @@ func sastLocation(file string, line int) *finding.SourceLocation {
 	return &finding.SourceLocation{File: file, StartLine: line, EndLine: line}
 }
 
-// buildSnapshot turns the scoped findings + ratings + duplication into gate metrics.
 func buildSnapshot(scoped []finding.Finding, rep rating.Report, dupDensity float64) qualitygate.Snapshot {
 	s := qualitygate.Snapshot{}
-	securityKind := map[finding.Kind]bool{
-		finding.KindSCA: true, finding.KindSAST: true, finding.KindSecret: true,
-		finding.KindMisconfig: true, finding.KindExploitation: true, finding.KindDAST: true,
-	}
+	securityKind := map[finding.Kind]bool{finding.KindSCA: true, finding.KindSAST: true, finding.KindSecret: true, finding.KindMisconfig: true, finding.KindExploitation: true, finding.KindDAST: true}
 	for _, f := range scoped {
 		s[qualitygate.MetricNewIssues]++
 		switch f.Severity {
@@ -1129,7 +1007,7 @@ func runScan() {
 		fmt.Fprintln(os.Stderr, "synapse-cli: --base scopes to new code in a local git repo; it cannot be combined with --image")
 		os.Exit(2)
 	}
-	if priority == "" { // resolve the configured default here so an invalid env value gets this same exit-2 message
+	if priority == "" {
 		priority = os.Getenv("SYNAPSE_DETECTION_PRIORITY")
 	}
 	if _, err := scauc.NormalizeScanOptions(scauc.ScanOptions{Mode: mode, DetectionPriority: priority}); err != nil {
@@ -1139,8 +1017,6 @@ func runScan() {
 	if push.enabled() {
 		push.ci = ciContextFromEnv(push.ci, os.Getenv)
 		if image {
-			// A project analysis is a source-tree analysis: it carries measures, ratings and a code
-			// quality report that have no meaning for an image.
 			fmt.Fprintln(os.Stderr, "synapse-cli: --server records a project analysis and cannot be combined with --image")
 			os.Exit(2)
 		}
@@ -1153,8 +1029,6 @@ func runScan() {
 		fmt.Fprintf(os.Stderr, "synapse-cli: %v\n", err)
 		os.Exit(2)
 	}
-	// The three output modes each own stdout completely, so they are mutually exclusive rather than
-	// silently last-one-wins.
 	chosen := 0
 	for _, on := range []bool{jsonOut, sarifOut, sbomOut} {
 		if on {
@@ -1171,10 +1045,6 @@ func runScan() {
 	}
 }
 
-// syncAdvisories ingests a local OSV advisory dump into the owned advisory store. It requires a
-// Postgres DSN: the owned store is durable reference data, so ingesting into an ephemeral in-memory store
-// would do nothing. The database must already be migrated by synapse-migrate, then a DirFeed
-// over the dump directory streams every parseable advisory into the store via the narrow AdvisoryWriter.
 func syncAdvisories(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: synapse-cli sync-advisories <dir>|--remote|--remote-distros|--csaf <dir>|--oval <dir> (requires SYNAPSE_DB_DSN)")
@@ -1183,18 +1053,13 @@ func syncAdvisories(args []string) error {
 	if cfg.DBDSN == "" {
 		return fmt.Errorf("SYNAPSE_DB_DSN is required: ingesting into an ephemeral in-memory store does nothing")
 	}
-	// Select the feed: --remote fetches the OSV bulk bucket; otherwise read a local OSV dump directory. Both
-	// stream into the same Postgres-backed store via the same ingester. Each feed kind maps to a named bulk
-	// source (osv/csaf/oval) so its advisories are MERGED with every other source that covers the same CVE
-	// (union of affected ranges) instead of clobbering advisories.data (EPIC #860 D1.2).
 	var feed ports.AdvisoryFeed
 	var src, bulkAdapter, sourceKey, sourceName string
 	switch {
 	case args[0] == "--remote":
-		feed = ownadvisory.NewRemoteFeed(cfg.OSVBulkURL, nil, nil) // default bucket + the covered app ecosystems
+		feed = ownadvisory.NewRemoteFeed(cfg.OSVBulkURL, nil, nil)
 		src, bulkAdapter, sourceKey, sourceName = "OSV bulk bucket", "osv", "cli-osv-bulk", "CLI OSV bulk ingest"
 	case args[0] == "--remote-distros":
-		// OS-package advisories (Debian/Alpine) – large zips, fetched only on explicit request (Epic B).
 		feed = ownadvisory.NewRemoteFeed(cfg.OSVBulkURL, ownadvisory.DistroBulkEcosystems, nil)
 		src, bulkAdapter, sourceKey, sourceName = "OSV bulk bucket (distros)", "osv", "cli-osv-bulk", "CLI OSV bulk ingest"
 	case args[0] == "--csaf":
@@ -1261,8 +1126,6 @@ func syncAdvisories(args []string) error {
 	return nil
 }
 
-// stderrAudit keeps scan actions attributable without a database
-// – the entry is written to the CI log rather than persisted.
 type stderrAudit struct{}
 
 func (stderrAudit) Record(_ context.Context, e ports.AuditEntry) error {
@@ -1272,10 +1135,6 @@ func (stderrAudit) Record(_ context.Context, e ports.AuditEntry) error {
 
 var _ ports.AuditLogger = stderrAudit{}
 
-// loadSynapseignore reads <dir>/.synapseignore (YAML) into a suppression ruleset. Missing file => empty
-// ruleset, no error. Every entry is validated (a matcher, a reason, and a parseable expiry are required)
-// so a malformed suppression fails the scan loudly rather than silently ignoring nothing — or worse,
-// silently everything.
 func loadSynapseignore(dir string) (suppression.Ruleset, error) {
 	data, err := os.ReadFile(filepath.Join(dir, ".synapseignore"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -1286,9 +1145,9 @@ func loadSynapseignore(dir string) (suppression.Ruleset, error) {
 	}
 	var doc struct {
 		Suppress []struct {
-			Rule    string `yaml:"rule"`
-			Path    string `yaml:"path"`
-			Reason  string `yaml:"reason"`
+			Rule string `yaml:"rule"`
+			Path string `yaml:"path"`
+			Reason string `yaml:"reason"`
 			Expires string `yaml:"expires"`
 		} `yaml:"suppress"`
 	}
@@ -1312,8 +1171,6 @@ func loadSynapseignore(dir string) (suppression.Ruleset, error) {
 	return rs, nil
 }
 
-// applySuppressions drops findings matched by an active .synapseignore rule and returns the kept set plus
-// the count suppressed. Non-line findings still match by rule key / advisory id.
 func applySuppressions(findings []finding.Finding, rs suppression.Ruleset, now time.Time) ([]finding.Finding, int) {
 	if len(rs) == 0 {
 		return findings, 0
@@ -1342,13 +1199,10 @@ func confidenceRank(c string) int {
 	case "low":
 		return 1
 	default:
-		return 0 // unset / unknown
+		return 0
 	}
 }
 
-// filterByConfidence drops findings whose confidence is below min. A finding with no confidence (SAST /
-// misconfig do not carry one) is kept — --min-confidence targets the confidence-bearing SCA/secret
-// findings, not a blanket drop of everything unscored.
 func filterByConfidence(findings []finding.Finding, min string) []finding.Finding {
 	threshold := confidenceRank(min)
 	out := make([]finding.Finding, 0, len(findings))
@@ -1361,10 +1215,6 @@ func filterByConfidence(findings []finding.Finding, min string) []finding.Findin
 	return out
 }
 
-// scopeToNewCode keeps only line-anchored findings (SAST/secret/misconfig) that fall on a line changed
-// vs the base ref, so a scan of a repo with a backlog can gate a pipeline on what THIS change introduced.
-// Findings that are NOT line-attributable (SCA vulnerabilities, licenses) are KEPT: dropping them would
-// falsely report clean when a change adds a vulnerable dependency. Baseline those via .synapseignore.
 func scopeToNewCode(findings []finding.Finding, changed gitdiff.ChangedLines) []finding.Finding {
 	out := make([]finding.Finding, 0, len(findings))
 	for _, f := range findings {
@@ -1380,9 +1230,6 @@ func scopeToNewCode(findings []finding.Finding, changed gitdiff.ChangedLines) []
 	return out
 }
 
-// selectSBOMGenerator picks the SBOM producer from config, mirroring the server (scacompose): syft
-// (default) or Synapse's own pure-Go parsers (ownsbom). An unknown value fails closed, matching the
-// server rather than silently defaulting.
 func selectSBOMGenerator(cfg config.Config) (ports.SBOMGenerator, error) {
 	switch cfg.SBOMProducer {
 	case "", "syft":
@@ -1399,8 +1246,6 @@ func selectSBOMGenerator(cfg config.Config) (ports.SBOMGenerator, error) {
 }
 
 func run(path string, failOn shared.Severity, mode, priority, minConfidence, baseRef string, ignoreUnfixed, image, offline, jsonOut, sarifOut, sbomOut, includeTest, verifySecrets bool, push pushTarget) error {
-	// An image target is an OCI reference (acquired in-process into an OCI layout); a local
-	// target is a filesystem path that must be absolute for the scope check.
 	target := strings.TrimSpace(path)
 	if !image {
 		abs, err := filepath.Abs(path)
@@ -1409,16 +1254,12 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 		}
 		target = abs
 	}
-	// The gated Scan + its persistence require a tenant in context (RLS / WithTenant). This CLI is the
-	// single-tenant dogfood path, so bind the default tenant, same as the other CLI commands.
 	ctx := shared.WithTenant(context.Background(), shared.DefaultTenant)
 	cfg := config.Load()
-	if verifySecrets { // --verify-secrets opts this run into active secret verification (default-off)
+	if verifySecrets {
 		cfg.SecretVerifyEnabled = true
 	}
 	if offline && cfg.SecretVerifyEnabled {
-		// --offline is a no-network-egress contract; active verification makes outbound provider calls with
-		// the raw secret. Offline wins: disable verification (and say so if it was explicitly requested).
 		if verifySecrets {
 			fmt.Fprintln(os.Stderr, "synapse-cli: --offline disables active secret verification (no network egress); ignoring --verify-secrets")
 		}
@@ -1427,35 +1268,19 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	if err := cfg.ValidateSecretVerification(); err != nil {
 		return fmt.Errorf("active secret verification configuration: %w", err)
 	}
-	if priority == "" { // the --detection-priority flag falls back to the configured default
+	if priority == "" {
 		priority = cfg.DetectionPriority
 	}
 	clock := idgen.SystemClock{}
 	ids := idgen.RandomID{}
-
 	engRepo := memory.NewEngagementRepository()
-	prov := ports.Provenance{
-		ToolVersions: map[string]string{
-			"go-enry": buildinfo.Module("github.com/go-enry/go-enry/v2"),
-			"synapse": buildinfo.App(),
-		},
-	}
-	// One policy decides every network-capable part of this scan, so --offline cannot mean "offline
-	// except the resolvers" again.
+	prov := ports.Provenance{ToolVersions: map[string]string{"go-enry": buildinfo.Module("github.com/go-enry/go-enry/v2"), "synapse": buildinfo.App()}}
 	egress := newScanEgress(cfg, offline, os.LookupEnv)
-	// Detection sources are config-driven (SYNAPSE_DETECTION_SOURCES), resolved through the SAME helper
-	// the server uses so the posture is identical across binaries. Grype is the offline matcher; live
-	// OSV runs only when the egress policy allows it. An operator can drop Grype (e.g.
-	// SYNAPSE_DETECTION_SOURCES=osv) for an Anchore-free CLI scan.
 	var osvSrc ports.DetectionSource
 	if egress.OSV {
 		prov.VulnDBSource = "osv.dev"
 		osvSrc = osv.New(cfg.OSVBaseURL, nil)
 	}
-	// advisory-store is Synapse's OWNED matcher over its own advisory corpus; it is available when a
-	// populated Postgres corpus is configured (SYNAPSE_DB_DSN, synced via `synapse-cli sync-advisories`).
-	// Without it the candidate stays nil and a request for it is skipped, so an owned-only scan needs
-	// the corpus present. This is what lets the CLI run first-party (SYNAPSE_DETECTION_SOURCES=advisory-store).
 	var advStore ports.DetectionSource
 	if cfg.DBDSN != "" {
 		pool, perr := postgres.Connect(ctx, cfg.DBDSN)
@@ -1464,22 +1289,13 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 		}
 		advStore = ownadvisory.New(postgres.NewAdvisoryRepository(pool))
 	}
-	detectionSources, detErr := scacompose.ResolveDetectionSources(cfg, scacompose.DetectionCandidates{
-		Grype:         grype.New(cfg.GrypeBin, cfg.GrypeDBDir),
-		OSV:           osvSrc,
-		AdvisoryStore: advStore,
-	}, nil)
+	detectionSources, detErr := scacompose.ResolveDetectionSources(cfg, scacompose.DetectionCandidates{Grype: grype.New(cfg.GrypeBin, cfg.GrypeDBDir), OSV: osvSrc, AdvisoryStore: advStore}, nil)
 	if detErr != nil {
 		return fmt.Errorf("resolve detection sources: %w", detErr)
 	}
 	if egress.offline() {
-		// Make the reduced-coverage mode visible: the operator chose lower recall for no egress. Leaving
-		// VulnDBSource empty keeps the evidence snapshot from claiming osv.dev was queried when it wasn't
-		// (each source's DB version is recorded separately as evidence).
 		fmt.Fprintln(os.Stderr, "synapse-cli: offline mode – no network egress: live OSV, the npm/composer/poetry/bundler/maven/gradle resolvers, KEV/EPSS, online NVD, deps.dev + PyPI license metadata and AI triage are all disabled; detecting with the offline sources only")
 	}
-	// KEV + EPSS and the deps.dev/PyPI license metadata are HTTP feeds. Offline drops the risk enricher
-	// entirely (the service nil-checks it) and keeps only the local OS-metadata license enricher.
 	var riskEnricher ports.RiskEnricher
 	licenseEnrichers := []ports.LicenseEnricher{licensemeta.NewOSMetadata()}
 	if egress.RiskFeeds {
@@ -1488,8 +1304,6 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	if egress.LicenseMetadata {
 		licenseEnrichers = append(licenseEnrichers, licensemeta.New(cfg.DepsDevURL, nil), licensemeta.NewPyPI("", nil))
 	}
-	// SBOM producer: syft (default) or Synapse's OWN pure-Go parsers (SYNAPSE_SBOM_PRODUCER=ownsbom),
-	// mirroring the server so the first-party engine is reachable from the CLI, not just synapse-api.
 	sbomGen, sberr := selectSBOMGenerator(cfg)
 	if sberr != nil {
 		return sberr
@@ -1497,13 +1311,7 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	if cfg.SBOMProducer == "ownsbom" {
 		fmt.Fprintln(os.Stderr, "synapse-cli: SBOM producer = ownsbom (owned pure-Go parsers; no third-party SBOM scanner)")
 	}
-	sca := scauc.NewService(
-		engRepo, memory.NewFindingRepository(), memory.NewScanRepository(), nil, nil, nil, nil, nil, prov, clock, stderrAudit{},
-		shared.Severity(cfg.FindingMinSeverity), cfg.ScanTimeout, acquire.New().WithMaxWorkspaceBytes(cfg.MaxWorkspaceBytes).WithImageRootFS(cfg.ImageRootFSEnabled),
-		enry.New(), sbomGen,
-		detectionSources,
-		riskEnricher, license.New(), licensemeta.NewChain(licenseEnrichers...),
-	)
+	sca := scauc.NewService(engRepo, memory.NewFindingRepository(), memory.NewScanRepository(), nil, nil, nil, nil, nil, prov, clock, stderrAudit{}, shared.Severity(cfg.FindingMinSeverity), cfg.ScanTimeout, acquire.New().WithMaxWorkspaceBytes(cfg.MaxWorkspaceBytes).WithImageRootFS(cfg.ImageRootFSEnabled), enry.New(), sbomGen, detectionSources, riskEnricher, license.New(), licensemeta.NewChain(licenseEnrichers...))
 	if cfg.SLAEnabled {
 		slaService, slaErr := slauc.NewService(memory.NewSLAStore(), clock, ids)
 		if slaErr != nil {
@@ -1515,11 +1323,9 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	sca.SetProjectComparisonSource(&gitdiff.ComparisonSource{})
 	sca.SetGateDecoder(qualityprofile.LoadGateBytes)
 	sca.SetSBOMEnricher(manifest.New())
-	sca.SetArtifactCataloger(msi.New())           // recover Windows Installer (.msi) product identity into the SBOM
-	sca.SetMavenCoordResolver(mavencoord.New())   // recover real Maven coords from JAR pom.properties (offline) before license lookup
-	sca.SetJarChecksumResolver(jarchecksum.New()) // capture JAR artifact SHA-1 from the workspace (Syft omits it from CycloneDX)
-	// SHA-1 coordinate recovery for shaded/metadata-less JARs: offline trivy-java-db index
-	// (SYNAPSE_JARHASH_DB_PATH) first, online Maven Central (SYNAPSE_JARHASH_ONLINE_ENABLED) as fallback.
+	sca.SetArtifactCataloger(msi.New())
+	sca.SetMavenCoordResolver(mavencoord.New())
+	sca.SetJarChecksumResolver(jarchecksum.New())
 	var jhResolvers []ports.JarHashResolver
 	if cfg.JarHashDBPath != "" {
 		if off, err := jarhash.NewOffline(cfg.JarHashDBPath); err != nil {
@@ -1536,67 +1342,42 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	if len(jhResolvers) > 0 {
 		sca.SetJarHashResolver(jarhash.NewChain(jhResolvers...))
 	}
-	// Maven full-tree resolution (`mvn dependency:list`) – resolves managed versions + transitive deps a
-	// from-source pom scan can't, so a Maven project is handled straight from pom.xml (no manual build).
-	// The CLI dogfoods a TRUSTED local project, so this is ON BY DEFAULT; set
-	// SYNAPSE_MAVEN_RESOLVE_ENABLED=false to opt out. Best-effort: a missing mvn / non-Maven target / error
-	// is a no-op (falls back to the pom-only result + the INCOMPLETE warning). Runs mvn directly.
-	// Maven full-tree resolution runs `mvn` UNSANDBOXED, which evaluates the project's POM/plugin config
-	// (arbitrary code via build extensions/plugins) on the host. It is therefore OPT-IN even for the CLI —
-	// default-on would contradict "safe by construction" and is dangerous on a shared/multi-tenant CI
-	// runner. Enable with SYNAPSE_MAVEN_RESOLVE_ENABLED=true. Best-effort when on.
 	if egress.MavenResolve {
 		sca.SetMavenResolver(mavenresolve.New(cfg.MvnBin).WithRepoHosts(cfg.MavenRepoHosts).WithLocalRepo(cfg.MavenLocalRepo))
 		fmt.Fprintln(os.Stderr, "synapse-cli: Maven resolver ON – runs `mvn` UNSANDBOXED over the project if it has a pom.xml (opt-in via SYNAPSE_MAVEN_RESOLVE_ENABLED)")
 	}
-	// Gradle full-tree resolution EXECUTES build.gradle (arbitrary Groovy/Kotlin) — even higher-risk than
-	// mvn — so it is likewise OPT-IN (SYNAPSE_GRADLE_RESOLVE_ENABLED=true), never default-on.
 	if egress.GradleResolve {
 		sca.SetGradleResolver(gradleresolve.New(cfg.GradleBin).WithRepoHosts(cfg.MavenRepoHosts).WithGradleHome(cfg.GradleHome))
 		fmt.Fprintln(os.Stderr, "synapse-cli: Gradle resolver ON – runs `gradle` UNSANDBOXED over the project if it has a build.gradle, which executes the build script (opt-in via SYNAPSE_GRADLE_RESOLVE_ENABLED)")
 	}
-	// npm resolution for a lockfile-less package.json – same default-on-for-CLI model (trusted local).
-	// Opt out with SYNAPSE_NPM_RESOLVE_ENABLED=false. Best-effort; --ignore-scripts so no project code runs.
 	if egress.NPMResolve {
 		sca.SetNPMResolver(npmresolve.New(cfg.NPMBin).WithRegistryHosts(cfg.NPMRegistryHosts))
 		fmt.Fprintln(os.Stderr, "synapse-cli: npm resolver ON – runs `npm install --package-lock-only --ignore-scripts` over a COPY of a lockfile-less package.json to pin versions (no project scripts run; set SYNAPSE_NPM_RESOLVE_ENABLED=false to disable)")
 	}
-	// Lockfile-less manifest resolvers (composer.json / Gemfile / pyproject.toml) – default-on for the CLI
-	// (trusted local). Each runs its ecosystem tool in lock-only, no-scripts mode over a COPY. Best-effort.
 	if egress.ManifestResolve {
-		// composer + poetry only: each runs lock-only, --no-scripts over a COPY, so no project code runs.
 		binOf := map[string]string{"composer": cfg.ComposerBin, "poetry": cfg.PoetryBin}
 		for _, eco := range []string{"composer", "poetry"} {
 			sca.AddManifestResolver(manifestresolve.New(eco, binOf[eco]).WithRegistryHosts(cfg.ManifestRegistryHosts))
 		}
 		fmt.Fprintln(os.Stderr, "synapse-cli: manifest resolvers ON – composer/poetry resolve a lockfile-less composer.json/pyproject.toml over a COPY in lock-only, no-scripts mode (inert manifests; no project code runs)")
 	}
-	// Bundler (gem) is split out and OPT-IN: `bundle lock` EVALUATES the Gemfile as Ruby, so it runs the
-	// project's manifest code UNSANDBOXED — unlike the inert composer/poetry/npm resolvers it is NOT
-	// default-on. Enable with SYNAPSE_BUNDLER_RESOLVE_ENABLED=true.
 	if egress.BundlerResolve {
 		sca.AddManifestResolver(manifestresolve.New("gem", cfg.BundleBin).WithRegistryHosts(cfg.ManifestRegistryHosts))
 		fmt.Fprintln(os.Stderr, "synapse-cli: Bundler resolver ON – `bundle lock` EVALUATES a lockfile-less Gemfile as Ruby (runs project code UNSANDBOXED); opt-in via SYNAPSE_BUNDLER_RESOLVE_ENABLED")
 	}
-	// JVM reachability parses target bytecode in-process, so both CLI and server require explicit opt-in.
 	if cfg.JVMReachabilityEnabled {
 		sca.SetJVMReachability(jvmreach.New())
 	}
 	if cfg.SASTEnabled && !image {
-		sca.SetSASTAnalyzer(sast.New()) // deterministic pattern-SAST (CI-friendly)
+		sca.SetSASTAnalyzer(sast.New())
 	} else if cfg.SASTEnabled && image {
-		// Source SAST over an assembled image rootfs is low-value (compiled artifacts, vendored trees)
-		// and scans the whole filesystem, which times out on large images. Scan SAST at the SOURCE repo.
 		fmt.Fprintln(os.Stderr, "synapse-cli: image mode – source SAST skipped (run SAST at source; image scan covers SCA/OS-CVE + secret + misconfig)")
 	}
 	if cfg.SecretScanEnabled {
-		sca.SetSecretScanner(secretscan.New())                // deterministic, redacted secret scan (CI-friendly)
-		sca.SetIncludeTestSecrets(includeTest)                // by default suppress test/fixture/docs/detector-pattern secrets (fake creds)
-		sca.SetSecretHistoryEnabled(cfg.SecretHistoryEnabled) // opt-in: also scan git history for committed-then-removed secrets
+		sca.SetSecretScanner(secretscan.New())
+		sca.SetIncludeTestSecrets(includeTest)
+		sca.SetSecretHistoryEnabled(cfg.SecretHistoryEnabled)
 		if cfg.SecretVerifyEnabled {
-			// --verify-secrets (D6.3): confirm each detected credential is live via one read-only provider
-			// call. Sends the raw secret to its issuing provider over the network; opt-in, rate-limited, and
-			// the secret is never logged. Only run this against credentials you are authorized to test.
 			verifier, err := secretverify.NewWithVault(float64(cfg.SecretVerifyRPS), cfg.SecretVerifyVaultAddr)
 			if err != nil {
 				return fmt.Errorf("configure active secret verification: %w", err)
@@ -1606,42 +1387,32 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 		}
 	}
 	if cfg.MisconfigEnabled {
-		// Trusted-local model (like the CLI's maven/gradle resolvers): render Helm charts via a direct
-		// `helm template` exec. It runs the chart's templates on the host, so use it only on a project you trust.
-		sca.SetMisconfigScanner(misconfig.New().WithHelmDirect().WithKustomizeDirect()) // deterministic IaC/config misconfig scan (CI-friendly)
+		sca.SetMisconfigScanner(misconfig.New().WithHelmDirect().WithKustomizeDirect())
 	}
 	if cfg.ImageRootFSEnabled {
-		sca.SetOSPackageCataloger(ospkg.New())         // owned dpkg/apk cataloging from the materialized image rootfs
-		sca.SetInstalledPackageCataloger(bincat.New()) // owned Go-binary + Python dist-info cataloging from the rootfs
+		sca.SetOSPackageCataloger(ospkg.New())
+		sca.SetInstalledPackageCataloger(bincat.New())
 	}
 	if cfg.SuppressionEnabled {
-		sca.SetSuppressionLoader(ignorefile.New()) // repo-committed .synapseignore accepted-risk policy (CI-friendly)
+		sca.SetSuppressionLoader(ignorefile.New())
 	}
 	if cfg.VEXEnabled {
-		sca.SetVEXLoader(vexfile.New()) // in-repo OpenVEX (.synapse.vex.json) accepted-risk assertions (CI-friendly)
+		sca.SetVEXLoader(vexfile.New())
 	}
 	if cfg.ComplianceEnabled {
-		sca.SetComplianceEnabled(true) // attach the AppSec-baseline benchmark (per-control PASS/FAIL)
+		sca.SetComplianceEnabled(true)
 	}
 	if cfg.GoModGraphEnabled {
-		// Transitive pkg:golang edges via `go mod graph` (reads go.mod only, never compiles; GOPROXY=off +
-		// GOTOOLCHAIN=local). Runs unsandboxed here, matching the CLI's trusted-local model for its other
-		// resolvers; best-effort (a non-Go target / no module cache adds no edges, never fails the scan).
 		sca.SetGraphResolver(gomodgraph.New(cfg.GoBin))
 	}
-	sca.SetDBMaxAgeDays(cfg.DBMaxAgeDays)   // warn on stale reference DBs (KEV/EPSS/vuln-DB); 0 disables
-	sca.SetStrictSources(cfg.StrictSources) // fail-closed on a source error; default degrades (skip + warn)
+	sca.SetDBMaxAgeDays(cfg.DBMaxAgeDays)
+	sca.SetStrictSources(cfg.StrictSources)
 	if cfg.ScanCacheEnabled {
 		if dir := cfg.ResolveScanCacheDir(); dir != "" {
-			sca.SetSBOMCache(sbomcache.New(dir)) // content+version-addressed generated-SBOM cache (CI-friendly)
+			sca.SetSBOMCache(sbomcache.New(dir))
 		}
 	}
-	// JAR-embedded licenses + workspace LICENSE files for every ecosystem.
 	sca.SetLicenseFileResolver(licensefile.NewChain(jarlicense.New(), licensefile.New()))
-	// Backfill CVSS. Prefer a LOCAL NVD CVSS DB (offline: no network, no rate limit, fills EVERY
-	// missing CVSS — the airgapped path and the way to give large dependency trees real CVSS scores)
-	// when SYNAPSE_NVD_CVSS_DB points to a DB built by `synapse-cli build-cvss-db`; otherwise fall
-	// back to the online NVD enricher (rate-limited, best-effort, unknown-severity only).
 	if p := strings.TrimSpace(os.Getenv("SYNAPSE_NVD_CVSS_DB")); p != "" {
 		if oe, oerr := nvd.LoadOffline(p); oerr != nil {
 			fmt.Fprintf(os.Stderr, "synapse-cli: NVD offline CVSS DB %q not usable (%v)\n", p, oerr)
@@ -1656,50 +1427,28 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	} else if egress.NVDSeverity {
 		sca.SetSeverityEnricher(nvd.New(cfg.NVDAPIURL, cfg.NVDAPIKey, nil).WithBudget(cfg.NVDBudget))
 	}
-	// --ignore-unfixed (or SYNAPSE_IGNORE_UNFIXED) drops vulns with no upstream fix – the
-	// classic distro-noise reducer for OS-package scans (matches Trivy's --ignore-unfixed).
 	sca.SetIgnoreUnfixed(ignoreUnfixed || cfg.IgnoreUnfixed)
-
-	// AI false-positive triage (opt-in). Inject an LLM critic the scan pipeline runs over the remaining
-	// production-scope first-party source findings. A refutation is advisory unless a distinct verifier
-	// agrees and the deterministic human-review floor allows a gate exemption. High/critical, secrets,
-	// and dangerous CWEs always keep gating. Findings are never deleted. Skipped for image targets.
 	if egress.AITriage && cfg.FPTriageEnabled && strings.TrimSpace(cfg.FPTriageModel) != "" && !image {
 		sca.SetFPTriageMode(cfg.FPTriageMode)
 		sca.SetFPTriageMaxFindings(cfg.FPTriageMaxFindings)
 		sca.SetFPTriageIndependence(cfg.FPTriageIndependence)
-		sca.SetFPTriageAlertPolicy(cfg.FPTriageAlertMinSamples, cfg.FPTriageDisagreeBaseBPS,
-			cfg.FPTriageExemptBaseBPS, cfg.FPTriageParseFailBaseBPS, cfg.FPTriageAlertDeltaBPS)
+		sca.SetFPTriageAlertPolicy(cfg.FPTriageAlertMinSamples, cfg.FPTriageDisagreeBaseBPS, cfg.FPTriageExemptBaseBPS, cfg.FPTriageParseFailBaseBPS, cfg.FPTriageAlertDeltaBPS)
 		if llm, lerr := openai.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.FPTriageModel, cfg.LLMTimeout); lerr != nil {
 			fmt.Fprintf(os.Stderr, "synapse-cli: AI false-positive triage disabled: %v\n", lerr)
 		} else {
-			coord := fptriage.NewWithIdentity(llm, cfg.FPTriageProvider, cfg.FPTriageModel).
-				WithConcurrency(cfg.FPTriageConcurrency).
-				WithOperationalPolicy(ports.FPTriageOperationalPolicy{
-					MaxTokens: cfg.FPTriageMaxTokens, MaxCostMicroUSD: cfg.FPTriageMaxCostMicroUSD,
-					ProposerInputMicroUSDPerMillion:  cfg.FPTriageProposerInputRate,
-					ProposerOutputMicroUSDPerMillion: cfg.FPTriageProposerOutputRate,
-					VerifierInputMicroUSDPerMillion:  cfg.FPTriageVerifierInputRate,
-					VerifierOutputMicroUSDPerMillion: cfg.FPTriageVerifierOutputRate,
-					CircuitFailureThreshold:          cfg.FPTriageCircuitFailures, CircuitCooldown: cfg.FPTriageCircuitCooldown,
-				})
+			coord := fptriage.NewWithIdentity(llm, cfg.FPTriageProvider, cfg.FPTriageModel).WithConcurrency(cfg.FPTriageConcurrency).WithOperationalPolicy(ports.FPTriageOperationalPolicy{MaxTokens: cfg.FPTriageMaxTokens, MaxCostMicroUSD: cfg.FPTriageMaxCostMicroUSD, ProposerInputMicroUSDPerMillion: cfg.FPTriageProposerInputRate, ProposerOutputMicroUSDPerMillion: cfg.FPTriageProposerOutputRate, VerifierInputMicroUSDPerMillion: cfg.FPTriageVerifierInputRate, VerifierOutputMicroUSDPerMillion: cfg.FPTriageVerifierOutputRate, CircuitFailureThreshold: cfg.FPTriageCircuitFailures, CircuitCooldown: cfg.FPTriageCircuitCooldown})
 			if strings.TrimSpace(cfg.VerifierModel) != "" {
 				if !agent.IndependentLLMs(cfg.FPTriageProvider, cfg.FPTriageModel, cfg.VerifierProvider, cfg.VerifierModel, cfg.FPTriageIndependence) {
-					fmt.Fprintf(os.Stderr, "synapse-cli: verifier %q/%q does not satisfy %q independence from proposer %q/%q; AI triage remains advisory-only\n",
-						cfg.VerifierProvider, cfg.VerifierModel, cfg.FPTriageIndependence, cfg.FPTriageProvider, cfg.FPTriageModel)
+					fmt.Fprintf(os.Stderr, "synapse-cli: verifier %q/%q does not satisfy %q independence from proposer %q/%q; AI triage remains advisory-only\n", cfg.VerifierProvider, cfg.VerifierModel, cfg.FPTriageIndependence, cfg.FPTriageProvider, cfg.FPTriageModel)
 				} else if vllm, verr := openai.New(cfg.VerifierBaseURL, cfg.VerifierAPIKey, cfg.VerifierModel, cfg.LLMTimeout); verr == nil {
 					coord.WithIndependentVerifier(vllm, cfg.VerifierProvider, cfg.VerifierModel, ports.AIIndependencePolicy(cfg.FPTriageIndependence))
 				} else {
 					fmt.Fprintf(os.Stderr, "synapse-cli: verifier model %q unavailable; AI triage remains advisory-only: %v\n", cfg.VerifierModel, verr)
 				}
 			}
-			sca.SetFPTriage(fptriage.NewTriager(coord, func(root string) ports.SourceSnippetReader {
-				return sourcesnippet.Reader{Root: root}
-			}))
+			sca.SetFPTriage(fptriage.NewTriager(coord, func(root string) ports.SourceSnippetReader { return sourcesnippet.Reader{Root: root} }))
 		}
 	}
-
-	// Ephemeral engagement covering the target so the real (gated) Scan path runs.
 	eng, err := engagement.New(ids.NewID(), shared.DefaultTenant, "synapse-cli dogfood", "", clock.Now())
 	if err != nil {
 		return fmt.Errorf("build ephemeral engagement: %w", err)
@@ -1712,10 +1461,6 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	if err := engRepo.Create(ctx, eng); err != nil {
 		return fmt.Errorf("register ephemeral engagement: %w", err)
 	}
-
-	// For an image scan the workspace is the materialized image, which does not carry the CI repo's
-	// accepted-risk policy (.synapseignore / OpenVEX). Read that policy from the invocation CWD (the
-	// checked-out repo) instead. Source scans leave PolicyDir empty (policy travels with the scanned tree).
 	policyDir := ""
 	if image {
 		if cwd, werr := os.Getwd(); werr == nil {
@@ -1724,9 +1469,6 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	}
 	scanOpts := scauc.ScanOptions{Mode: mode, DetectionPriority: priority, PolicyDir: policyDir}
 	if push.enabled() {
-		// The server's own project analysis runs with these set, and the recorder builds measures,
-		// ratings and hotspots from the code-quality report they produce. Without them a pushed
-		// analysis would carry security findings and nothing else.
 		scanOpts.CodeQuality, scanOpts.ProjectAnalysis = true, true
 	}
 	res, err := sca.ScanWithOptions(ctx, "synapse-cli", eng.ID, ports.AcquireRequest{Kind: acqKind, Value: target}, scanOpts)
@@ -1745,7 +1487,7 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 		res.Findings = scopeToNewCode(res.Findings, changed)
 		fmt.Fprintf(os.Stderr, "synapse-cli: scoped to new code vs %s (%d of %d findings on changed lines; dependency/license findings kept)\n", baseRef, len(res.Findings), before)
 	}
-	if !image { // .synapseignore lives in the repo; not applicable to an image reference
+	if !image {
 		ignoreRules, ierr := loadSynapseignore(target)
 		if ierr != nil {
 			return ierr
@@ -1760,13 +1502,8 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 			fmt.Fprintf(os.Stderr, "synapse-cli: WARNING .synapseignore suppression expired %s (rule=%q path=%q) — its findings are NOT suppressed; renew or remove it\n", e.Expires.Format("2006-01-02"), e.RuleKey, e.Path)
 		}
 	}
-
-	// Report advisory opinions separately from the smaller policy-authorized gate-exempt set.
-	fpSuspect := res.SuspectedFPKeys()
 	fpGateExempt := res.AIGateExemptKeys()
 	fpGateExemptions := res.AIGateExemptions()
-	fpWouldExempt := res.AIWouldGateExemptKeys()
-	fpReview := res.AIReviewRequiredKeys()
 	if budget := res.AITriageBudget; budget != nil {
 		mode := "advisory-only"
 		for _, critique := range res.AITriage {
@@ -1775,37 +1512,21 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 				break
 			}
 		}
-		fmt.Fprintf(os.Stderr, "synapse-cli: AI false-positive triage (%s, %s, rollout=%s): eligible %d, attempted %d, skipped-budget %d, completed %d, suspected %d, would-exempt %d, gate-exempt %d, human-review %d\n",
-			cfg.FPTriageModel, mode, cfg.FPTriageMode, budget.EligibleFindings, budget.AttemptedFindings, budget.SkippedFindings, len(res.AITriage), len(fpSuspect), len(fpWouldExempt), len(fpGateExempt), len(fpReview))
+		fmt.Fprintf(os.Stderr, "synapse-cli: AI false-positive triage (%s, %s, rollout=%s): eligible %d, attempted %d, skipped-budget %d, completed %d\n", cfg.FPTriageModel, mode, cfg.FPTriageMode, budget.EligibleFindings, budget.AttemptedFindings, budget.SkippedFindings, len(res.AITriage))
 	}
-
 	switch {
 	case sbomOut:
-		// CycloneDX to stdout, so nothing else mixes in. This is the SAME renderer the engagement
-		// export uses (#412 req 5): a release SBOM produced by a separate path could drift from the one
-		// customers get, and an engine we would not trust to describe our own artifact has no business
-		// describing theirs.
 		doc, mErr := scauc.MarshalCycloneDX(res.SBOM, res.Target, time.Now().UTC())
 		if mErr != nil {
 			return mErr
 		}
-		// A short write to stdout is a truncated SBOM, which must not read as a successful one.
 		if _, wErr := os.Stdout.Write(append(doc, '\n')); wErr != nil {
 			return fmt.Errorf("write sbom: %w", wErr)
 		}
 	case sarifOut:
-		// SARIF 2.1.0 for a code-scanning uploader (e.g. GitHub codeql-action/upload-sarif), to stdout so
-		// nothing else mixes in. Covers every finding kind (SCA/SAST/secret/misconfig); first-party kinds
-		// carry a file:line physical location. Map each component@version to the manifest it was found in
-		// so SCA findings get a physical location too (GitHub rejects logical-only locations). The
-		// --fail-on gate below still sets the exit code, so the same run both annotates and gates.
 		manifestByComp := map[string]string{}
 		if res.SBOM != nil {
 			for _, c := range res.SBOM.Components {
-				// SBOM Location is often workspace-rooted with a leading "/" (Syft's dir-scan convention);
-				// a code-scanning UI wants a repo-relative path, so drop any leading slash (a no-op when
-				// absent). If two components share name@version, last write wins – any declaring manifest
-				// is fine for the annotation.
 				if loc := strings.TrimPrefix(c.Location, "/"); loc != "" {
 					manifestByComp[c.Name+"@"+c.Version] = loc
 				}
@@ -1817,9 +1538,6 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 			}
 			return ""
 		}
-		// Map each vulnerability's dedup key to its fixed version so a code-scanning alert shows the
-		// remediation. Keyed by the same dedup key the finding carries (advisory + component + version),
-		// because different advisories on the same component are fixed in different releases.
 		fixByKey := map[string]string{}
 		for _, v := range res.Vulnerabilities {
 			if v.FixedVersion != "" {
@@ -1827,13 +1545,8 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 			}
 		}
 		fixFor := func(f finding.Finding) string { return fixByKey[f.DedupKey] }
-		exemptionFor := func(f finding.Finding) (ports.AIGateExemption, bool) {
-			exemption, ok := fpGateExemptions[strings.TrimSpace(f.DedupKey)]
-			return exemption, ok
-		}
-		out, err := exportuc.MarshalSARIF(res.Findings, res.ToolVersions["synapse"], exportuc.SARIFOptions{
-			Manifest: manifestFor, Fix: fixFor, AIGateExemption: exemptionFor,
-		})
+		exemptionFor := func(f finding.Finding) (ports.AIGateExemption, bool) { exemption, ok := fpGateExemptions[strings.TrimSpace(f.DedupKey)]; return exemption, ok }
+		out, err := exportuc.MarshalSARIF(res.Findings, res.ToolVersions["synapse"], exportuc.SARIFOptions{Manifest: manifestFor, Fix: fixFor, AIGateExemption: exemptionFor})
 		if err != nil {
 			return fmt.Errorf("encode sarif: %w", err)
 		}
@@ -1841,8 +1554,6 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 			return fmt.Errorf("write sarif: %w", err)
 		}
 	case jsonOut:
-		// Machine-readable full scan result (for CI / tooling / cross-scanner comparison), to stdout so the
-		// human report never mixes in. The --fail-on gate below still sets the exit code.
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(res); err != nil {
@@ -1851,41 +1562,29 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	default:
 		printReport(target, res)
 	}
-
 	if push.enabled() {
 		pushCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		analysis, console, perr := pushAnalysis(pushCtx, pushHTTPClient(), push, res)
 		if perr != nil {
-			// A pipeline that asked for its result to be recorded must not go green because the
-			// record silently did not happen, so this is a failure whatever the local gate says.
 			return fmt.Errorf("record analysis on the server: %w", perr)
 		}
 		reportPush(analysis, console)
 	}
-
 	gate := shared.SeverityRank(failOn)
-	accepted := res.SuppressedKeys() // .synapseignore/VEX accepted-risk: reported + sealed, but exempt from the gate
-	verify := res.NeedsVerifyKeys()  // precise-mode needs-verify: lower-confidence, exempt from the gate too
+	accepted := res.SuppressedKeys()
+	verify := res.NeedsVerifyKeys()
 	over := 0
-	bgExempt := 0 // background-scope (test/fixture/example/...) findings held back from the gate
-	fpExempt := 0 // verified low-risk AI consensus findings held back from the gate
+	bgExempt := 0
+	fpExempt := 0
 	for _, f := range res.Findings {
-		if accepted[f.DedupKey] || verify[f.DedupKey] {
+		if accepted[f.DedupKey] || verify[f.DedupKey] || shared.SeverityRank(f.Severity) < gate {
 			continue
 		}
-		if shared.SeverityRank(f.Severity) < gate {
-			continue
-		}
-		// A finding in a test/fixture/example/benchmark/docs path is background, not production risk. It
-		// stays reported (retain-and-mark) but does NOT fail the gate unless --include-test is set —
-		// this is what stops a deliberately-insecure test fixture from breaking CI.
 		if !includeTest && sbom.IsBackgroundScope(f.Scope) {
 			bgExempt++
 			continue
 		}
-		// Only a distinct-model consensus that cleared the deterministic human-review floor may affect
-		// the gate. A single-model or high-risk suspected-FP remains visible AND gating.
 		if fpGateExempt[f.DedupKey] {
 			fpExempt++
 			continue
@@ -1910,22 +1609,20 @@ func printReport(target string, res *scauc.ScanResult) {
 	if w := res.Completeness.Warning; w != "" {
 		fmt.Printf("  ! INCOMPLETE SCAN: %s\n", w)
 	} else {
-		fmt.Printf("  completeness: confident (%d/%d components resolved; lockfiles %v)\n",
-			res.Completeness.ComponentsResolved, res.Completeness.ComponentsTotal, res.Completeness.Lockfiles)
+		fmt.Printf("  completeness: confident (%d/%d components resolved; lockfiles %v)\n", res.Completeness.ComponentsResolved, res.Completeness.ComponentsTotal, res.Completeness.Lockfiles)
 	}
 	if res.SBOM != nil {
 		fmt.Printf("  components: %d\n", len(res.SBOM.Components))
 	}
-	if img := res.Image; img != nil { // Epic D: container layer attribution + base-image estimate
+	if img := res.Image; img != nil {
 		fmt.Printf("  image: %s", img.Reference)
 		if img.Digest != "" {
 			fmt.Printf(" @ %s", img.Digest)
 		}
 		fmt.Printf(" (%s/%s)\n", img.OS, img.Architecture)
-		fmt.Printf("    layers: %d total – %d base (estimated OS/distro), %d application\n",
-			len(img.Layers), img.BaseLayerCount, len(img.Layers)-img.BaseLayerCount)
+		fmt.Printf("    layers: %d total – %d base (estimated OS/distro), %d application\n", len(img.Layers), img.BaseLayerCount, len(img.Layers)-img.BaseLayerCount)
 	}
-	if d := res.Distro; d != nil { // Epic E: captured OS distribution + End-of-Life flag
+	if d := res.Distro; d != nil {
 		name := d.ID + " " + d.Version
 		if d.Codename != "" {
 			name += " (" + d.Codename + ")"
@@ -1939,25 +1636,23 @@ func printReport(target string, res *scauc.ScanResult) {
 			fmt.Printf("  distro: %s – EOL status unknown (not in the curated table)\n", name)
 		}
 	}
-	if len(res.Coverage) > 0 { // per-ecosystem breakdown so a thin ecosystem isn't hidden behind the global number
+	if len(res.Coverage) > 0 {
 		fmt.Printf("  coverage by ecosystem:\n")
 		for _, c := range res.Coverage {
 			fmt.Printf("    %-12s %d/%d resolved\n", c.Ecosystem, c.Resolved, c.Components)
 		}
 	}
-	if q := res.SBOMQuality; len(q.Elements) > 0 { // NTIA + semantic describe-quality of the SBOM (distinct from coverage)
+	if q := res.SBOMQuality; len(q.Elements) > 0 {
 		mark := "NTIA minimum elements present"
 		if !q.NTIAMet {
 			mark = "! NTIA GAPS"
 		}
 		fmt.Printf("  sbom quality: %d/100 (NTIA %d/100) – %s\n", q.Score, q.NTIAScore, mark)
-		for _, e := range q.Elements { // surface each thin score-feeding dimension so the gap is actionable
+		for _, e := range q.Elements {
 			if e.Category != sbom.QualityCategoryCompliance && e.Score < 100 && e.Detail != "" {
 				fmt.Printf("    %-26s %3d/100 – %s\n", e.Label, e.Score, e.Detail)
 			}
 		}
-		// Compliance-only signals gate a profile but deliberately do NOT feed the blended score above; label them
-		// so a "100/100" headline beside a "0/100" strong-checksum line does not read as a contradiction.
 		firstCompliance := true
 		for _, e := range q.Elements {
 			if e.Category != sbom.QualityCategoryCompliance || e.Score >= 100 || e.Detail == "" {
@@ -1969,7 +1664,7 @@ func printReport(target string, res *scauc.ScanResult) {
 			}
 			fmt.Printf("      %-24s %3d/100 – %s\n", e.Label, e.Score, e.Detail)
 		}
-		for _, p := range q.Profiles { // explicit per-standard PASS/FAIL a regulated buyer can cite
+		for _, p := range q.Profiles {
 			fmt.Printf("    %s\n", p.Summary)
 		}
 	}
@@ -1991,17 +1686,12 @@ func printReport(target string, res *scauc.ScanResult) {
 			if item.Overdue {
 				overdue++
 			}
-			fmt.Printf("    SLA %-9s %-13s mitigate %s · remediate %s · %s\n",
-				item.Assessment.Result.Tier, item.EffectiveState,
-				item.Assessment.Result.MitigateBy.Format("2006-01-02"),
-				item.Assessment.Result.RemediateBy.Format("2006-01-02"), item.Assessment.FindingID)
+			fmt.Printf("    SLA %-9s %-13s mitigate %s · remediate %s · %s\n", item.Assessment.Result.Tier, item.EffectiveState, item.Assessment.Result.MitigateBy.Format("2006-01-02"), item.Assessment.Result.RemediateBy.Format("2006-01-02"), item.Assessment.FindingID)
 		}
-		fmt.Printf("  remediation SLA: %d assessed, %d overdue (policy %s)\n",
-			len(res.SLAs), overdue, res.SLAs[0].Assessment.Result.ConfigVersion)
+		fmt.Printf("  remediation SLA: %d assessed, %d overdue (policy %s)\n", len(res.SLAs), overdue, res.SLAs[0].Assessment.Result.ConfigVersion)
 	}
 	if res.VulnsBelowThreshold > 0 {
-		fmt.Printf("  ! %d detected vulnerabilities are BELOW the '%s' severity floor and were NOT promoted "+
-			"(set SYNAPSE_FINDING_MIN_SEVERITY=info to promote every detected vuln)\n", res.VulnsBelowThreshold, res.MinSeverity)
+		fmt.Printf("  ! %d detected vulnerabilities are BELOW the '%s' severity floor and were NOT promoted (set SYNAPSE_FINDING_MIN_SEVERITY=info to promote every detected vuln)\n", res.VulnsBelowThreshold, res.MinSeverity)
 	}
 	if res.UnfixedSuppressed > 0 {
 		fmt.Printf("  ! %d detected vulnerabilities have NO upstream fix and were suppressed by --ignore-unfixed\n", res.UnfixedSuppressed)
@@ -2036,8 +1726,6 @@ func printReport(target string, res *scauc.ScanResult) {
 		if f.KEV {
 			kev = " [KEV]"
 		}
-		// Only show the risk column when it is actually computed (KEV→EPSS×CVSS enrichment). The CLI does
-		// not populate it, so printing "risk 0.00" for every finding reads as a broken tool.
 		risk := ""
 		if f.RiskScore > 0 {
 			risk = fmt.Sprintf(" risk %5.2f", f.RiskScore)
@@ -2100,8 +1788,6 @@ func countLicenses(lics []ports.LicenseFinding) (denied, warned int) {
 	return denied, warned
 }
 
-// countReachability tallies the coarse JVM class-reachability verdicts. Both are 0 when no JVM
-// reachability was computed (non-JVM / not-built / disabled), so the caller prints nothing.
 func countReachability(comps []sbom.Component) (referenced, unreferenced int) {
 	for _, c := range comps {
 		switch c.Reachability {
