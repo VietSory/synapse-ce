@@ -1,97 +1,136 @@
+# Reachability scorecard (EPIC #1042 / #1049). The corpus and external runners are pinned so a PR cannot
+# improve a score by changing the tool, omitting an analysis record, or comparing a different denominator.
 name: Reachability Benchmark
 
 on:
   push:
-    branches:
-      - feat/1121-pr-decoration-foundation
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-test-and-clean:
+  go-oss-baselines:
+    name: Go corpus vs OSV-Scanner and Semgrep CE
     runs-on: ubuntu-latest
+    env:
+      # Reviewed external-tool pins. Updating either pin requires reviewing the resulting artifact diff.
+      OSV_SCANNER_VERSION: v2.4.0
+      SEMGREP_VERSION: 1.176.0
+      REACHBENCH_DIR: internal/infrastructure/tools/ssacallgraph/testdata/reachbench
+      REACHBENCH_REPORT_DIR: ${{ runner.temp }}/reachbench
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: Apply narrow #1121 edits
-        shell: bash
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned OSS baselines
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}
+          python -m pip install --disable-pip-version-check semgrep==${SEMGREP_VERSION}
 
-          service = Path('internal/usecase/projectuc/service.go')
-          text = service.read_text()
-          old = '\tprofiles                         *qualityprofilesuc.Service\n\tallowLocalSource                 bool\n'
-          new = '\tprofiles                         *qualityprofilesuc.Service\n\tdecorator                        ports.PRDecorator\n\tallowLocalSource                 bool\n'
-          assert text.count(old) == 1, 'Service field anchor changed'
-          text = text.replace(old, new, 1)
+      - name: Run OSV-Scanner Go call analysis
+        run: |
+          mkdir -p "${REACHBENCH_REPORT_DIR}"
+          set +e
+          "$(go env GOPATH)/bin/osv-scanner" scan source --recursive --format json --call-analysis=go "${REACHBENCH_DIR}" > "${REACHBENCH_REPORT_DIR}/osv.raw.json"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            echo "OSV-Scanner failed with unexpected status $status"
+            exit "$status"
+          fi
+          go run ./cmd/synapse-bench -mode reachability-osv -language go -input "${REACHBENCH_REPORT_DIR}/osv.raw.json" -output "${REACHBENCH_REPORT_DIR}/osv-scanner.json"
 
-          old = 'func (s *Service) SetQualityGateMutator(mutator ports.QualityGateMutator) { s.gateMutator = mutator }\n'
-          new = old + 'func (s *Service) SetPRDecorator(decorator ports.PRDecorator)              { s.decorator = decorator }\n'
-          assert text.count(old) == 1, 'Service setter anchor changed'
-          text = text.replace(old, new, 1)
+      - name: Run Semgrep CE direct-call baseline
+        run: |
+          set +e
+          semgrep scan --config internal/usecase/reachbench/corpus/semgrep-ce.yml --json --no-git-ignore "${REACHBENCH_DIR}" > "${REACHBENCH_REPORT_DIR}/semgrep.raw.json"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            echo "Semgrep CE failed with unexpected status $status"
+            exit "$status"
+          fi
+          go run ./cmd/synapse-bench -mode reachability-semgrep-ce -language go -input "${REACHBENCH_REPORT_DIR}/semgrep.raw.json" -output "${REACHBENCH_REPORT_DIR}/semgrep-ce.json"
 
-          old = '\t} else if err := s.analyses.SaveWithResult(ctx, analysis, data); err != nil {\n\t\treturn fmt.Errorf("save project analysis: %w", err)\n\t}\n\treturn nil\n}\n\n// ListHotspots'
-          new = '\t} else if err := s.analyses.SaveWithResult(ctx, analysis, data); err != nil {\n\t\treturn fmt.Errorf("save project analysis: %w", err)\n\t}\n\ts.decorateProjectAnalysis(ctx, analysis)\n\treturn nil\n}\n\n// ListHotspots'
-          assert text.count(old) == 1, 'recordProjectAnalysis tail anchor changed'
-          text = text.replace(old, new, 1)
-          service.write_text(text)
-
-          main = Path('cmd/synapse-cli/main.go')
-          text = main.read_text()
-          run_start = text.index('func runGate(')
-          render_start = text.index('func printGateMarkdown(', run_start)
-          run = text[run_start:render_start]
-          old = '\tif markdown {\n\t\tprintGateMarkdown(dir, scopeLabel, rep, dupRep.Density(), covLabel, result)\n'
-          new = '\tsummary := qualitygate.RenderMarkdown(scopeLabel, rep, dupRep.Density(), covLabel, result)\n\tif markdown {\n\t\tfmt.Print(summary)\n'
-          assert run.count(old) == 1, 'runGate markdown anchor changed'
-          run = run.replace(old, new, 1)
-          gate_check = '\tif !result.Passed {\n'
-          idx = run.rfind(gate_check)
-          assert idx >= 0, 'runGate result anchor changed'
-          run = run[:idx] + '\ttriggerGateDecorationFromEnv(ctx, cliPRDecorator, result, summary, scoped)\n' + run[idx:]
-          text = text[:run_start] + run + text[render_start:]
-
-          render_start = text.index('func printGateMarkdown(')
-          next_func = text.index('func filterNewCode(', render_start)
-          text = text[:render_start] + text[next_func:]
-          main.write_text(text)
-          PY
-          gofmt -w \
-            cmd/synapse-cli/main.go \
-            cmd/synapse-cli/push.go \
-            cmd/synapse-cli/pr_decoration.go \
-            cmd/synapse-cli/pr_decoration_test.go \
-            cmd/synapse-cli/pr_identity_test.go \
-            internal/domain/projectanalysis/origin.go \
-            internal/domain/qualitygate/markdown.go \
-            internal/domain/qualitygate/markdown_test.go \
-            internal/usecase/ports/pr_decorator.go \
-            internal/usecase/projectuc/service.go \
-            internal/usecase/projectuc/decoration.go \
-            internal/usecase/projectuc/decoration_test.go
-      - name: Targeted tests
-        run: go test ./internal/domain/qualitygate ./internal/domain/projectanalysis ./internal/usecase/ports ./internal/usecase/projectuc ./cmd/synapse-cli
-      - name: Build all commands without CGO
+      - name: Gate owned engine recall and parity
         env:
-          CGO_ENABLED: '0'
-        run: go build ./cmd/...
-      - name: Vet all Go packages
-        run: go vet ./...
-      - name: Commit verified implementation and clean temporary workflows
-        shell: bash
+          SYNAPSE_REACHBENCH_OWNED_REPORT: ${{ runner.temp }}/reachbench/synapse-owned.json
+          SYNAPSE_REACHBENCH_BASELINE_REPORTS: osv-scanner=${{ runner.temp }}/reachbench/osv-scanner.json,semgrep-ce=${{ runner.temp }}/reachbench/semgrep-ce.json
+        run: go test -count=1 -v -run TestGoReachabilityCorpus ./internal/infrastructure/tools/ssacallgraph
+
+      - name: Upload raw evidence and scorecards
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reachability-benchmark-go-scorecards
+          path: ${{ runner.temp }}/reachbench
+          if-no-files-found: warn
+
+  python-oss-baselines:
+    name: Python corpus vs Semgrep CE
+    runs-on: ubuntu-latest
+    env:
+      # OSV-Scanner has no Python call-analysis baseline (its call analysis covers Go and Rust), so the
+      # Python head-to-head is against Semgrep CE, whose pattern rule proves a dangerous-sink call site but
+      # not its entrypoint reachability. The owned engine must match or beat its recall AND precision.
+      SEMGREP_VERSION: 1.176.0
+      REACHBENCH_DIR: internal/infrastructure/tools/astwalk/testdata/reachbench
+      REACHBENCH_REPORT_DIR: ${{ runner.temp }}/reachbench
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned Semgrep CE
+        run: python -m pip install --disable-pip-version-check semgrep==${SEMGREP_VERSION}
+
+      - name: Run Semgrep CE Python direct-sink baseline
         run: |
-          git show 37d54d5bcac348e41e19cb78a57d7e170f1c0bdd:.github/workflows/reachability-benchmark.yml > .github/workflows/reachability-benchmark.yml
-          rm -f .github/workflows/zz-1121-branch-build.yml
-          git config user.name 'VietSory'
-          git config user.email '121284939+VietSory@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          git commit -m 'feat(cq): wire PR decoration completion triggers'
-          git push origin HEAD:feat/1121-pr-decoration-foundation
+          mkdir -p "${REACHBENCH_REPORT_DIR}"
+          set +e
+          semgrep scan --config internal/usecase/reachbench/corpus/semgrep-ce.yml --json --no-git-ignore "${REACHBENCH_DIR}" > "${REACHBENCH_REPORT_DIR}/semgrep.py.raw.json"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            echo "Semgrep CE failed with unexpected status $status"
+            exit "$status"
+          fi
+          go run ./cmd/synapse-bench -mode reachability-semgrep-ce -language python -input "${REACHBENCH_REPORT_DIR}/semgrep.py.raw.json" -output "${REACHBENCH_REPORT_DIR}/semgrep-ce.py.json"
+
+      - name: Gate owned Python engine recall and parity
+        env:
+          # The owned Python reachability engine uses cgo tree-sitter, so the corpus gate runs with CGO enabled.
+          CGO_ENABLED: '1'
+          SYNAPSE_REACHBENCH_OWNED_REPORT: ${{ runner.temp }}/reachbench/synapse-owned.py.json
+          SYNAPSE_REACHBENCH_BASELINE_REPORTS: semgrep-ce=${{ runner.temp }}/reachbench/semgrep-ce.py.json
+        run: go test -count=1 -v -run TestPythonReachabilityCorpus ./internal/infrastructure/tools/astwalk
+
+      - name: Upload raw evidence and scorecards
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reachability-benchmark-python-scorecards
+          path: ${{ runner.temp }}/reachbench
+          if-no-files-found: warn
