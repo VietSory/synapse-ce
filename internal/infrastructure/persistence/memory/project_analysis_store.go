@@ -286,6 +286,23 @@ func cloneProjectAnalysis(in projectanalysis.Analysis) projectanalysis.Analysis 
 		out.Coverage = &coverage
 	}
 	out.Duplication = cloneDuplication(in.Duplication)
+	if in.Coupling != nil {
+		coupling := *in.Coupling
+		coupling.Modules = slices.Clone(in.Coupling.Modules)
+		coupling.Edges = slices.Clone(in.Coupling.Edges)
+		coupling.Gaps = slices.Clone(in.Coupling.Gaps)
+		out.Coupling = &coupling
+	}
+	if in.BehavioralHotspots != nil {
+		report := *in.BehavioralHotspots
+		report.Commits = slices.Clone(in.BehavioralHotspots.Commits)
+		for i := range report.Commits {
+			report.Commits[i].TouchedPaths = slices.Clone(in.BehavioralHotspots.Commits[i].TouchedPaths)
+		}
+		report.Files = slices.Clone(in.BehavioralHotspots.Files)
+		report.Gaps = slices.Clone(in.BehavioralHotspots.Gaps)
+		out.BehavioralHotspots = &report
+	}
 	if len(in.Snapshot.Nodes) > 0 {
 		out.Snapshot.Nodes = slices.Clone(in.Snapshot.Nodes)
 		for i := range out.Snapshot.Nodes {

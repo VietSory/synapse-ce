@@ -35,7 +35,13 @@ import type {
   Severity,
 } from '../types'
 import { mapProjectOverviewResponse, type ProjectOverview } from '../projectOverview'
-import { mapProjectMeasureResponse, type MeasuresQuery, type ProjectMeasureResponse } from '../projectMeasures'
+import {
+  mapBehavioralHotspotsResponse,
+  mapProjectMeasureResponse,
+  type BehavioralHotspotsResponse,
+  type MeasuresQuery,
+  type ProjectMeasureResponse,
+} from '../projectMeasures'
 import { ApiError, blobDownload, getToken, getOnUnauthorized, req } from './client'
 import type { ProjectWire } from './wire'
 import { mapScanJob, mapCodeQualityReport } from './scan'
@@ -103,7 +109,7 @@ function mapProjectAnalysis(r: any): ProjectAnalysis {
     : null
   return {
     id: r.id ?? '', createdAt: r.created_at ?? '', origin, ci, sourceRef: r.source_ref ?? '', sourceCommit: r.source_commit ?? '',
-    gate: { passed: r.gate?.passed ?? false, results: (r.gate?.results ?? []).map((result: any) => ({ condition: { metric: result.metric ?? '', op: result.op ?? '', threshold: result.threshold ?? 0 }, actual: result.actual ?? 0, passed: result.passed ?? false })) },
+    gate: { passed: r.gate?.passed ?? false, results: (r.gate?.results ?? []).map((result: any) => ({ condition: { metric: result.metric ?? '', op: result.op ?? '', threshold: result.threshold ?? 0 }, actual: result.actual ?? 0, passed: result.passed ?? false, unmeasured: result.unmeasured === true })) },
     gateInfo: { key: r.gate_info?.key ?? '', name: r.gate_info?.name ?? 'Quality gate', source: r.gate_info?.source ?? '' },
     issues: counts(r.issues), newCode: { previousId: r.new_code?.previous_id ?? '', counts: counts(r.new_code?.counts), rating: { security: (r.new_code?.rating?.security ?? '?') as Grade, reliability: (r.new_code?.rating?.reliability ?? '?') as Grade, maintainability: r.new_code?.rating?.maintainability ? r.new_code.rating.maintainability as Grade : null } },
     delta: r.delta ? { issues: counts(r.delta.issues), measures: r.delta.measures ?? {}, ratings: r.delta.ratings ?? {} } : null, measures: r.measures ?? {},
@@ -370,6 +376,23 @@ export const codeQualityApi = {
     const qs = q.toString()
     const raw = await req(`/projects/${encodeURIComponent(projectKey)}/measures${qs ? `?${qs}` : ''}`, { signal })
     return mapProjectMeasureResponse(raw)
+  },
+
+  projectBehavioralHotspots: async (
+    projectKey: string,
+    analysisID: string,
+    query: { path?: string; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<BehavioralHotspotsResponse> => {
+    const q = new URLSearchParams()
+    if (query.path) q.set('path', query.path)
+    if (query.limit) q.set('limit', query.limit.toString())
+    const qs = q.toString()
+    const raw = await req(
+      `/projects/${encodeURIComponent(projectKey)}/analyses/${encodeURIComponent(analysisID)}/behavioral-hotspots${qs ? `?${qs}` : ''}`,
+      { signal },
+    )
+    return mapBehavioralHotspotsResponse(raw)
   },
 
   listQualityGates: async (): Promise<QualityGate[]> =>

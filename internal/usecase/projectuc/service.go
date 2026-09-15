@@ -49,6 +49,7 @@ type Service struct {
 	gates                            *qualitygatesuc.Service
 	gateMutator                      ports.QualityGateMutator
 	profiles                         *qualityprofilesuc.Service
+	decorator                        ports.PRDecorator
 	allowLocalSource                 bool
 	projectAnalysisCompletionTimeout time.Duration
 	cursorSecret                     []byte
@@ -80,6 +81,7 @@ func (s *Service) SetQualityProfiles(profiles *qualityprofilesuc.Service) { s.pr
 func (s *Service) SetFindingRepository(repo ports.FindingRepository)      { s.findings = repo }
 func (s *Service) SetQualityGates(gates *qualitygatesuc.Service)          { s.gates = gates }
 func (s *Service) SetQualityGateMutator(mutator ports.QualityGateMutator) { s.gateMutator = mutator }
+func (s *Service) SetPRDecorator(decorator ports.PRDecorator)             { s.decorator = decorator }
 
 func (s *Service) completionTimeout() time.Duration {
 	if s.projectAnalysisCompletionTimeout > 0 {
@@ -743,26 +745,52 @@ func (s *Service) recordProjectAnalysis(ctx context.Context, engagementID shared
 	var inventory measure.Inventory
 	var compPtr *measure.ComplexityReport
 	var dupPtr *measure.DuplicationReport
+	var couplingPtr *measure.CouplingReport
+	var behavioralPtr *measure.BehavioralHotspotsReport
 	if result.CodeQuality != nil {
 		inventory = result.CodeQuality.Inventory
 		compPtr = result.CodeQuality.Complexity
 		dupPtr = result.CodeQuality.Duplication
+		couplingPtr = result.CodeQuality.Coupling
+		behavioralPtr = result.CodeQuality.BehavioralHotspots
+		if couplingPtr != nil {
+			if err := couplingPtr.Validate(); err != nil {
+				return fmt.Errorf("validate coupling report: %w", err)
+			}
+		}
+		if behavioralPtr != nil {
+			if err := behavioralPtr.Validate(); err != nil {
+				return fmt.Errorf("validate behavioral hotspots report: %w", err)
+			}
+			if result.SourceCommit != "" && behavioralPtr.HeadCommit != "" && result.SourceCommit != behavioralPtr.HeadCommit {
+				return fmt.Errorf("validate behavioral hotspots report: source commit does not match history head")
+			}
+			if behavioralPtr.Availability != measure.BehavioralUnavailable {
+				rebuilt, err := measure.BuildBehavioralHotspots(measure.BuildBehavioralHotspotsInput{
+					Inventory: inventory, Complexity: compPtr, Commits: behavioralPtr.Commits,
+					HeadCommit: behavioralPtr.HeadCommit, RequestedCommits: behavioralPtr.RequestedCommits,
+					EvaluatedCommits: behavioralPtr.EvaluatedCommits, ReachedRoot: behavioralPtr.ReachedRoot,
+					HistoryAvailable: true,
+				})
+				if err != nil {
+					return fmt.Errorf("rebuild behavioral hotspots report: %w", err)
+				}
+				behavioralPtr = &rebuilt
+			}
+		}
 	}
 
 	snapshot, err := measure.BuildSnapshot(measure.BuildSnapshotInput{
-		Inventory:   inventory,
-		Complexity:  compPtr,
-		Coverage:    result.LineCoverage,
-		Duplication: dupPtr,
-		Issues:      issueInputs,
-		RuleCatalog: resolver,
+		Inventory:    inventory,
+		Complexity:   compPtr,
+		Coverage:     result.LineCoverage,
+		Duplication:  dupPtr,
+		Issues:       issueInputs,
+		RuleCatalog:  resolver,
+		ChangedLines: projectanalysis.ChangedLineSet(result.FileChanges),
 	})
 	if err != nil {
 		return fmt.Errorf("build measure snapshot: %w", err)
-	}
-	var analysisDuplication measure.DuplicationReport
-	if dupPtr != nil {
-		analysisDuplication = *dupPtr
 	}
 	analysisTruncated := result.CodeQuality != nil && result.CodeQuality.Truncated ||
 		compPtr != nil && compPtr.Truncated || dupPtr != nil && dupPtr.Truncated
@@ -809,7 +837,7 @@ func (s *Service) recordProjectAnalysis(ctx context.Context, engagementID shared
 		SourceRevision: projectanalysis.SourceRevision{Kind: projectScanKind(p.SourceBinding.Kind), Head: result.SourceCommit, Base: comparison.BaseCommit, MergeBase: comparison.MergeBase, AnalysisID: jobID},
 		Capabilities:   capabilities, SourceManifest: manifest, Comparison: comparison, FileChanges: result.FileChanges, Annotations: annotations,
 		Findings: issues, Gate: gate, GateSource: gateSource, GateExempt: exempt, LinesOfCode: loc,
-		Coverage: analysisCoverage, Duplication: analysisDuplication, AnalysisTruncated: analysisTruncated, Previous: baseline,
+		Coverage: analysisCoverage, Duplication: dupPtr, Coupling: couplingPtr, BehavioralHotspots: behavioralPtr, AnalysisTruncated: analysisTruncated, Previous: baseline,
 		Hotspots: overallHsSummary, NewHotspots: newHsSummary, Snapshot: snapshot,
 	})
 	if err != nil {
@@ -837,6 +865,7 @@ func (s *Service) recordProjectAnalysis(ctx context.Context, engagementID shared
 	} else if err := s.analyses.SaveWithResult(ctx, analysis, data); err != nil {
 		return fmt.Errorf("save project analysis: %w", err)
 	}
+	s.decorateProjectAnalysis(ctx, analysis)
 	return nil
 }
 

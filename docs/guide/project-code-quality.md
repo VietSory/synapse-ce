@@ -97,6 +97,8 @@ Hotspots are never auto-resolved. `to_review` is the honest default, and the
 ```
 GET /api/v1/projects/{key}/overview     current ratings and headline measures
 GET /api/v1/projects/{key}/measures     paginated metric history
+GET /api/v1/projects/{key}/analyses/{analysisID}/behavioral-hotspots
+                                        ranked files from one immutable analysis
 ```
 
 Measure pagination cursors are signed with `SYNAPSE_MEASURE_CURSOR_SECRET`, which is required in
@@ -105,7 +107,25 @@ deterministically from stored findings.
 
 A metric is reported as unavailable rather than guessed when its analyzer could not run. Complexity and
 structural metrics need the `synapse-ast` sidecar; without it they degrade to Go-only counts instead of
-reporting a false zero.
+reporting a false zero. The Coupling tab derives direct first-party dependencies for Go packages and
+JavaScript/TypeScript modules from source imports. It reports afferent coupling (Ca), efferent coupling
+(Ce), and instability (`Ce / (Ca + Ce)`) for each module or directory boundary. An isolated module has
+no defined instability, and an incomplete dependency graph is shown as unavailable instead of zero.
+
+The **Behavioral Hotspots** tab combines static complexity with recent change frequency. For each
+measured source file, `score = cyclomatic complexity × number of first-parent commits that touched the
+path`; files are ranked by score, changes, complexity, and then path. The default comparison depth of
+256 evaluates at most 255 commits (one revision is reserved for the boundary). History is collected
+without fetching, follows the first-parent chain, treats renames as delete/add paths, and is pinned to
+the analysis commit. Results may be `complete`, `partial` (some inventory files lack complexity), or
+`unavailable` with a reason; missing history or AST coverage is never represented as a zero score.
+Behavioral hotspots are code-maintenance signals, not the separately reviewed **Security Hotspots**, and
+they do not add findings or change a quality gate.
+
+Managed server scans require both the confined tool runner and the `synapse-ast` sidecar. Local
+`synapse-cli scan --server` uploads the snapshot computed from its checked-out repository. Shallow CI
+checkouts must fetch at least `SYNAPSE_PROJECT_GIT_COMPARISON_DEPTH` revisions to obtain the configured
+window; Synapse never deepens or otherwise mutates the checkout itself.
 
 ## Quality gates
 
@@ -123,10 +143,22 @@ PUT    /api/v1/projects/{key}/gate          bind a gate to a project
 
 Available metrics include `new_critical`, `new_high`, `new_medium`, `new_issues`, `new_vulnerability`,
 `new_secret`, `new_misconfig`, `new_coverage`, `coverage`, `new_duplication`, `duplication_density`,
-`maintainability_rating`, and `new_security_hotspots_reviewed`.
+`maintainability_rating`, `max_efferent_coupling`, `max_instability`, and
+`new_security_hotspots_reviewed`. Coupling gate metrics use the maximum complete per-module value;
+collection gaps fail closed as unmeasured conditions rather than passing a threshold.
 
 Conditions on `new_*` metrics implement Clean as You Code: a legacy codebase can adopt a strict gate for
 changed lines without first repaying all existing debt.
+
+`coverage`, `new_coverage`, and `new_duplication` are measurements rather than counters, and an analysis
+may have nothing to measure: no coverage report was supplied, the analysis had no diff, or the diff touched
+no line the report knows about. A condition on one of these then fails closed and is reported as
+**unmeasured** (`"unmeasured": true` in the API, `no data` in the CLI) rather than being judged against a
+0 nobody computed — a `new_duplication <= 3` condition does not pass on the strength of a missing
+measurement. `new_coverage` is line coverage over the lines the diff added; `new_duplication` is the share
+of those lines that sit inside a duplicated block. The measures snapshot's `new_code_coverage` carries the
+specific reason when it is unavailable: `no_coverage_report`, `no_changed_lines`, or
+`changed_lines_not_in_report`.
 
 ## Quality profiles
 

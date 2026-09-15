@@ -210,6 +210,19 @@ other than `full`. The project must exist on the server first; create it in the 
 Recording a result needs the operate permission. Give the pipeline its own user with that role
 rather than the bootstrap operator token.
 
+### CI pull / merge-request identity
+
+When a scan is pushed with `--server`, Synapse also captures provider-neutral pull/merge-request identity for later PR decoration. Explicit CLI CI fields still win; the variables below fill only missing values. The forge head SHA is the source commit for the change, not GitHub's synthetic merge commit.
+
+| Provider | Variables used |
+| --- | --- |
+| GitHub Actions | `GITHUB_HEAD_REF`, `GITHUB_BASE_REF`, `GITHUB_REPOSITORY`, `GITHUB_REF`, and the `pull_request` payload in `GITHUB_EVENT_PATH` (including `head.sha`). |
+| GitLab CI | `CI_MERGE_REQUEST_IID`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`, `CI_PROJECT_PATH`, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA` (falling back to `CI_COMMIT_SHA`). |
+| Bitbucket Pipelines | `BITBUCKET_PR_ID`, `BITBUCKET_PR_DESTINATION_BRANCH`, `BITBUCKET_REPO_FULL_NAME`, `BITBUCKET_COMMIT`. |
+| Jenkins multibranch | `CHANGE_ID`, `CHANGE_TARGET`, `GIT_COMMIT`; set `SYNAPSE_REPO_SLUG` when Jenkins cannot infer the repository slug. |
+
+Provider-independent overrides are `SYNAPSE_PR_NUMBER`, `SYNAPSE_PR_TARGET_BRANCH`, `SYNAPSE_REPO_SLUG`, and `SYNAPSE_PR_HEAD_SHA`. Decoration is skipped unless all four identity fields are present.
+
 ## False-positive gate
 
 A scan of a real repository surfaces findings in test files and deliberately-insecure fixtures. Synapse
@@ -545,10 +558,28 @@ the gate without fixing all pre-existing debt first.
 # fail the build if new code introduces a critical/high issue, a new secret, or drops below A ratings
 synapse-cli gate . --new-code-only --base origin/main
 
-# feed a coverage report (lcov / Cobertura / JaCoCo, auto-detected); a .synapse-gate.yaml can then
+# feed a coverage report (lcov / Cobertura / JaCoCo / Go -coverprofile, auto-detected); a .synapse-gate.yaml can then
 # require e.g. `coverage >= 80` on new code
 synapse-cli gate . --new-code-only --base origin/main --coverage coverage.info
 ```
+
+With `--new-code-only` the gate also measures `new_coverage` (line coverage over the added lines the
+report knows about) and `new_duplication` (the share of added lines inside a duplicated block). Each is
+written only when it could be measured: a condition on `coverage`, `new_coverage`, or `new_duplication`
+with no measurement fails as `no data` rather than being judged against a 0 nobody computed — so a
+`new_duplication` condition without `--new-code-only`, or with a diff no report line matches, fails
+rather than silently passing.
+
+The gate also builds a first-party dependency graph for Go and JavaScript/TypeScript source. Managed or
+local gates can cap `max_efferent_coupling` and `max_instability`; if graph collection is incomplete,
+those conditions are reported as `no data` and fail closed. `synapse-cli quality` prints the same maxima
+for architectural feedback without executing project code or package managers.
+
+`synapse-cli scan --server` also records a commit-pinned Behavioral Hotspots snapshot when the source is
+a clean Git worktree and enough first-parent history is already present. It scores each file as
+cyclomatic complexity multiplied by the number of commits that touched its current path. Collection is
+read-only and performs no network fetch; unavailable or shallow evidence stays explicit and does not
+create findings or affect the gate.
 
 | Flag | Default | Description |
 | --- | --- | --- |
@@ -556,7 +587,7 @@ synapse-cli gate . --new-code-only --base origin/main --coverage coverage.info
 | `--base <ref>` | `origin/main` | Git reference the new-code diff is computed against. |
 | `--gate <file>` | `<path>/.synapse-gate.yaml` | Gate definition to apply. |
 | `--rules <file>` | `<path>/.synapse-rules.yaml` | Rule enable/disable and severity overrides. |
-| `--coverage <file>` | none | Coverage report (lcov, Cobertura, or JaCoCo, auto-detected) so gate conditions can require a coverage floor. |
+| `--coverage <file>` | none | Coverage report (lcov, Cobertura, JaCoCo, or a Go `-coverprofile`, auto-detected) so gate conditions can require a coverage floor. A Go profile names files by import path; the CLI reads the `module` directive from `<dir>/go.mod` and strips it so lines key on repo-relative paths. Without a `go.mod` at the scan root the import paths are kept as-is and will not match the tree. |
 | `--format text\|markdown` | `text` | Output format. `markdown` prints a ready-to-post PR summary. |
 
 A `.synapse-gate.yaml` overrides the built-in gate, and a `.synapse-rules.yaml` enables/disables rules
@@ -571,6 +602,12 @@ conditions:
   - metric: coverage
     op: ">="
     threshold: 80
+  - metric: max_efferent_coupling
+    op: "<="
+    threshold: 12
+  - metric: max_instability
+    op: "<="
+    threshold: 0.8
 ```
 
 Inspect coverage on its own:
@@ -598,7 +635,7 @@ synapse-cli rating <path> [--json] [--fail-below GRADE]
 | `inventory` | Languages, files, and lines of code | none |
 | `metrics` | Per-function cyclomatic and cognitive complexity | `--fail-on-complexity N` exits `1` when any function exceeds `N` |
 | `duplication` | Duplicated blocks, lines, and density | `--fail-on-duplication PCT` exits `1` when density exceeds `PCT` |
-| `quality` | Maintainability and reliability findings, plus duplication and complexity bridges | `--fail-on SEV` accepts `critical\|high\|medium\|low\|info` |
+| `quality` | Maintainability and reliability findings, duplication and complexity bridges, and module coupling maxima | `--fail-on SEV` accepts `critical\|high\|medium\|low\|info` |
 | `rating` | A–E security, reliability, and maintainability grades with technical debt | `--fail-below GRADE` exits `1` when any grade falls below it |
 
 `--top N` limits how many entries are printed. `quality --sarif` writes a SARIF report, and

@@ -5,12 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/coverage"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/gitdiff"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/sast"
 )
@@ -223,5 +229,125 @@ func TestRunQualitySARIFIsValidJSON(t *testing.T) {
 	}
 	if len(doc.Runs) == 0 || len(doc.Runs[0].Results) == 0 {
 		t.Fatalf("sarif carries no results: %s", buf.String())
+	}
+}
+
+// TestApplyNewCodeMetrics: in new-code mode the CLI writes new_coverage and new_duplication only when it
+// could measure them. The gate treats an absent key as "no data" and fails the condition; a 0 written
+// for a missing report would let `new_duplication <= 3` pass on nothing, which is exactly the outcome
+// the absent key exists to prevent.
+func TestApplyNewCodeMetrics(t *testing.T) {
+	changed := gitdiff.ChangedLines{"src/a.go": {10: true, 11: true, 12: true, 13: true}}
+	lc := coverage.LineCoverage{"./src/a.go": {10: true, 11: true, 12: false, 99: false}}
+	dup := &measure.DuplicationReport{Blocks: []measure.DuplicationBlock{{Occurrences: []measure.CodeRange{{File: "src/a.go", StartLine: 12, EndLine: 13}}}}}
+
+	snap := qualitygate.Snapshot{}
+	applyNewCodeMetrics(snap, lc, dup, changed)
+	if got, ok := snap[qualitygate.MetricNewCoverage]; !ok || got != 100.0*2/3 {
+		t.Fatalf("new_coverage = %g ok=%v, want %g (2 of the 3 changed lines the report knows about; line 99 is unchanged)", got, ok, 100.0*2/3)
+	}
+	if got, ok := snap[qualitygate.MetricNewDuplication]; !ok || got != 50 {
+		t.Fatalf("new_duplication = %g ok=%v, want 50 (lines 12-13 of 4 changed lines are duplicated)", got, ok)
+	}
+
+	// No coverage report: new_coverage stays absent; new_duplication is still measured.
+	snap = qualitygate.Snapshot{}
+	applyNewCodeMetrics(snap, nil, dup, changed)
+	if _, present := snap[qualitygate.MetricNewCoverage]; present {
+		t.Fatal("new_coverage must be absent without a report")
+	}
+	if _, present := snap[qualitygate.MetricNewDuplication]; !present {
+		t.Fatal("new_duplication must still be measured without a coverage report")
+	}
+
+	// A report that matches no changed line, and a diff with no lines: nothing is written.
+	snap = qualitygate.Snapshot{}
+	applyNewCodeMetrics(snap, coverage.LineCoverage{"other.go": {1: true}}, dup, gitdiff.ChangedLines{})
+	if len(snap) != 0 {
+		t.Fatalf("nothing measurable must write nothing, got %v", snap)
+	}
+
+	// The absent keys are what make the gate fail closed rather than pass on 0.
+	res := qualitygate.Evaluate(qualitygate.Gate{Conditions: []qualitygate.Condition{{Metric: qualitygate.MetricNewDuplication, Op: qualitygate.OpLE, Threshold: 3}}}, snap)
+	if res.Passed || !res.Results[0].Unmeasured {
+		t.Fatalf("an unmeasured new_duplication must fail closed: %+v", res.Results)
+	}
+}
+
+func TestGoModulePath(t *testing.T) {
+	dir := t.TempDir()
+	if got := goModulePath(dir); got != "" {
+		t.Fatalf("no go.mod must read as no module, got %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("// comment\nmodule  example.com/acme/app // trailing\n\ngo 1.27\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := goModulePath(dir); got != "example.com/acme/app" {
+		t.Fatalf("module path = %q, want example.com/acme/app", got)
+	}
+	// Anything that is not a regular file is not read. The case that matters is a FIFO with no
+	// writer: without the type check, ReadFile blocks the gate forever, so the assertion is a deadline.
+	if runtime.GOOS == "windows" {
+		return
+	}
+	odd := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(odd, "go.mod"), 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- goModulePath(odd) }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("a non-regular go.mod must read as no module, got %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("goModulePath blocked on a FIFO named go.mod: the regular-file check is missing")
+	}
+}
+
+// TestRunGateStripsGoModulePathForNewCodeCoverage is the wiring test: the only place that supplies the
+// module path to the parser is runGate, and its effect is visible only when coverage keys must match the
+// diff's repo-relative paths. A Go profile keyed by import path passes a new-code coverage floor only if
+// that prefix was stripped; a regression to Options{} leaves every parser test green and fails this one.
+func TestRunGateStripsGoModulePathForNewCodeCoverage(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	write("go.mod", "module example.com/acme/app\n\ngo 1.27\n")
+	write("calc.go", "package app\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n")
+	git("init", "-q", "-b", "main")
+	git("add", ".")
+	git("commit", "-q", "-m", "base")
+	// The change adds lines 7-9; the profile marks them covered under the IMPORT path.
+	write("calc.go", "package app\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\nfunc Sub(a, b int) int {\n\treturn a - b\n}\n")
+	git("add", ".")
+	git("commit", "-q", "-m", "change")
+	write("cover.out", "mode: set\nexample.com/acme/app/calc.go:3.24,5.2 1 1\nexample.com/acme/app/calc.go:7.24,9.2 1 1\n")
+	write(".synapse-gate.yaml", "conditions:\n  - metric: coverage\n    op: \">=\"\n    threshold: 50\n")
+
+	if err := runGate([]string{root, "--new-code-only", "--base", "HEAD~1", "--coverage", filepath.Join(root, "cover.out")}); err != nil {
+		t.Fatalf("new-code coverage floor must pass once the module path is stripped: %v", err)
+	}
+	// The same profile with a module the tree does not declare cannot be matched: the floor fails.
+	write("go.mod", "module example.com/other/mod\n\ngo 1.27\n")
+	if err := runGate([]string{root, "--new-code-only", "--base", "HEAD~1", "--coverage", filepath.Join(root, "cover.out")}); err == nil || !strings.Contains(err.Error(), "quality gate FAILED") {
+		t.Fatalf("with an unmatched module path the import-path keys must not match the diff, got %v", err)
 	}
 }

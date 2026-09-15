@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertCircle,
   Clock,
   CpuChip01,
@@ -213,6 +214,20 @@ export function getDomainColumns(
             cell: (i) => <MetricValue m={i.complexity?.cognitive} />,
           },
         ]
+      case 'coupling':
+        return [
+          ...base,
+          { header: 'Incoming (Ca)', cell: (i) => <MetricValue m={i.coupling?.afferent} /> },
+          { header: 'Outgoing (Ce)', cell: (i) => <MetricValue m={i.coupling?.efferent} /> },
+          { header: 'Instability', cell: (i) => <MetricValue m={i.coupling?.instability} /> },
+        ]
+      case 'behavioral_hotspots':
+        return [
+          ...base,
+          { header: 'Cyclomatic sum', cell: (i) => <MetricValue m={i.behavioralHotspots?.cyclomaticSum} /> },
+          { header: 'Changes', cell: (i) => <MetricValue m={i.behavioralHotspots?.changeCount} /> },
+          { header: 'Score', cell: (i) => <MetricValue m={i.behavioralHotspots?.score} /> },
+        ]
       case 'coverage':
         return [
           ...base,
@@ -389,6 +404,18 @@ export function CurrentNodeMeasures({
     items.push(
       { label: 'Cyclomatic Complexity', icon: CpuChip01, m: node.complexity?.cyclomatic },
       { label: 'Cognitive Complexity', icon: CpuChip01, m: node.complexity?.cognitive },
+    )
+  } else if (domain === 'coupling') {
+    items.push(
+      { label: 'Incoming dependencies (Ca)', icon: CpuChip01, m: node.coupling?.afferent },
+      { label: 'Outgoing dependencies (Ce)', icon: CpuChip01, m: node.coupling?.efferent },
+      { label: 'Instability Ce / (Ca + Ce)', icon: Percent01, m: node.coupling?.instability },
+    )
+  } else if (domain === 'behavioral_hotspots') {
+    items.push(
+      { label: 'Maximum hotspot score', icon: Activity, m: node.behavioralHotspots?.score },
+      { label: 'Measured descendant files', icon: File01, m: node.behavioralHotspots?.changeCount },
+      { label: 'Cyclomatic × changes', icon: CpuChip01, m: node.behavioralHotspots?.cyclomaticSum },
     )
   } else if (domain === 'coverage') {
     items.push(

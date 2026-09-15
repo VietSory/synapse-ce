@@ -72,28 +72,30 @@ type Analysis struct {
 	// before the import route was a server analysis.
 	Origin Origin `json:"origin,omitempty"`
 	// CI is the pipeline's own account of the run, present only for OriginCI.
-	CI             *CIContext                `json:"ci,omitempty"`
-	SourceRef      string                    `json:"source_ref,omitempty"`
-	SourceCommit   string                    `json:"source_commit,omitempty"`
-	SourceRevision SourceRevision            `json:"source_revision,omitempty"`
-	Capabilities   SourceCapabilities        `json:"capabilities,omitempty"`
-	SourceManifest SourceManifest            `json:"source_manifest,omitempty"`
-	Comparison     Comparison                `json:"comparison,omitempty"`
-	FileChanges    []FileChange              `json:"file_changes,omitempty"`
-	Annotations    []Annotation              `json:"annotations,omitempty"`
-	Measures       qualitygate.Snapshot      `json:"measures"`
-	Gate           qualitygate.Result        `json:"gate"`
-	GateInfo       GateInfo                  `json:"gate_info"`
-	Issues         Counts                    `json:"issues"`
-	InternalIssues []Issue                   `json:"internal_issues"`
-	NewCode        NewCode                   `json:"new_code"`
-	Delta          *Delta                    `json:"delta"`
-	Coverage       *measure.CoverageReport   `json:"coverage"`
-	Duplication    measure.DuplicationReport `json:"duplication"`
-	Rating         rating.Report             `json:"rating"`
-	Hotspots       hotspot.Summary           `json:"hotspots"`
-	NewHotspots    hotspot.Summary           `json:"new_hotspots"`
-	Snapshot       measure.Snapshot          `json:"snapshot"`
+	CI                 *CIContext                        `json:"ci,omitempty"`
+	SourceRef          string                            `json:"source_ref,omitempty"`
+	SourceCommit       string                            `json:"source_commit,omitempty"`
+	SourceRevision     SourceRevision                    `json:"source_revision,omitempty"`
+	Capabilities       SourceCapabilities                `json:"capabilities,omitempty"`
+	SourceManifest     SourceManifest                    `json:"source_manifest,omitempty"`
+	Comparison         Comparison                        `json:"comparison,omitempty"`
+	FileChanges        []FileChange                      `json:"file_changes,omitempty"`
+	Annotations        []Annotation                      `json:"annotations,omitempty"`
+	Measures           qualitygate.Snapshot              `json:"measures"`
+	Gate               qualitygate.Result                `json:"gate"`
+	GateInfo           GateInfo                          `json:"gate_info"`
+	Issues             Counts                            `json:"issues"`
+	InternalIssues     []Issue                           `json:"internal_issues"`
+	NewCode            NewCode                           `json:"new_code"`
+	Delta              *Delta                            `json:"delta"`
+	Coverage           *measure.CoverageReport           `json:"coverage"`
+	Duplication        measure.DuplicationReport         `json:"duplication"`
+	Coupling           *measure.CouplingReport           `json:"coupling,omitempty"`
+	BehavioralHotspots *measure.BehavioralHotspotsReport `json:"behavioral_hotspots,omitempty"`
+	Rating             rating.Report                     `json:"rating"`
+	Hotspots           hotspot.Summary                   `json:"hotspots"`
+	NewHotspots        hotspot.Summary                   `json:"new_hotspots"`
+	Snapshot           measure.Snapshot                  `json:"snapshot"`
 }
 
 // UnmarshalJSON handles legacy decoding where Snapshot might be empty or missing.
@@ -153,37 +155,49 @@ func (a Analysis) Branch() string {
 // Input supplies one completed scan's project-facing facts. Findings must be the
 // merged root and code-quality findings, not two independently counted lists.
 type Input struct {
-	ID                string
-	TenantID          shared.ID
-	ProjectID         shared.ID
-	ProjectKey        string
-	CreatedAt         time.Time
-	Origin            Origin
-	CI                *CIContext
-	SourceRef         string
-	SourceCommit      string
-	SourceRevision    SourceRevision
-	Capabilities      SourceCapabilities
-	SourceManifest    SourceManifest
-	Comparison        Comparison
-	FileChanges       []FileChange
-	Annotations       []Annotation
-	Findings          []finding.Finding
-	Gate              qualitygate.Gate
-	GateSource        string
-	GateExempt        map[string]bool
-	LinesOfCode       int
-	Coverage          *measure.CoverageReport
-	Duplication       measure.DuplicationReport
-	AnalysisTruncated bool
-	Previous          *Analysis
-	Hotspots          hotspot.Summary
-	NewHotspots       hotspot.Summary
-	Snapshot          measure.Snapshot
+	ID                 string
+	TenantID           shared.ID
+	ProjectID          shared.ID
+	ProjectKey         string
+	CreatedAt          time.Time
+	Origin             Origin
+	CI                 *CIContext
+	SourceRef          string
+	SourceCommit       string
+	SourceRevision     SourceRevision
+	Capabilities       SourceCapabilities
+	SourceManifest     SourceManifest
+	Comparison         Comparison
+	FileChanges        []FileChange
+	Annotations        []Annotation
+	Findings           []finding.Finding
+	Gate               qualitygate.Gate
+	GateSource         string
+	GateExempt         map[string]bool
+	LinesOfCode        int
+	Coverage           *measure.CoverageReport
+	Duplication        *measure.DuplicationReport // nil when no duplication walk ran, like Coverage
+	Coupling           *measure.CouplingReport
+	BehavioralHotspots *measure.BehavioralHotspotsReport
+	AnalysisTruncated  bool
+	Previous           *Analysis
+	Hotspots           hotspot.Summary
+	NewHotspots        hotspot.Summary
+	Snapshot           measure.Snapshot
 }
 
 // Build returns one immutable snapshot and evaluates the built-in gate at creation.
 func Build(in Input) (Analysis, error) {
+	if in.Coupling != nil {
+		if err := in.Coupling.Validate(); err != nil {
+			return Analysis{}, fmt.Errorf("invalid coupling report: %w", err)
+		}
+	}
+	if in.BehavioralHotspots != nil {
+		if err := in.BehavioralHotspots.Validate(); err != nil {
+			return Analysis{}, fmt.Errorf("invalid behavioral hotspots report: %w", err)
+		}
+	}
 	pairs, err := compactIssues(finding.Publishable(in.Findings))
 	if err != nil {
 		return Analysis{}, err
@@ -229,7 +243,7 @@ func Build(in Input) (Analysis, error) {
 	overallRating := rating.Compute(normalized, in.LinesOfCode)
 	newRating := rating.Compute(newFindings, 0)
 	gateOverallRating := rating.Compute(gateFindings, in.LinesOfCode)
-	measures := buildMeasures(countIssues(gateIssues), countIssues(gateNewIssues), gateOverallRating, in.Duplication, in.Coverage, in.Hotspots, in.NewHotspots)
+	measures := buildMeasures(countIssues(gateIssues), countIssues(gateNewIssues), gateOverallRating, in.Duplication, in.Coverage, in.Coupling, in.Hotspots, in.NewHotspots, ChangedLineSet(in.FileChanges))
 	gateDef := in.Gate
 	gateSource := in.GateSource
 	if len(gateDef.Conditions) == 0 {
@@ -261,7 +275,7 @@ func Build(in Input) (Analysis, error) {
 		GateInfo: GateInfo{Key: gateDef.Key, Name: gateName, Source: gateSource}, Issues: counts,
 		InternalIssues: issues, NewCode: NewCode{PreviousID: previousID, Counts: newCounts, Rating: NewCodeRating{Security: newRating.Security, Reliability: newRating.Reliability}},
 		Delta: buildDelta(counts, measures, overallRating, in.Previous), Coverage: in.Coverage,
-		Duplication: in.Duplication, Rating: overallRating,
+		Duplication: derefDuplication(in.Duplication), Coupling: in.Coupling, BehavioralHotspots: in.BehavioralHotspots, Rating: overallRating,
 		Hotspots: in.Hotspots, NewHotspots: in.NewHotspots,
 		Snapshot: in.Snapshot,
 	}, nil
@@ -348,20 +362,98 @@ func countIssues(issues []Issue) Counts {
 	return counts
 }
 
-func buildMeasures(all, new Counts, overallRating rating.Report, duplication measure.DuplicationReport, coverage *measure.CoverageReport, hotspots, newHotspots hotspot.Summary) qualitygate.Snapshot {
+// maxChangedLines bounds how many changed lines the new-code measurements expand into a set. The file
+// changes reach this code from the CI import as JSON, so the ranges are caller-supplied; a diff larger
+// than this is not measured (the set is nil, so both new-code metrics report no data) rather than
+// allowed to size a map without limit.
+const maxChangedLines = 1 << 20
+
+// ChangedLineSet is the new-side changed lines of an analysis as file -> set of line numbers, the shape
+// the new-code measurements consume. Only Added ranges count (Modified mirrors them; Removed lines no
+// longer exist), a deleted or binary change contributes nothing, and paths are canonicalised so the set
+// shares a key space with coverage and duplication data, which are canonicalised the same way.
+//
+// The ranges are untrusted input. An invalid range, or a diff over maxChangedLines, yields nil: the
+// new-code metrics then fail closed as unmeasured, which is the right answer for a diff that cannot be
+// trusted to describe itself.
+func ChangedLineSet(changes []FileChange) map[string]map[int]bool {
+	out := map[string]map[int]bool{}
+	total := 0
+	for _, c := range changes {
+		if c.Binary || c.Status == FileStatusDeleted || len(c.Added) == 0 {
+			continue
+		}
+		path, err := measure.CanonicalPath(c.NewPath)
+		if err != nil || path == "" {
+			continue
+		}
+		for _, r := range c.Added {
+			if !r.Valid() {
+				return nil
+			}
+			// Valid guarantees Start > 0 and End >= Start, so this cannot overflow.
+			if total += r.End - r.Start + 1; total > maxChangedLines {
+				return nil
+			}
+			lines := out[path]
+			if lines == nil {
+				lines = map[int]bool{}
+				out[path] = lines
+			}
+			// Stop on End before incrementing: a loop of the form `ln <= End` never terminates when End
+			// is the maximum int, and End is caller-supplied.
+			for ln := r.Start; ; ln++ {
+				lines[ln] = true
+				if ln == r.End {
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// derefDuplication keeps the persisted Analysis shape: a missing walk is stored as the zero report, as it
+// always was; only the measurement path distinguishes the two.
+func derefDuplication(d *measure.DuplicationReport) measure.DuplicationReport {
+	if d == nil {
+		return measure.DuplicationReport{}
+	}
+	return *d
+}
+
+// buildMeasures is the gate snapshot. A metric present in the snapshot was measured; one that could not
+// be measured is left absent, never written as 0 — coverage has always followed that rule, and the two
+// new-code measurements follow it too, so a gate condition on them fails closed with "no data" rather
+// than passing on a value nobody computed.
+func buildMeasures(all, new Counts, overallRating rating.Report, duplication *measure.DuplicationReport, coverage *measure.CoverageReport, coupling *measure.CouplingReport, hotspots, newHotspots hotspot.Summary, changed map[string]map[int]bool) qualitygate.Snapshot {
 	metrics := qualitygate.Snapshot{
 		qualitygate.MetricNewIssues:       float64(new.Total),
 		qualitygate.MetricNewCritical:     float64(new.BySeverity[string(shared.SeverityCritical)]),
 		qualitygate.MetricNewHigh:         float64(new.BySeverity[string(shared.SeverityHigh)]),
 		qualitygate.MetricNewMedium:       float64(new.BySeverity[string(shared.SeverityMedium)]),
 		qualitygate.MetricTotalCritical:   float64(all.BySeverity[string(shared.SeverityCritical)]),
-		qualitygate.MetricDuplicationPct:  duplication.Density(),
+		qualitygate.MetricDuplicationPct:  derefDuplication(duplication).Density(),
 		qualitygate.MetricSecurityRating:  float64(gradeNumber(overallRating.Security)),
 		qualitygate.MetricReliability:     float64(gradeNumber(overallRating.Reliability)),
 		qualitygate.MetricMaintainability: float64(gradeNumber(overallRating.Maintainability)),
 	}
 	if coverage != nil {
 		metrics[qualitygate.MetricCoveragePct] = coverage.Percent()
+		if pct, ok := coverage.Lines.NewCodePercent(changed); ok {
+			metrics[qualitygate.MetricNewCoverage] = pct
+		}
+	}
+	if pct, ok := measure.NewCodeDuplicationPercent(duplication, changed); ok {
+		metrics[qualitygate.MetricNewDuplication] = pct
+	}
+	if coupling != nil {
+		if value, ok := coupling.MaxEfferent(); ok {
+			metrics[qualitygate.MetricMaxEfferentCoupling] = float64(value)
+		}
+		if value, ok := coupling.MaxInstability(); ok {
+			metrics[qualitygate.MetricMaxInstability] = value
+		}
 	}
 	metrics[qualitygate.MetricSecurityHotspotsReviewed] = hotspots.ReviewedPct
 	metrics[qualitygate.MetricNewSecurityHotspotsReviewed] = newHotspots.ReviewedPct

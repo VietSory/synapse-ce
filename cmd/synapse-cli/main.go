@@ -22,6 +22,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/KKloudTarus/synapse-ce/internal/composition/scacompose"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/agent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
@@ -44,11 +46,13 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/bincat"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/codeanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/codeinventory"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/coupling"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/coverage"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/doctor"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/duplication"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/enry"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/gitdiff"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/githistory"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/gomodgraph"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/gradleresolve"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/grype"
@@ -56,6 +60,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jarchecksum"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jarhash"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jarlicense"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jsimports"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/jvmreach"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/license"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/licensefile"
@@ -544,11 +549,13 @@ func runQualityTo(w io.Writer, args []string) error {
 		codequality.WithBugs(astProvider),
 		codequality.WithStructuralAnalyzer(astProvider),
 		codequality.WithTestScopedSmells(includeTestSmells),
+		codequality.WithCoupling(coupling.New(jsimports.New())),
 	)
-	findings, err := svc.Analyze(context.Background(), dir)
+	qualityReport, err := svc.BuildReport(context.Background(), dir)
 	if err != nil {
 		return fmt.Errorf("quality: %w", err)
 	}
+	findings := qualityReport.Findings
 
 	if sarifOut {
 		out, merr := exportuc.MarshalSARIF(findings, buildinfo.App(), exportuc.SARIFOptions{})
@@ -566,6 +573,18 @@ func runQualityTo(w io.Writer, args []string) error {
 		var rep bytes.Buffer
 		fmt.Fprintf(&rep, "\nSynapse code quality – %s\n", dir)
 		fmt.Fprintf(&rep, "  findings: %d (quality: %d, reliability: %d, sast: %d)\n", len(findings), byKind[finding.KindQuality], byKind[finding.KindReliability], byKind[finding.KindSAST])
+		if qualityReport.Coupling != nil {
+			if ce, ok := qualityReport.Coupling.MaxEfferent(); ok {
+				instability, instabilityOK := qualityReport.Coupling.MaxInstability()
+				if instabilityOK {
+					fmt.Fprintf(&rep, "  coupling: %d modules, max Ce %d, max instability %.2f\n", len(qualityReport.Coupling.Modules), ce, instability)
+				} else {
+					fmt.Fprintf(&rep, "  coupling: %d isolated modules, max Ce %d\n", len(qualityReport.Coupling.Modules), ce)
+				}
+			} else {
+				fmt.Fprintf(&rep, "  coupling: unavailable (%d collection gap(s))\n", len(qualityReport.Coupling.Gaps))
+			}
+		}
 		if !includeTestSmells {
 			fmt.Fprintln(&rep, "  note: info-severity smells in test code are hidden (--include-test-smells to show)")
 		}
@@ -735,11 +754,13 @@ func runGate(args []string) error {
 		codequality.WithComplexity(astProvider, codequality.DefaultComplexityThreshold),
 		codequality.WithBugs(astProvider),
 		codequality.WithStructuralAnalyzer(astProvider),
+		codequality.WithCoupling(coupling.New(jsimports.New())),
 	)
-	findings, err := svc.Analyze(ctx, dir)
+	qualityReport, err := svc.BuildReport(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("code quality: %w", err)
 	}
+	findings := qualityReport.Findings
 	sastRaws, err := sast.New().AnalyzeSource(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("sast: %w", err)
@@ -796,8 +817,11 @@ func runGate(args []string) error {
 	// 5. Coverage (optional): overall line coverage, or coverage on new code when scoping to a diff.
 	coverageMeasured := false
 	var snapCoverage float64
+	var lc coverage.LineCoverage
 	if covPath != "" {
-		covRep, lc, cerr := coverage.Parse(covPath)
+		var covRep measure.CoverageReport
+		var cerr error
+		covRep, lc, cerr = coverage.ParseWithOptions(covPath, coverage.Options{GoModulePath: goModulePath(dir)})
 		if cerr != nil {
 			return fmt.Errorf("coverage: %w", cerr)
 		}
@@ -818,8 +842,19 @@ func runGate(args []string) error {
 
 	// 6. Build the snapshot + evaluate the gate.
 	snap := buildSnapshot(scoped, rep, dupRep.Density())
+	if qualityReport.Coupling != nil {
+		if value, ok := qualityReport.Coupling.MaxEfferent(); ok {
+			snap[qualitygate.MetricMaxEfferentCoupling] = float64(value)
+		}
+		if value, ok := qualityReport.Coupling.MaxInstability(); ok {
+			snap[qualitygate.MetricMaxInstability] = value
+		}
+	}
 	if coverageMeasured {
 		snap[qualitygate.MetricCoveragePct] = snapCoverage
+	}
+	if newCodeOnly && changed != nil {
+		applyNewCodeMetrics(snap, lc, &dupRep, changed)
 	}
 	gate, found, err := qualityprofile.LoadGate(gatePath)
 	if err != nil {
@@ -838,8 +873,9 @@ func runGate(args []string) error {
 	if coverageMeasured {
 		covLabel = fmt.Sprintf("%.1f%%", snapCoverage)
 	}
+	summary := qualitygate.RenderMarkdown(scopeLabel, rep, dupRep.Density(), covLabel, result)
 	if markdown {
-		printGateMarkdown(dir, scopeLabel, rep, dupRep.Density(), covLabel, result)
+		fmt.Print(summary)
 	} else {
 		fmt.Printf("\nSynapse quality gate – %s (%s)\n", dir, scopeLabel)
 		fmt.Printf("  ratings: security %s · reliability %s · maintainability %s · duplication %.1f%% · coverage %s\n", rep.Security, rep.Reliability, rep.Maintainability, dupRep.Density(), covLabel)
@@ -848,9 +884,10 @@ func runGate(args []string) error {
 			if !cr.Passed {
 				mark = "FAIL"
 			}
-			fmt.Printf("  [%s] %s (actual %g)\n", mark, cr.Condition, cr.Actual)
+			fmt.Printf("  [%s] %s (%s)\n", mark, cr.Condition, conditionActual(cr))
 		}
 	}
+	triggerGateDecorationFromEnv(ctx, cliPRDecorator, result, summary, scoped)
 	if !result.Passed {
 		return fmt.Errorf("quality gate FAILED: %d condition(s) not met", len(result.Failures()))
 	}
@@ -908,24 +945,13 @@ func runCoverage(args []string) error {
 	return nil
 }
 
-// printGateMarkdown renders the gate result as a Markdown summary suitable for a PR comment (gh pr comment
-// --body-file). Failed conditions are listed first so a reviewer sees the blockers immediately.
-func printGateMarkdown(dir, scope string, rep rating.Report, dupDensity float64, coverage string, result qualitygate.Result) {
-	status := "✅ **Quality gate passed**"
-	if !result.Passed {
-		status = "❌ **Quality gate failed**"
+// conditionActual renders what a condition was compared against. An unmeasured condition has no value:
+// printing "actual 0" there would read as a measurement of zero, which is the misreading the gate refuses.
+func conditionActual(cr qualitygate.ConditionResult) string {
+	if cr.Unmeasured {
+		return "no data"
 	}
-	fmt.Printf("## Synapse quality gate\n\n%s _(%s)_\n\n", status, scope)
-	fmt.Printf("| Rating | Grade |\n|---|---|\n| Security | %s |\n| Reliability | %s |\n| Maintainability | %s |\n", rep.Security, rep.Reliability, rep.Maintainability)
-	fmt.Printf("\nDuplication %.1f%% · Coverage %s\n\n", dupDensity, coverage)
-	fmt.Printf("| Condition | Actual | |\n|---|---|---|\n")
-	for _, cr := range result.Results {
-		mark := "✅"
-		if !cr.Passed {
-			mark = "❌"
-		}
-		fmt.Printf("| `%s` | %g | %s |\n", cr.Condition, cr.Actual, mark)
-	}
+	return fmt.Sprintf("actual %g", cr.Actual)
 }
 
 // filterNewCode keeps only line-anchored findings that sit on a changed line.
@@ -961,6 +987,41 @@ func sastLocation(file string, line int) *finding.SourceLocation {
 		return nil
 	}
 	return &finding.SourceLocation{File: file, StartLine: line, EndLine: line}
+}
+
+// applyNewCodeMetrics writes new_coverage and new_duplication when the run is scoped to a diff, each only
+// when it could be measured. The gate fails a condition on either as "no data" when the key is absent,
+// so writing a 0 here would be the silent pass that rule exists to prevent: no coverage report, or a diff
+// no report line matches, leaves new_coverage unset; new_duplication needs at least one changed line.
+// (In new-code mode `coverage` also carries the new-code percentage, as it always has; the new key is the
+// one a Clean-as-You-Code gate names.)
+func applyNewCodeMetrics(snap qualitygate.Snapshot, lc coverage.LineCoverage, dup *measure.DuplicationReport, changed gitdiff.ChangedLines) {
+	if lc != nil {
+		if pct, ok := lc.NewCodePercent(changed); ok {
+			snap[qualitygate.MetricNewCoverage] = pct
+		}
+	}
+	if pct, ok := measure.NewCodeDuplicationPercent(dup, changed); ok {
+		snap[qualitygate.MetricNewDuplication] = pct
+	}
+}
+
+// goModulePath returns the `module` directive of dir/go.mod, or "" when there is none. A Go -coverprofile
+// names files by import path, and the module path is what turns those back into the repo-relative paths
+// the rest of the gate keys on. Any read or parse failure is "" — the profile then keeps its import
+// paths, which is the same as not knowing the module, never an error on a non-Go tree.
+func goModulePath(dir string) string {
+	path := filepath.Join(dir, "go.mod")
+	// A FIFO or device named go.mod would block ReadFile with no writer; the same guard the reachability
+	// cache applies to manifests it reads.
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- the operator-supplied scan root, regular file checked above
+	if err != nil {
+		return ""
+	}
+	return modfile.ModulePath(data)
 }
 
 // buildSnapshot turns the scoped findings + ratings + duplication into gate metrics.
@@ -1499,7 +1560,7 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	}
 	sca := scauc.NewService(
 		engRepo, memory.NewFindingRepository(), memory.NewScanRepository(), nil, nil, nil, nil, nil, prov, clock, stderrAudit{},
-		shared.Severity(cfg.FindingMinSeverity), cfg.ScanTimeout, acquire.New().WithMaxWorkspaceBytes(cfg.MaxWorkspaceBytes).WithImageRootFS(cfg.ImageRootFSEnabled),
+		shared.Severity(cfg.FindingMinSeverity), cfg.ScanTimeout, acquire.New().WithMaxWorkspaceBytes(cfg.MaxWorkspaceBytes).WithImageRootFS(cfg.ImageRootFSEnabled).WithComparisonDepth(cfg.ProjectGitComparisonDepth),
 		enry.New(), sbomGen,
 		detectionSources,
 		riskEnricher, license.New(), licensemeta.NewChain(licenseEnrichers...),
@@ -1513,6 +1574,14 @@ func run(path string, failOn shared.Severity, mode, priority, minConfidence, bas
 	}
 	sca.SetProjectAnalysisCompletionTimeout(cfg.ProjectAnalysisCompletionTimeout)
 	sca.SetProjectComparisonSource(&gitdiff.ComparisonSource{})
+	sca.SetCodeQuality(codequality.New(
+		codeanalysis.New(),
+		codequality.WithDuplication(duplication.New(0)),
+		codequality.WithInventory(codeinventory.New()),
+		codequality.WithCoupling(coupling.New(jsimports.New())),
+		codequality.WithComplexityMetricsOnly(ast.New(cfg.ASTBin)),
+		codequality.WithGitHistory(githistory.New(), cfg.ProjectGitComparisonDepth),
+	))
 	sca.SetGateDecoder(qualityprofile.LoadGateBytes)
 	sca.SetSBOMEnricher(manifest.New())
 	sca.SetArtifactCataloger(msi.New())           // recover Windows Installer (.msi) product identity into the SBOM
