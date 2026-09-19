@@ -28,6 +28,8 @@ var (
 	ErrRuleKeyRequired       = errors.New("rule key is required")
 	ErrRuleKeyForbidden      = errors.New("rule key is not allowed")
 	ErrRuleKeyInvalid        = errors.New("rule key is invalid")
+	ErrKindInvalid           = errors.New("finding kind is invalid")
+	ErrKindReaderOnly        = errors.New("finding kind is reader-only")
 	ErrSourceLocationFile    = errors.New("source location file is invalid")
 	ErrSourceLocationLines   = errors.New("source location lines are invalid")
 	ErrSourceLocationColumns = errors.New("source location columns are invalid")
@@ -65,15 +67,24 @@ const (
 	KindHypothesis   Kind = "hypothesis"    // AI-proposed attack-chain hypothesis linking findings (gated until human-verified)
 	KindQuality      Kind = "quality"       // maintainability / code-smell issue (deterministic; ungated)
 	KindReliability  Kind = "reliability"   // likely bug (deterministic; ungated)
+	// KindExternal is a reader-only management projection for a third-party work item.
+	// It must never be persisted as a native finding or gain confirmation/publication authority.
+	KindExternal Kind = "external"
 )
 
 // Valid reports whether k is a known finding kind.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindSCA, KindRecon, KindExploitation, KindManual, KindSAST, KindSecret, KindMisconfig, KindCloudPosture, KindDAST, KindThreat, KindHypothesis, KindQuality, KindReliability:
+	case KindSCA, KindRecon, KindExploitation, KindManual, KindSAST, KindSecret, KindMisconfig, KindCloudPosture, KindDAST, KindThreat, KindHypothesis, KindQuality, KindReliability, KindExternal:
 		return true
 	}
 	return false
+}
+
+// Persistable reports whether k may be stored in the native findings repository.
+// Empty remains the legacy alias for SCA; external is deliberately reader-only.
+func (k Kind) Persistable() bool {
+	return k == "" || (k.Valid() && k != KindExternal)
 }
 
 // IsRuleBased reports whether k is a kind that requires a catalog rule key.
@@ -276,7 +287,8 @@ func (f *Finding) kindNormalized() Kind {
 // missing/unknown Kind can never REMOVE the gate (fail-closed via the ProposedBy check +
 // kindNormalized). NewManual never sets ProposedBy, so manual findings stay ungated.
 func (f *Finding) RequiresEvidenceGate() bool {
-	return strings.TrimSpace(f.ProposedBy) != "" || f.kindNormalized() == KindExploitation
+	kind := f.kindNormalized()
+	return !kind.Valid() || kind == KindExternal || strings.TrimSpace(f.ProposedBy) != "" || kind == KindExploitation
 }
 
 // CanPromote reports whether the finding may be promoted/auto-published. Gated
@@ -284,6 +296,12 @@ func (f *Finding) RequiresEvidenceGate() bool {
 // The recon/exploitation use cases MUST call this before persisting
 // a finding as confirmed – it is the deterministic evidence gate.
 func (f *Finding) CanPromote() bool {
+	kind := f.kindNormalized()
+	// Reader-only and unknown kinds have management visibility only. Evidence score cannot
+	// turn an unsupported origin into native confirmation/publication authority.
+	if !kind.Valid() || kind == KindExternal {
+		return false
+	}
 	if f.RequiresEvidenceGate() {
 		return f.MeetsEvidenceBar()
 	}
@@ -312,6 +330,18 @@ func Publishable(in []Finding) []Finding {
 		}
 	}
 	return out
+}
+
+// ValidatePersistence enforces the origin contract for the native findings store.
+// External is a reader-only management projection and unknown kinds fail closed.
+func (f Finding) ValidatePersistence() error {
+	if !f.Kind.Persistable() {
+		if f.Kind == KindExternal {
+			return ErrKindReaderOnly
+		}
+		return ErrKindInvalid
+	}
+	return f.ValidateRuleKey()
 }
 
 // ValidateRuleKey enforces the structural invariant for rule keys: rule-based

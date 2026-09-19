@@ -60,7 +60,7 @@ export function mapFinding(r: any): Finding {
     priority: r.Priority ?? 3,
     assignee: r.Assignee ?? '',
     version: r.Version ?? 1,
-    kind: r.Kind ?? '',
+    kind: (r.Kind ?? '') as Finding['kind'],
     evidenceScore: r.EvidenceScore ?? 0,
     proposedBy: r.ProposedBy ?? '',
     complianceControls: (r.compliance_controls ?? []).map((c: any) => ({
