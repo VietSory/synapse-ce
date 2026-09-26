@@ -538,35 +538,42 @@ func (s *Service) ImportAnalysis(ctx context.Context, tenantID shared.ID, key st
 	now := s.clock.Now().UTC()
 	jobID := s.ids.NewID().String()
 
-	// Leave a scan-job record so the project's analysis status and job history reflect this run.
-	// It is recorded as already succeeded: the work happened in the pipeline, not here.
+
+	// A CI import is not successful until its analysis is persisted. The
+	// notification capture trigger observes succeeded scan jobs, so this row
+	// starts as running even though the CI pipeline already completed.
 	var job ports.ScanJob
 	if s.jobs != nil {
-		finished := now
 		job = ports.ScanJob{
 			ID: jobID, EngagementID: e.ID.String(), Target: result.Target, Kind: "ci-import",
-			Status: ports.ScanSucceeded, Stage: "imported", Progress: 100,
-			StartedAt: now, FinishedAt: &finished, DebugEvents: []ports.ScanDebugEvent{},
+			Status: ports.ScanRunning, Stage: "importing", Progress: 99,
+			StartedAt: now, DebugEvents: []ports.ScanDebugEvent{},
 		}
 		if err := s.jobs.CreateRunning(ctx, job); err != nil {
 			return projectanalysis.Analysis{}, fmt.Errorf("record imported scan job: %w", err)
 		}
+	}
+	// Rejections never pass through succeeded, including failures after the
+	// analysis write such as an unavailable audit chain or final read.
+	rejectImport := func(cause error) (projectanalysis.Analysis, error) {
+		if s.jobs != nil {
+			finished := s.clock.Now().UTC()
+			job.Status, job.Stage, job.Error = ports.ScanFailed, "import-rejected", cause.Error()
+			job.FinishedAt = &finished
+			if saveErr := s.jobs.Save(ctx, job); saveErr != nil {
+				return projectanalysis.Analysis{}, errors.Join(cause, fmt.Errorf("mark imported scan job failed: %w", saveErr))
+			}
+		}
+		return projectanalysis.Analysis{}, cause
 	}
 
 	var ciPtr *projectanalysis.CIContext
 	if !ci.Empty() {
 		ciPtr = &ci
 	}
+
 	if err := s.recordProjectAnalysis(ctx, e.ID, jobID, now, &result, projectanalysis.OriginCI, ciPtr); err != nil {
-		// The job row exists so the history shows the run. A rejected result (a payload the
-		// recorder refuses) must not leave it reading as a success with no analysis behind it.
-		if s.jobs != nil {
-			job.Status, job.Stage, job.Error = ports.ScanFailed, "import-rejected", err.Error()
-			if saveErr := s.jobs.Save(ctx, job); saveErr != nil {
-				return projectanalysis.Analysis{}, errors.Join(err, fmt.Errorf("mark imported scan job failed: %w", saveErr))
-			}
-		}
-		return projectanalysis.Analysis{}, err
+		return rejectImport(err)
 	}
 	if s.audit != nil {
 		if err := s.audit.Record(ctx, ports.AuditEntry{
@@ -578,10 +585,23 @@ func (s *Service) ImportAnalysis(ctx context.Context, tenantID shared.ID, key st
 			},
 			At: now,
 		}); err != nil {
-			return projectanalysis.Analysis{}, fmt.Errorf("audit imported analysis: %w", err)
+			return rejectImport(fmt.Errorf("audit imported analysis: %w", err))
 		}
 	}
-	return s.analyses.Get(ctx, tenantID, p.ID, shared.ID(jobID))
+	analysis, err := s.analyses.Get(ctx, tenantID, p.ID, shared.ID(jobID))
+	if err != nil {
+		return rejectImport(fmt.Errorf("read imported analysis: %w", err))
+	}
+	// Only this final transition can capture scan.completed for CI imports.
+	if s.jobs != nil {
+		finished := s.clock.Now().UTC()
+		job.Status, job.Stage, job.Progress = ports.ScanSucceeded, "imported", 100
+		job.FinishedAt = &finished
+		if err := s.jobs.Save(ctx, job); err != nil {
+			return projectanalysis.Analysis{}, fmt.Errorf("finalize imported scan job: %w", err)
+		}
+	}
+	return analysis, nil
 }
 
 // baselineBranchForRecording returns the branch whose latest analysis is the New-Code baseline. A
