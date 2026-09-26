@@ -78,6 +78,12 @@ type fakeAcquirer struct {
 	called  bool
 }
 
+type failedOSPackageCataloger struct{ err error }
+
+func (f failedOSPackageCataloger) Catalog(context.Context, string) (ports.OSPackageResult, error) {
+	return ports.OSPackageResult{}, f.err
+}
+
 type cancelingAcquirer struct{}
 
 func (cancelingAcquirer) Acquire(ctx context.Context, _ ports.AcquireRequest) (*ports.Workspace, error) {
@@ -1772,6 +1778,82 @@ func TestSweepStaleScansReclaims(t *testing.T) {
 	}
 }
 
+// blockingAcquirer parks the pipeline inside Acquire until release is closed, so a test can
+// observe the inline scan goroutine while it is unambiguously live.
+type blockingAcquirer struct {
+	dir     string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (a *blockingAcquirer) Acquire(_ context.Context, _ ports.AcquireRequest) (*ports.Workspace, error) {
+	a.once.Do(func() { close(a.entered) })
+	<-a.release
+	return &ports.Workspace{Dir: a.dir, Cleanup: func() error { return nil }}, nil
+}
+
+// TestStartScanInlineHoldsRunLease pins the liveness signal SweepStaleScans depends on. The
+// sweeper reads an acquirable lease as "no live owner", so an inline scan that never takes the
+// lease is indistinguishable from one a crash stranded. It must hold the lease while it runs
+// and release it when it finishes.
+func TestStartScanInlineHoldsRunLease(t *testing.T) {
+	acq := &blockingAcquirer{dir: "/tmp/ws", entered: make(chan struct{}), release: make(chan struct{})}
+	jobs := newFakeJobStore()
+	lock := memory.NewRunLock()
+	svc := newAsyncSvc(&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, fakeClock{t: time.Unix(0, 0).UTC()}, acq, &fakeAudit{}, &fakeDetector{}, jobs, fakeIDs{})
+	svc.SetRunLock(lock)
+
+	job, err := svc.StartScan(shared.WithTenant(context.Background(), shared.DefaultTenant), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"})
+	if err != nil {
+		t.Fatalf("StartScan: %v", err)
+	}
+	select {
+	case <-acq.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("inline scan never reached the acquirer")
+	}
+
+	if _, ok, lerr := lock.TryLock(context.Background(), job.ID); lerr != nil || ok {
+		t.Fatalf("lease for a live inline scan must be held, got ok=%v err=%v", ok, lerr)
+	}
+
+	close(acq.release)
+	var final ports.ScanJob
+	for i := 0; i < 400; i++ {
+		j, jerr := svc.LatestJob(context.Background(), "e1")
+		if jerr != nil {
+			t.Fatalf("LatestJob: %v", jerr)
+		}
+		final = j
+		if j.Status != ports.ScanRunning {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if final.Status == ports.ScanRunning {
+		t.Fatalf("scan never finished, stage %q", final.Stage)
+	}
+	// The release runs after runScanJob returns, which is after the job reached a terminal
+	// status, so poll rather than assume the goroutine has already unwound.
+	var freed bool
+	for i := 0; i < 400; i++ {
+		release, ok, lerr := lock.TryLock(context.Background(), job.ID)
+		if lerr != nil {
+			t.Fatalf("TryLock: %v", lerr)
+		}
+		if ok {
+			release()
+			freed = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !freed {
+		t.Error("lease must be released once the inline scan finishes, or the next scan of this engagement cannot be swept")
+	}
+}
+
 func TestStartScanOutOfScopeStartsNoJob(t *testing.T) {
 	repo := &fakeEngRepo{eng: engagementWithScope(t, "allowed")}
 	acq := &fakeAcquirer{dir: "/tmp/ws"}
@@ -2075,6 +2157,34 @@ func TestImageRootFSSecretAndMisconfigScan(t *testing.T) {
 	}
 }
 
+func TestImageOSPackageCatalogFailureFailsScan(t *testing.T) {
+	rootfs := t.TempDir()
+	acquirer := &fakeAcquirer{dir: t.TempDir(), rootfs: rootfs}
+	svc := NewService(&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, nil, nil, nil, nil, nil, nil, nil, ports.Provenance{}, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAudit{}, shared.SeverityHigh, 0, acquirer, &fakeDetector{}, fakeSBOM{}, []ports.DetectionSource{fakeVuln{}}, nil, fakeLic{}, nil)
+	marker := errors.New("incomplete RPM database")
+	svc.SetOSPackageCataloger(failedOSPackageCataloger{err: marker})
+	svc.SetStrictSources(true)
+	if _, err := svc.Scan(context.Background(), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"}); !errors.Is(err, marker) {
+		t.Fatalf("OS-package inventory failure must fail the scan, got %v", err)
+	}
+	if acquirer.cleaned != 1 {
+		t.Fatalf("workspace cleanup count = %d, want 1", acquirer.cleaned)
+	}
+}
+
+func TestImageOSPackageCatalogFailureDegradesScanByDefault(t *testing.T) {
+	acquirer := &fakeAcquirer{dir: t.TempDir(), rootfs: t.TempDir()}
+	svc := NewService(&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, nil, nil, nil, nil, nil, nil, nil, ports.Provenance{}, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAudit{}, shared.SeverityHigh, 0, acquirer, &fakeDetector{}, fakeSBOM{}, []ports.DetectionSource{fakeVuln{}}, nil, fakeLic{}, nil)
+	svc.SetOSPackageCataloger(failedOSPackageCataloger{err: errors.New("incomplete RPM database")})
+	result, err := svc.Scan(context.Background(), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"})
+	if err != nil {
+		t.Fatalf("default scan should surface incomplete coverage: %v", err)
+	}
+	if result.Completeness.Confident || !strings.Contains(strings.Join(result.SourceWarnings, " "), "OS-package cataloging was incomplete") {
+		t.Fatalf("catalog failure must be visible and non-confident: completeness=%+v warnings=%v", result.Completeness, result.SourceWarnings)
+	}
+}
+
 // rootfsAwareSBOM is an owned-producer stub: it returns an empty SBOM for the OCI layout dir (as ownsbom does
 // over packed blobs) and the baked-in image manifests for the rootfs dir, recording every ref it was asked to
 // scan. producer sets the reported SBOM.Source so the D7.1 owned-producer gate can be exercised for both
@@ -2163,5 +2273,55 @@ func TestMergeDependenciesUnionsEdges(t *testing.T) {
 	// Nil/empty extra is a no-op.
 	if out := mergeDependencies(base, nil); len(out) != len(base) {
 		t.Fatalf("nil extra must be a no-op")
+	}
+}
+
+// budgetExpiredSecretScanner fails the way the scan's own SYNAPSE_SCAN_TIMEOUT makes a late stage fail.
+type budgetExpiredSecretScanner struct{}
+
+func (budgetExpiredSecretScanner) Name() string { return "budget-expired-secret-scanner" }
+func (budgetExpiredSecretScanner) ScanFiles(context.Context, string) (ports.SecretScanReport, error) {
+	return ports.SecretScanReport{}, fmt.Errorf("secret scan: %w", context.DeadlineExceeded)
+}
+
+// A stage that runs out of the scan's time budget must not discard the scan. Before this, a 1.7 GB
+// repository whose secret scan ran past the ten-minute default returned an error and nothing else, throwing
+// away the SBOM, the vulnerabilities and the findings that were already computed.
+func TestScanBudgetExpiryKeepsTheCompletedWorkAndWarns(t *testing.T) {
+	svc := newSvc(&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: t.TempDir()}, &fakeAudit{}, &fakeDetector{})
+	svc.SetSecretScanner(budgetExpiredSecretScanner{})
+	result, err := svc.Scan(context.Background(), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"})
+	if err != nil {
+		t.Fatalf("a stage running out of budget must not fail the scan: %v", err)
+	}
+	found := false
+	for _, w := range result.SourceWarnings {
+		if strings.Contains(w, "secret scan did not finish within the scan time budget") {
+			found = true
+			if !strings.Contains(w, "gap in the scan") {
+				t.Errorf("the warning must name the absence as a gap in the scan: %q", w)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the skipped stage must be recorded as a source warning, got %v", result.SourceWarnings)
+	}
+}
+
+// cancelledSecretScanner reports the shape a CALLER cancellation produces.
+type cancelledSecretScanner struct{}
+
+func (cancelledSecretScanner) Name() string { return "cancelled-secret-scanner" }
+func (cancelledSecretScanner) ScanFiles(context.Context, string) (ports.SecretScanReport, error) {
+	return ports.SecretScanReport{}, fmt.Errorf("secret scan: %w", context.Canceled)
+}
+
+// A caller CANCELLATION still fails the scan: nobody is waiting for a partial answer, and silently returning
+// one would report a truncated scan as a scan.
+func TestScanCallerCancellationStillFails(t *testing.T) {
+	svc := newSvc(&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: t.TempDir()}, &fakeAudit{}, &fakeDetector{})
+	svc.SetSecretScanner(cancelledSecretScanner{})
+	if _, err := svc.Scan(context.Background(), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"}); err == nil {
+		t.Fatal("a cancelled scan must return an error, not a partial result")
 	}
 }

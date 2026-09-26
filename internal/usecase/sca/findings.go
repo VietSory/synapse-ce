@@ -18,6 +18,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/vex"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/vulnerability"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/gobinsubject"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/pyreach"
 )
@@ -272,7 +273,7 @@ func nonProductionSecretPath(p string) bool {
 // stored in the finding, the evidence seal, or the report.
 func buildSecretFindings(engagementID shared.ID, raws []ports.SecretRawFinding, now time.Time, minSeverity shared.Severity, includeTest bool) []finding.Finding {
 	min := shared.SeverityRank(minSeverity)
-	out := make([]finding.Finding, 0, len(raws))
+	kept := make([]ports.SecretRawFinding, 0, len(raws))
 	for _, sr := range raws {
 		if sr.Severity != shared.SeverityUnknown && shared.SeverityRank(sr.Severity) < min {
 			continue
@@ -282,10 +283,18 @@ func buildSecretFindings(engagementID shared.ID, raws []ports.SecretRawFinding, 
 		if !includeTest && nonProductionSecretPath(sr.File) {
 			continue
 		}
-		// Dedup on rule+file+line so a re-scan updates in place (1:1). A git-history hit keys distinctly from a
-		// working-tree hit at the same path:line (a "history" marker, plus its introducing commit when
-		// resolved) so a committed-then-removed secret is its own finding rather than colliding with a
-		// working-tree one, and two history hits without attribution still separate from the worktree.
+		kept = append(kept, sr)
+	}
+	spreadByIndex, skip := groupHistorySightings(kept)
+
+	out := make([]finding.Finding, 0, len(kept))
+	for i, sr := range kept {
+		if skip[i] {
+			continue
+		}
+		// Dedup on rule+file+line so a re-scan updates in place (1:1). A git-history hit adds a "history"
+		// marker, plus its introducing commit when resolved, so a committed-then-removed secret is its own
+		// finding rather than colliding with a working-tree one at the same path:line.
 		dedup := "secret:" + sr.RuleID + ":" + sr.File + ":" + strconv.Itoa(sr.Line)
 		if sr.FromHistory {
 			dedup += ":history"
@@ -298,7 +307,7 @@ func buildSecretFindings(engagementID shared.ID, raws []ports.SecretRawFinding, 
 			ID:           findingID(engagementID, dedup),
 			EngagementID: engagementID,
 			Title:        fmt.Sprintf("%s (%s:%d)", sr.Title, sr.File, sr.Line),
-			Description:  secretDescription(sr),
+			Description:  secretDescription(sr) + secretSpreadSentence(spreadByIndex[i]),
 			Severity:     sr.Severity,
 			Sources:      []string{"synapse-secret-scan"},
 			Confidence:   secretFindingConfidence(sr),
@@ -316,6 +325,122 @@ func buildSecretFindings(engagementID shared.ID, raws []ports.SecretRawFinding, 
 		})
 	}
 	return out
+}
+
+// secretHistorySpread describes how widely one leaked credential appears in the repository history.
+type secretSpread struct {
+	occurrences int
+	files       int
+	commits     int
+	firstSeen   string
+}
+
+// groupHistorySightings collapses every git-history sighting of the SAME credential into one representative.
+//
+// A history hit is a LEAKED CREDENTIAL, not a line to edit: the blob carrying it is already immutable, and
+// the remediation is one rotation however many commits hold it. Keying each sighting separately turned 50
+// leaked credentials in one live repository into 581 rows, the same per-commit inflation gitleaks produces
+// (163 rows for 33 credentials), and it is not what an operator acts on. A working-tree hit is left alone,
+// because there each location is a line to change.
+//
+// The representative is the EARLIEST sighting, ordered by FirstSeen then commit, file and line, so it is
+// canonical rather than a product of scan order: adding new commits cannot move it, and the dedup key
+// therefore stays stable across scans. The credential's fingerprint groups the sightings and is deliberately
+// NOT part of the dedup key, because a dedup key ships in exports and a digest of a WEAK credential is a
+// crackable hash of it.
+//
+// It returns the spread keyed by the representative's index in kept, and the set of indices to skip.
+func groupHistorySightings(kept []ports.SecretRawFinding) (map[int]secretSpread, map[int]bool) {
+	members := make(map[string][]int)
+	var order []string
+	for i, sr := range kept {
+		if !sr.FromHistory || sr.Fingerprint == "" {
+			continue
+		}
+		key := sr.RuleID + "\x00" + sr.Fingerprint
+		if _, seen := members[key]; !seen {
+			order = append(order, key)
+		}
+		members[key] = append(members[key], i)
+	}
+	spreads := make(map[int]secretSpread, len(order))
+	skip := make(map[int]bool)
+	for _, key := range order {
+		idx := members[key]
+		if len(idx) == 1 {
+			continue // one sighting: nothing to collapse and no spread worth stating
+		}
+		best := idx[0]
+		files := make(map[string]struct{}, len(idx))
+		commits := make(map[string]struct{}, len(idx))
+		earliest := ""
+		for _, i := range idx {
+			sr := kept[i]
+			files[sr.File] = struct{}{}
+			if sr.Commit != "" {
+				commits[sr.Commit] = struct{}{}
+			}
+			if sr.FirstSeen != "" && (earliest == "" || sr.FirstSeen < earliest) {
+				earliest = sr.FirstSeen
+			}
+			if earlierSighting(sr, kept[best]) {
+				best = i
+			}
+		}
+		for _, i := range idx {
+			if i != best {
+				skip[i] = true
+			}
+		}
+		spreads[best] = secretSpread{occurrences: len(idx), files: len(files), commits: len(commits), firstSeen: earliest}
+	}
+	return spreads, skip
+}
+
+// earlierSighting orders two sightings of one credential so the representative is canonical. A sighting with
+// a resolved date wins over one without, because an unattributed hit cannot be placed in time.
+func earlierSighting(a, b ports.SecretRawFinding) bool {
+	if (a.FirstSeen == "") != (b.FirstSeen == "") {
+		return a.FirstSeen != ""
+	}
+	if a.FirstSeen != b.FirstSeen {
+		return a.FirstSeen < b.FirstSeen
+	}
+	if a.Commit != b.Commit {
+		return a.Commit < b.Commit
+	}
+	if a.File != b.File {
+		return a.File < b.File
+	}
+	return a.Line < b.Line
+}
+
+// secretSpreadSentence states how widely one leaked credential appears, so an operator sees the one rotation
+// to perform and how much of the history still exposes the value.
+func secretSpreadSentence(s secretSpread) string {
+	if s.occurrences <= 1 {
+		return ""
+	}
+	out := fmt.Sprintf(" This credential appears %s in the repository history", pluralCount(s.occurrences, "time"))
+	if s.files > 1 {
+		out += fmt.Sprintf(", across %s", pluralCount(s.files, "file"))
+	}
+	if s.commits > 1 {
+		out += fmt.Sprintf(", in %s", pluralCount(s.commits, "commit"))
+	}
+	out += "."
+	if s.firstSeen != "" {
+		out += " Earliest sighting: " + s.firstSeen + "."
+	}
+	out += " Rewriting history does not rotate it; rotate the credential once and the whole spread is closed."
+	return out
+}
+
+func pluralCount(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // lowSignalSecretRules are the entropy/context-based secret rules whose matches carry more false
@@ -777,6 +902,123 @@ func reachabilitySubjects(findings []finding.Finding, vulns []vulnerability.Vuln
 		}
 	}
 	return subs
+}
+
+// goBinaryReachabilitySubjects narrows the raise-only binary analyzer to Go components whose advisory
+// identity can be tied back to the scanned SBOM. It encodes the exact module PURL with each affected symbol,
+// so an advisory from another ecosystem or module cannot raise a finding through an unrelated Go binary.
+// A gap in this attribution is no coverage: the original finding remains reported and no judgment is made.
+func goBinaryReachabilitySubjects(findings []finding.Finding, vulns []vulnerability.Vulnerability, doc *sbom.SBOM) []ports.ReachabilitySubject {
+	type candidate struct {
+		identity goPackageIdentity
+		purl     string
+		symbols  map[string]struct{}
+		invalid  bool
+	}
+
+	byDedup := make(map[string]*candidate, len(vulns))
+	for _, v := range vulns {
+		key := vulnDedupKey(v)
+		identity, ok := goVulnerabilityIdentity(v)
+		if existing, exists := byDedup[key]; exists {
+			// A single persisted finding cannot safely stand for contradictory vulnerability records.
+			// Keep the raw PURL comparison exact: even PURLs with an equivalent parsed package/version can
+			// carry distinct qualifiers, and collapsing them would turn an attribution ambiguity into a proof.
+			// Reject the group rather than selecting whichever source happened to arrive last.
+			if !ok || existing.identity != identity || existing.purl != v.PackagePURL {
+				existing.invalid = true
+				continue
+			}
+			for _, symbol := range v.AffectedSymbols {
+				if symbol = strings.TrimSpace(symbol); symbol != "" {
+					existing.symbols[symbol] = struct{}{}
+				}
+			}
+			continue
+		}
+		entry := &candidate{identity: identity, purl: v.PackagePURL, symbols: map[string]struct{}{}}
+		if !ok {
+			entry.invalid = true
+		}
+		for _, symbol := range v.AffectedSymbols {
+			if symbol = strings.TrimSpace(symbol); symbol != "" {
+				entry.symbols[symbol] = struct{}{}
+			}
+		}
+		byDedup[key] = entry
+	}
+
+	sbomIdentities := make(map[goPackageIdentity]bool)
+	if doc != nil {
+		for _, component := range doc.Components {
+			if identity, ok := goComponentIdentity(component); ok {
+				sbomIdentities[identity] = true
+			}
+		}
+	}
+
+	var subjects []ports.ReachabilitySubject
+	for _, f := range findings {
+		entry, ok := byDedup[f.DedupKey]
+		if !ok || entry.invalid || len(entry.symbols) == 0 {
+			continue
+		}
+		// A binary symbol alone does not prove which dependency it belongs to. Require an exact canonical
+		// Go identity from this scan's SBOM; absent or non-Go-only SBOM data is no coverage.
+		if !sbomIdentities[entry.identity] {
+			continue
+		}
+		symbols := make([]string, 0, len(entry.symbols))
+		for symbol := range entry.symbols {
+			if subject, ok := gobinsubject.Encode(entry.purl, symbol); ok {
+				symbols = append(symbols, subject)
+			}
+		}
+		if len(symbols) == 0 {
+			continue
+		}
+		sort.Strings(symbols)
+		subjects = append(subjects, ports.ReachabilitySubject{FindingID: f.ID, Symbols: symbols, PackagePURL: entry.purl})
+	}
+	return subjects
+}
+
+type goPackageIdentity struct {
+	packageName string
+	version     string
+}
+
+func goVulnerabilityIdentity(v vulnerability.Vulnerability) (goPackageIdentity, bool) {
+	if ecosystem := strings.TrimSpace(v.Ecosystem); ecosystem != "" && !strings.EqualFold(ecosystem, "go") {
+		return goPackageIdentity{}, false
+	}
+	return goIdentity(strings.TrimSpace(v.Component), strings.TrimSpace(v.Version), v.PackagePURL)
+}
+
+func goComponentIdentity(component sbom.Component) (goPackageIdentity, bool) {
+	return goIdentity(strings.TrimSpace(component.Name), strings.TrimSpace(component.Version), component.PURL)
+}
+
+func goIdentity(component, version, purl string) (goPackageIdentity, bool) {
+	parsed, ok := gobinsubject.ParsePURL(purl)
+	if !ok || component == "" || version == "" {
+		return goPackageIdentity{}, false
+	}
+	packageName, purlVersion := parsed.Module, parsed.Version
+	if packageName == "stdlib" {
+		canonicalVersion := strings.TrimPrefix(purlVersion, "go")
+		if canonicalVersion == "" || strings.TrimPrefix(version, "go") != canonicalVersion {
+			return goPackageIdentity{}, false
+		}
+		if component != "stdlib" && component != "go"+canonicalVersion {
+			return goPackageIdentity{}, false
+		}
+		return goPackageIdentity{packageName: packageName, version: canonicalVersion}, true
+	}
+	if component != packageName || version != purlVersion {
+		return goPackageIdentity{}, false
+	}
+	return goPackageIdentity{packageName: packageName, version: purlVersion}, true
 }
 
 // pyReachabilitySubjects builds the per-finding inputs for TIER-1 Python import-reachability: each promoted

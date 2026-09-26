@@ -93,7 +93,7 @@ type Service struct {
 	aiReviews                        ports.AITriageReviewRecorder          // optional durable human-review queue sink
 	fpTriageIndependence             ports.AIIndependencePolicy            // deterministic verifier separation-of-duties requirement
 	fpTriageAlerts                   aiTriageAlertPolicy                   // scan-local safety metric baselines
-	osPkgCataloger                   ports.OSPackageCataloger              // optional owned OS-package cataloging (dpkg/apk) from an image rootfs
+	osPkgCataloger                   ports.OSPackageCataloger              // optional owned OS-package cataloging from an image rootfs
 	instCataloger                    ports.InstalledPackageCataloger       // optional owned installed-package cataloging (Go binaries, Python dist-info, Java jars, Node.js, Ruby gems) from an image rootfs
 	artifactCataloger                ports.ArtifactCataloger               // optional owned standalone-artifact cataloging (.msi product identity) from the workspace dir
 	suppression                      ports.SuppressionLoader               // optional repo-committed .synapseignore accepted-risk policy
@@ -104,7 +104,7 @@ type Service struct {
 	strictSources                    bool                                  // when true, any detection-source error aborts the scan; default degrades (skip + warn)
 	detectionPriority                string                                // server default detection priority (comprehensive|precise); empty = comprehensive
 	reachability                     ports.ReachabilityRecorder            // optional deterministic Tier-2 reachability proof (Go call-graph)
-	goBinaryReachability             ports.ReachabilityRecorder            // optional raise-only Go-binary .gopclntab symbol reachability (#1038)
+	goBinaryReachability             ports.ReachabilityRecorder            // optional raise-only Go binary reachability
 	pyReachability                   ports.ReachabilityRecorder            // optional deterministic Tier-1 Python import-reachability proof
 	pySymbolReachability             ports.ReachabilityRecorder            // optional deterministic Tier-2 Python semantic call-graph proof
 	rustSymbolReachability           ports.ReachabilityRecorder            // optional deterministic Tier-2 Rust affected-symbol reachability (raise-only)
@@ -370,7 +370,7 @@ func (s *Service) SetFPTriageIndependence(policy string) {
 	s.fpTriageIndependence = normalizeAIIndependencePolicy(ports.AIIndependencePolicy(policy))
 }
 
-// SetOSPackageCataloger configures optional owned OS-package cataloging (dpkg/apk) from a materialized image
+// SetOSPackageCataloger configures optional owned OS-package cataloging from a materialized image
 // rootfs (Workspace.RootFS). nil ⇒ no owned OS cataloging. It only runs when a rootfs was materialized.
 func (s *Service) SetOSPackageCataloger(c ports.OSPackageCataloger) { s.osPkgCataloger = c }
 
@@ -394,11 +394,30 @@ func (s *Service) SetSBOMCache(c ports.SBOMCache) { s.sbomCache = c }
 // binary that carries the owned parsers/enrichers. It deliberately excludes advisory/KEV/EPSS DB versions
 // (they don't change the generated SBOM). Empty when no producer version is known, which keeps the cache
 // off rather than serving an SBOM that can't be soundly version-keyed.
+// sbomGeneratorKey names the SBOM producer's version by the role it fills rather than by one
+// implementation of it. The owned parsers are the default producer, and filing their version under
+// "syft" made the manifest contradict itself: `"syft": "ownsbom/0.8.0"`, naming a tool that did not
+// run. legacySBOMGeneratorKey is still read so manifests written before this compare unchanged.
+const sbomGeneratorKey = "sbom-generator"
+const legacySBOMGeneratorKey = "syft"
+
+// sbomGeneratorVersion reads the producer version under either key. The value is the same string in
+// both, so a stored manifest and a fresh one still hash and diff identically.
+func sbomGeneratorVersion(tv map[string]string) string {
+	if tv == nil {
+		return ""
+	}
+	if v := tv[sbomGeneratorKey]; v != "" {
+		return v
+	}
+	return tv[legacySBOMGeneratorKey]
+}
+
 func sbomProducerVersion(tv map[string]string) string {
 	if tv == nil {
 		return ""
 	}
-	v := tv["syft"] + "\x00" + tv["go-enry"] + "\x00" + tv["synapse"]
+	v := sbomGeneratorVersion(tv) + "\x00" + tv["go-enry"] + "\x00" + tv["synapse"]
 	if strings.Trim(v, "\x00") == "" {
 		return ""
 	}
@@ -612,16 +631,12 @@ func (s *Service) osDistroCoverageReadiness(ctx context.Context, doc *sbom.SBOM)
 	for u := range unmapped {
 		gaps[u] = true // an unmapped distro has no key the owned store could ever cover
 	}
-	// A COVERED rpm distro still carries a completeness limitation the presence-based `covered` check cannot see:
-	// the owned rpm advisory feed is OVAL-sourced and ingests only patched ("< fixed") advisories, so a
-	// not-yet-fixed CVE (the vendor lists the package affected but has shipped no fix) is unmatched. Presence of
-	// patched rows makes `covered` true, so without this note a not-yet-fixed miss reads as a clean bill (a
-	// no-false-suppression violation, confirmed on SLES 15.6: owned 0/16 vs Grype 2/16). Surface it as a
-	// provenance warning rather than a silent false clean. Full ingestion of not-yet-fixed rpm advisories is the
-	// recall fix tracked as a #1037 follow-up.
+	// A covered rpm distro can still carry a feed-completeness limitation that the presence-based `covered`
+	// check cannot see. Runtime coverage reporting does not yet prove that a complete, current not-yet-fixed
+	// vendor snapshot is active, so retain the disclosure for every otherwise-covered rpm ecosystem.
 	notYetFixed := map[string]bool{}
 	for eco := range rpmEcos {
-		if !gaps[eco] { // covered for patched CVEs, but not-yet-fixed CVEs may be unmatched
+		if !gaps[eco] {
 			notYetFixed[eco] = true
 		}
 	}
@@ -643,17 +658,17 @@ func (s *Service) osDistroCoverageReadiness(ctx context.Context, doc *sbom.SBOM)
 	return strings.Join(parts, " "), incompleteOut, errOut
 }
 
-// rpmNotYetFixedWarning surfaces the known completeness limitation of the owned OVAL-sourced rpm advisory feed:
-// it matches CVEs with a published fixed version, so a not-yet-fixed advisory may be unmatched. This keeps a
-// not-yet-fixed miss from reading as a clean bill (no-false-suppression), pending full not-yet-fixed ingestion.
-// It never sets the incomplete flag on its own: it is a disclosure, not a hard gap like an uncovered distro.
+// rpmNotYetFixedWarning surfaces the runtime provenance gap for otherwise-covered rpm ecosystems. The current
+// coverage reporter proves only that matching advisory rows exist, not that a complete and current vendor
+// not-yet-fixed snapshot was successfully published. It never sets the incomplete flag on its own: it is a
+// disclosure, not a hard gap like an uncovered distro.
 func rpmNotYetFixedWarning(distros map[string]bool) string {
 	names := make([]string, 0, len(distros))
 	for eco := range distros {
 		names = append(names, eco)
 	}
 	sort.Strings(names)
-	return fmt.Sprintf("owned rpm advisory coverage for %s matches CVEs with a published fixed version (OVAL-sourced); a not-yet-fixed advisory (the vendor lists the package affected but has shipped no fix) may be unmatched, so a zero-vulnerability result is not a guaranteed clean bill for not-yet-fixed CVEs. Add grype to SYNAPSE_DETECTION_SOURCES for a not-yet-fixed cross-check on these distros", strings.Join(names, ", "))
+	return fmt.Sprintf("owned rpm advisory coverage for %s cannot currently prove that a complete, current vendor not-yet-fixed snapshot is active; a not-yet-fixed advisory (the vendor lists the package affected but has shipped no fix) may be unmatched, so a zero-vulnerability result is not a guaranteed clean bill for not-yet-fixed CVEs. Add grype to SYNAPSE_DETECTION_SOURCES for a not-yet-fixed cross-check on these distros", strings.Join(names, ", "))
 }
 
 // union merges two string sets into a new set.
@@ -767,7 +782,7 @@ func (s *Service) attachCompliance(result *ScanResult) {
 // reachability tier standing (never a false "not reachable"). A setter keeps NewService call sites unchanged.
 func (s *Service) SetReachability(r ports.ReachabilityRecorder) { s.reachability = r }
 
-// SetGoBinaryReachability wires the raise-only Go-binary .gopclntab symbol reachability recorder (#1038).
+// SetGoBinaryReachability wires the raise-only Go binary reachability recorder.
 func (s *Service) SetGoBinaryReachability(r ports.ReachabilityRecorder) { s.goBinaryReachability = r }
 
 // SetPyReachability configures the optional deterministic Tier-1 Python import-reachability prover: it
@@ -971,19 +986,25 @@ func mergeResolvedJVM(doc *sbom.SBOM, resolved []sbom.Component, completeScopes 
 	doc.Components = sbom.DedupeComponents(append(kept, resolved...))
 }
 
-// mergeResolvedJVMDeps replaces syft's pkg:maven dependency edges with the resolver's authoritative tree, so
-// PathToRoot / IsDirect / IntroducedBy run over the resolved graph rather than syft's (which for a pom-only
-// scan has no transitive edges at all). Edges whose parent is a pkg:maven node are the resolver's to own;
-// every other edge (a non-JVM ecosystem) is kept. No-op on an empty resolved edge set, so a components-only
-// resolver leaves the graph untouched.
-func mergeResolvedJVMDeps(doc *sbom.SBOM, resolved []sbom.Dependency) {
+// mergeResolvedDeps replaces the generator's dependency edges with a resolver's authoritative tree, so
+// PathToRoot / IsDirect / IntroducedBy / remediation.Solve run over the resolved graph rather than the
+// generator's (which for a manifest-only scan has no transitive edges at all). The resolver owns every
+// PURL type it emitted an edge for; edges of any other ecosystem are kept. No-op on an empty resolved
+// edge set, so a components-only resolver leaves the graph untouched.
+func mergeResolvedDeps(doc *sbom.SBOM, resolved []sbom.Dependency) {
 	if len(resolved) == 0 {
 		return
 	}
+	owned := make(map[string]struct{}, 2)
+	for _, d := range resolved {
+		if t := purlType(d.Ref); t != "" {
+			owned[t] = struct{}{}
+		}
+	}
 	kept := make([]sbom.Dependency, 0, len(doc.Dependencies))
 	for _, d := range doc.Dependencies {
-		if strings.HasPrefix(d.Ref, "pkg:maven/") {
-			continue // the resolver owns the JVM subgraph
+		if _, ok := owned[purlType(d.Ref)]; ok {
+			continue // the resolver owns this ecosystem's subgraph
 		}
 		kept = append(kept, d)
 	}
@@ -1039,8 +1060,9 @@ func mergeResolvedManifest(doc *sbom.SBOM, resolved []sbom.Component) {
 	doc.Components = sbom.DedupeComponents(append(kept, resolved...))
 }
 
-// SetSBOMCrossCheck configures the optional SBOM-producer cross-check: a SECOND SBOM producer plus
-// the disagreement→judgment recorder. nil either ⇒ no cross-check. Best-effort + opt-in: the 2nd producer
+// SetSBOMCrossCheck configures the SBOM-producer cross-check: a SECOND SBOM producer plus
+// the disagreement→judgment recorder. nil either ⇒ no cross-check. Best-effort and enabled by default at the
+// composition root (SYNAPSE_SBOM_CROSSCHECK_ENABLED defaults true): the 2nd producer
 // runs only for the cross-check and a failure is ignored (the scan never fails). A setter keeps NewService
 // call sites unchanged.
 func (s *Service) SetSBOMCrossCheck(producer ports.SBOMGenerator, r ports.SBOMCrossCheckRecorder) {
@@ -1566,18 +1588,62 @@ func mergeComponents(doc *sbom.SBOM, extra []sbom.Component) int {
 	key := func(c sbom.Component) string {
 		return purlType(c.PURL) + "|" + strings.ToLower(c.Name) + "@" + c.Version + "|" + purlArch(c.PURL)
 	}
-	have := make(map[string]bool, len(doc.Components))
-	for _, c := range doc.Components {
-		have[key(c)] = true
+	type originEvidence struct {
+		verified   sbom.Component
+		hasSigned  bool
+		hasUnknown bool
+	}
+	origins := make(map[string]originEvidence)
+	for _, c := range extra {
+		if purlType(c.PURL) != "rpm" {
+			continue
+		}
+		k := key(c)
+		evidence := origins[k]
+		if sbom.VerifiedRPMOrigin(c) == "rhel-base" {
+			evidence.verified, evidence.hasSigned = c, true
+		} else {
+			evidence.hasUnknown = true
+		}
+		origins[k] = evidence
+	}
+	have := make(map[string][]int, len(doc.Components))
+	for i, c := range doc.Components {
+		have[key(c)] = append(have[key(c)], i)
 	}
 	added := 0
 	for _, c := range extra {
 		k := key(c)
-		if have[k] {
+		evidence := origins[k]
+		if indices, exists := have[k]; exists {
+			admitted := false
+			for _, i := range indices {
+				if evidence.hasSigned && evidence.hasUnknown {
+					// Two installed RPM headers claim the same package identity but
+					// only one proves base origin. Neither may borrow its proof.
+					doc.Components[i] = sbom.WithVerifiedRPMOrigin(doc.Components[i], "")
+				} else if evidence.hasSigned {
+					doc.Components[i] = sbom.TransferVerifiedRPMOrigin(doc.Components[i], evidence.verified)
+					admitted = admitted || sbom.VerifiedRPMOrigin(doc.Components[i]) == "rhel-base" &&
+						sbom.DistroEcosystemForComponent(doc.Components[i]) == "Red Hat:7"
+				}
+			}
+			if evidence.hasSigned && !evidence.hasUnknown && !admitted {
+				// A prior producer can use the same name, version, and arch with
+				// an incompatible distro PURL. Keep its unsupported inventory
+				// entry, but also retain the independently proven installed RPM.
+				have[k] = append(have[k], len(doc.Components))
+				doc.Components = append(doc.Components, evidence.verified)
+				added++
+			}
 			continue
 		}
-		have[k] = true
-		doc.Components = append(doc.Components, c)
+		component := c
+		if evidence.hasSigned && evidence.hasUnknown {
+			component = sbom.WithVerifiedRPMOrigin(component, "")
+		}
+		have[k] = []int{len(doc.Components)}
+		doc.Components = append(doc.Components, component)
 		added++
 	}
 	return added
@@ -2168,6 +2234,21 @@ func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engage
 		background := shared.WithTenant(context.Background(), tenantID)
 		if admission.Generation > 0 {
 			background = context.WithValue(background, inventoryAdmissionContextKey{}, admission)
+		}
+		// Hold the run lease for the inline execution too. SweepStaleScans reads the lease as
+		// its liveness signal, so without this it sees a free lease for a live inline scan and
+		// has only staleFor to tell the two apart. The lease expires when this process dies,
+		// which is what lets the sweeper reclaim the job.
+		if s.runLock != nil {
+			release, ok, lerr := s.runLock.TryLock(background, job.ID)
+			switch {
+			case lerr != nil:
+				s.logger().Warn("run lease unavailable for inline scan; the sweeper falls back to staleFor", "job_id", job.ID, "err", lerr)
+			case !ok:
+				s.logger().Warn("run lease for a new inline scan is already held; the sweeper falls back to staleFor", "job_id", job.ID)
+			default:
+				defer release()
+			}
 		}
 		_ = s.runScanJob(background, actor, engagementID, now, req, opts, job)
 	}()
@@ -3033,33 +3114,57 @@ func inventoryCompletenessState(complete bool) sbom.InventoryCompleteness {
 }
 
 // osCoverageWarnings builds the structured OS-package coverage warnings from the cataloger's signals, so none
-// of the non-clean states is ever silent. At most one of unsupportedDistro / approximateDistro / unresolved is
-// set for a given scan (the cataloger makes them mutually exclusive), but the function tolerates any
-// combination and is pure so the exact warning text is unit-tested without running a scan.
+// of the non-clean states is ever silent. A CentOS 7 rootfs can contain both
+// verified base RPMs and packages whose origin is unsupported; both signals
+// must remain visible even if every cataloged component deduplicates against
+// an earlier SBOM producer.
 //   - unsupportedDistro: a recognized-but-deliberately-unmatched distro (CentOS Stream / CentOS >=8) →
 //     coverage=unsupported, never aliased to another distro's advisories.
 //   - approximateDistro: a distro resolved through another distro's ecosystem (CentOS Linux 7 → Red Hat:7) →
 //     coverage=approximate provenance, so a Red Hat finding on a CentOS 7 package is never mistaken for
 //     native CentOS-feed coverage and the EPEL/SIG/third-party scope limit is explicit.
 //   - unresolved: packages cataloged but the release could not be keyed at all.
-func osCoverageWarnings(osPkgsAdded int, unsupportedDistro, approximateDistro string, unresolved bool) []string {
+func osCoverageWarnings(osPkgsCataloged int, unsupportedDistro, approximateDistro string, unresolved bool) []string {
 	var out []string
 	if unsupportedDistro != "" {
 		out = append(out, fmt.Sprintf(
-			"%d OS package(s) cataloged from %s but coverage=unsupported: %s is deliberately not matched (CentOS Stream runs ahead of RHEL and VERSION_ID=8 is ambiguous, so applying a RHEL fixed version would be a false match) – OS advisories were NOT matched and were NOT aliased to another distro", osPkgsAdded, unsupportedDistro, unsupportedDistro))
+			"%d OS package(s) cataloged from %s with coverage=unsupported outside the reviewed advisory scope; packages without verified origin were NOT matched or treated as clean", osPkgsCataloged, unsupportedDistro))
 	}
 	if approximateDistro != "" {
 		out = append(out, fmt.Sprintf(
-			"OS package(s) cataloged from %s: coverage=approximate, matched against Red Hat 7 advisories (CentOS Linux 7 is a downstream rebuild of RHEL 7) – EPEL/SIG/third-party RPMs are NOT covered by RHEL advisories and were NOT matched", approximateDistro))
+			"OS package(s) cataloged from %s: coverage=approximate for verified base RPMs matched against Red Hat 7 advisories; other RPMs require independent origin proof and remain unsupported", approximateDistro))
 	}
 	if unresolved {
 		out = append(out, fmt.Sprintf(
-			"%d OS package(s) cataloged but the distro release could not be resolved (/etc/os-release absent, garbled, or inconsistent with the package database) – OS advisories were NOT matched", osPkgsAdded))
+			"%d OS package(s) cataloged but the distro release could not be resolved (/etc/os-release absent, garbled, or inconsistent with the package database) – OS advisories were NOT matched", osPkgsCataloged))
 	}
 	return out
 }
 
+func applyOSCoverageCompleteness(completeness *ports.Completeness, unsupportedDistro string, unresolved bool) bool {
+	if unsupportedDistro == "" && !unresolved {
+		return false
+	}
+	completeness.Confident = false
+	const gap = "OS package advisory coverage is incomplete; a low finding count does not mean the image is clean"
+	if completeness.Warning == "" {
+		completeness.Warning = gap
+	} else {
+		completeness.Warning = gap + "; " + completeness.Warning
+	}
+	return true
+}
+
 func (s *Service) runPipeline(ctx context.Context, actor string, engagementID shared.ID, now time.Time, req ports.AcquireRequest, opts ScanOptions, report func(stage string, pct int, events []ports.ScanDebugEvent), evidenceID shared.ID) (*ScanResult, error) {
+	// A manifest resolver reaches a package registry, so it runs sandboxed under an egress policy,
+	// and the sandbox refuses a policy that carries no authoritative execution identity. Without
+	// this the resolvers failed for exactly that reason whenever the sandbox was on, which is the
+	// configuration production requires: a project with a manifest but no lockfile then resolved
+	// to nothing and the scan reported it as having no recognized dependency manifests.
+	//
+	// The evidence record is the binding, because it is the control-plane row this scan already
+	// writes and the one an auditor would reconcile a network authorization against.
+	ctx = ports.WithEgressExecution(ctx, "sca", evidenceID.String())
 	var err error
 	req, err = s.pinUploadedSource(ctx, engagementID, req)
 	if err != nil {
@@ -3150,6 +3255,13 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		doc.Audit.CreatedAt = now
 		doc.Audit.UpdatedAt = now
 	}
+	// An SBOM producer that could not reach a package repository returns a SMALLER tree, not an error, and a
+	// small tree is indistinguishable from a small project. Read what it could not resolve so a rate limit or
+	// an unreachable repository is stated rather than inferred.
+	var producerWarnings []string
+	if reporter, ok := s.sbomGen.(ports.SBOMWarningReporter); ok {
+		producerWarnings = reporter.SBOMWarnings()
+	}
 	if sbomGenErr == nil {
 		trace.succeed(step, "SBOM generated", map[string]int{"components": countComponents(doc), "dependencies": len(doc.Dependencies), "cache_hit": boolToInt(cacheHit)})
 	}
@@ -3195,38 +3307,46 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 			trace.succeed(step, "Artifact cataloging completed", map[string]int{"artifacts_added": mergeComponents(doc, artComps)})
 		}
 	}
-	// Owned OS-package cataloging (dpkg/apk) from a materialized image rootfs: detection-independent OS
-	// packages, added BEFORE detection so they get advisory-matched. Best-effort, and deduped by name@version
+	// Owned OS-package cataloging from a materialized image rootfs: detection-independent OS
+	// packages, added BEFORE detection so they get advisory-matched. Deduped by name@version
 	// so it fills the gap under the owned producer WITHOUT duplicating OS packages the generator already
 	// cataloged from the image layout. A non-image target / disabled or failed extraction leaves RootFS empty,
 	// so this is a no-op there.
-	osPkgsAdded, osDistroUnresolved := 0, false
+	osPkgsCataloged, osDistroUnresolved := 0, false
 	osUnsupportedDistro := ""
 	osApproximateDistro := ""
+	osCatalogFailed := false
 	if s.osPkgCataloger != nil && ws.RootFS != "" {
 		before := countComponents(doc)
 		step = trace.start(stageSBOM, "os-package-catalog", "ospkg-cataloger", "Catalog OS packages from image rootfs", map[string]int{"components": before})
-		if osRes, oerr := s.osPkgCataloger.Catalog(ctx, ws.RootFS); oerr != nil {
-			trace.fail(step, oerr) // surface (never swallow) a cancellation/error rather than reporting success
-		} else {
-			osPkgsAdded = mergeComponents(doc, osRes.Components)
-			// no-silent-gap: packages cataloged but the release could not be keyed to an ecosystem → warn below.
-			// A recognized-but-unsupported distro (CentOS Stream / CentOS >=8) gets a distinct structured warning
-			// instead. A distro keyed by approximation (CentOS Linux 7 → Red Hat:7) is resolved, but gets its own
-			// coverage=approximate provenance warning so the approximation is never silent.
-			if osPkgsAdded > 0 && osRes.UnsupportedDistro != "" {
-				osUnsupportedDistro = osRes.UnsupportedDistro
-			} else {
-				osDistroUnresolved = osPkgsAdded > 0 && !osRes.DistroResolved
+		osRes, oerr := s.osPkgCataloger.Catalog(ctx, ws.RootFS)
+		if oerr != nil {
+			trace.fail(step, oerr)
+			if s.strictSources || ctx.Err() != nil {
+				return nil, fmt.Errorf("catalog image OS packages: %w", oerr)
 			}
-			// Gate on the flag itself, not osPkgsAdded: the cataloger sets ApproximateDistro only when CentOS 7
-			// components were cataloged, and mergeComponents returns 0 new when an identical pkg:rpm/centos PURL
-			// was already added by another cataloger. Keying it to osPkgsAdded would then suppress the
-			// coverage=approximate provenance banner while Red Hat:7 findings still appear.
-			if osRes.ApproximateDistro != "" {
-				osApproximateDistro = osRes.ApproximateDistro
-			}
+			osCatalogFailed = true
+		}
+		osPkgsCataloged = len(osRes.Components)
+		osPkgsAdded := mergeComponents(doc, osRes.Components)
+		if oerr == nil {
 			trace.succeed(step, "OS-package cataloging completed", map[string]int{"os_packages_added": osPkgsAdded})
+		}
+		// no-silent-gap: packages cataloged but the release could not be keyed to an ecosystem → warn below.
+		// A recognized-but-unsupported distro (CentOS Stream / CentOS >=8) gets a distinct structured warning
+		// instead. A distro keyed by approximation (CentOS Linux 7 → Red Hat:7) is resolved, but gets its own
+		// coverage=approximate provenance warning so the approximation is never silent.
+		if osRes.UnsupportedDistro != "" {
+			osUnsupportedDistro = osRes.UnsupportedDistro
+		} else {
+			osDistroUnresolved = osCatalogFailed || (osPkgsCataloged > 0 && !osRes.DistroResolved)
+		}
+		// Gate on the flag itself, not osPkgsAdded: the cataloger sets ApproximateDistro only when CentOS 7
+		// components were cataloged, and mergeComponents returns 0 new when an identical pkg:rpm/centos PURL
+		// was already added by another cataloger. Keying it to osPkgsAdded would then suppress the
+		// coverage=approximate provenance banner while Red Hat:7 findings still appear.
+		if osRes.ApproximateDistro != "" {
+			osApproximateDistro = osRes.ApproximateDistro
 		}
 	}
 	// Owned installed-package cataloging (Go binaries + Python dist-info) from the same materialized rootfs:
@@ -3284,7 +3404,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		// succeeded (alongside a non-nil error), and those must not be discarded.
 		if len(resolvedComps) > 0 {
 			mergeResolvedJVM(doc, resolvedComps, true) // dependency:tree = all non-test scopes → complete
-			mergeResolvedJVMDeps(doc, resolvedDeps)    // fold the resolved edges over syft's maven subgraph
+			mergeResolvedDeps(doc, resolvedDeps)       // fold the resolved edges over syft's maven subgraph
 			mavenResolved = true
 		}
 		switch {
@@ -3316,7 +3436,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		before := countComponents(doc)
 		if len(resolvedComps) > 0 {
 			mergeResolvedJVM(doc, resolvedComps, false) // runtimeClasspath only → keep syft's provided/compileOnly jars
-			mergeResolvedJVMDeps(doc, resolvedDeps)     // fold the resolved edges over syft's maven subgraph
+			mergeResolvedDeps(doc, resolvedDeps)        // fold the resolved edges over syft's maven subgraph
 			gradleResolved = true
 		}
 		switch {
@@ -3336,10 +3456,20 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	npmResolved := false
 	if s.npmResolver != nil {
 		step = trace.start(stageSBOM, "npm-resolve", "npm-resolver", "Resolve npm dependency tree", map[string]int{"components": countComponents(doc)})
-		resolvedComps, nrr := s.npmResolver.Resolve(ctx, ws.Dir)
+		// Prefer the graph-aware resolver, as the Gradle path does: the generated lockfile carries the
+		// edges, and without them every npm CVE here reports no path and no direct/transitive split.
+		var resolvedComps []sbom.Component
+		var resolvedDeps []sbom.Dependency
+		var nrr error
+		if gr, ok := s.npmResolver.(ports.NPMGraphResolver); ok {
+			resolvedComps, resolvedDeps, nrr = gr.ResolveGraph(ctx, ws.Dir)
+		} else {
+			resolvedComps, nrr = s.npmResolver.Resolve(ctx, ws.Dir)
+		}
 		before := countComponents(doc)
 		if len(resolvedComps) > 0 {
 			mergeResolvedNPM(doc, resolvedComps)
+			mergeResolvedDeps(doc, resolvedDeps)
 			npmResolved = true
 		}
 		switch {
@@ -3347,7 +3477,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 			npmResolveErr = nrr
 			trace.fail(step, nrr)
 		case npmResolved:
-			trace.succeed(step, "npm dependency tree resolved", map[string]int{"components_before": before, "components": countComponents(doc), "resolved": len(resolvedComps)})
+			trace.succeed(step, "npm dependency tree resolved", map[string]int{"components_before": before, "components": countComponents(doc), "resolved": len(resolvedComps), "edges": len(resolvedDeps)})
 		default:
 			trace.succeed(step, "npm resolution skipped (no lockless package.json)", map[string]int{"components": countComponents(doc)})
 		}
@@ -3357,23 +3487,33 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// sandbox-gated in production. Merge like npm: drop the generator's unversioned placeholders of that
 	// ecosystem, keep versioned, dedup.
 	var manifestResolveErrs []string
+	var manifestResolvedEco []string
 	for _, mr := range s.manifestResolvers {
 		if ctx.Err() != nil {
 			break
 		}
 		eco := mr.Ecosystem()
 		step = trace.start(stageSBOM, "manifest-resolve", eco+"-resolver", "Resolve "+eco+" dependency tree", map[string]int{"components": countComponents(doc)})
-		resolvedComps, mrr := mr.Resolve(ctx, ws.Dir)
+		var resolvedComps []sbom.Component
+		var resolvedDeps []sbom.Dependency
+		var mrr error
+		if gr, ok := mr.(ports.ManifestGraphResolver); ok {
+			resolvedComps, resolvedDeps, mrr = gr.ResolveGraph(ctx, ws.Dir)
+		} else {
+			resolvedComps, mrr = mr.Resolve(ctx, ws.Dir)
+		}
 		before := countComponents(doc)
 		if len(resolvedComps) > 0 {
 			mergeResolvedManifest(doc, resolvedComps)
+			mergeResolvedDeps(doc, resolvedDeps)
+			manifestResolvedEco = append(manifestResolvedEco, eco)
 		}
 		switch {
 		case mrr != nil:
 			manifestResolveErrs = append(manifestResolveErrs, fmt.Sprintf("%s: %v", eco, mrr))
 			trace.fail(step, mrr)
 		case len(resolvedComps) > 0:
-			trace.succeed(step, eco+" dependency tree resolved", map[string]int{"components_before": before, "components": countComponents(doc), "resolved": len(resolvedComps)})
+			trace.succeed(step, eco+" dependency tree resolved", map[string]int{"components_before": before, "components": countComponents(doc), "resolved": len(resolvedComps), "edges": len(resolvedDeps)})
 		default:
 			trace.succeed(step, eco+" resolution skipped (no lockless manifest)", map[string]int{"components": countComponents(doc)})
 		}
@@ -3542,7 +3682,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		toolVersions[k] = v
 	}
 	if doc.GeneratorVersion != "" {
-		toolVersions["syft"] = doc.GeneratorVersion
+		toolVersions[sbomGeneratorKey] = doc.GeneratorVersion
 	}
 	// Detection-source provenance: record each source's tool + DB version so
 	// a result is reproducible/explainable ("why did this differ from last month?").
@@ -3587,7 +3727,10 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// or was resolved only by approximation. osCoverageWarnings turns those signals into structured warnings so
 	// none of the states ever reads as a clean OS posture (a hostile image cannot suppress its own OS vulns by
 	// lying in /etc/os-release, and an approximation is never silent).
-	sourceWarnings = append(sourceWarnings, osCoverageWarnings(osPkgsAdded, osUnsupportedDistro, osApproximateDistro, osDistroUnresolved)...)
+	sourceWarnings = append(sourceWarnings, osCoverageWarnings(osPkgsCataloged, osUnsupportedDistro, osApproximateDistro, osDistroUnresolved)...)
+	if osCatalogFailed {
+		sourceWarnings = append(sourceWarnings, "OS-package cataloging was incomplete; scan results may under-report OS vulnerabilities")
+	}
 	for _, src := range s.sources {
 		p, ok := src.(ports.SourceProvenance)
 		if !ok {
@@ -3640,6 +3783,28 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		unresolvedEco = removeEcosystem(unresolvedEco, "gradle")
 		lockfiles = append(append([]string{}, lockfiles...), "gradle-dependency-tree")
 	}
+	// The owned pom.xml parser resolves the full tree out of the LOCAL Maven repository whenever one is
+	// present, needing no toolchain and no network, and it emits dependency EDGES only in that case: a
+	// direct-literal parse yields components and no edges. So an SBOM that carries maven edges already holds
+	// the transitive tree, and leaving maven in the unresolved set would tell an operator to run
+	// `mvn package` for a tree the scan is already reporting on.
+	if sbomHasEcosystemEdges(doc, "pkg:maven/") {
+		unresolvedEco = removeEcosystem(unresolvedEco, "maven")
+		lockfiles = append(append([]string{}, lockfiles...), "maven-local-repository")
+	}
+	// The same marker for the resolvers that pin a lockfile-less manifest. Resolution IS a
+	// resolving source: it runs the ecosystem's own lock tool and the versions it returns are
+	// as pinned as a committed lockfile's. Without this a scan that resolved every component
+	// still reported "Only 1171 of 1171 components have pinned versions; some dependencies are
+	// unresolved", which tells an operator the opposite of what happened.
+	if npmResolved {
+		unresolvedEco = removeEcosystem(unresolvedEco, "npm")
+		lockfiles = append(append([]string{}, lockfiles...), "npm-resolved-tree")
+	}
+	for _, eco := range manifestResolvedEco {
+		unresolvedEco = removeEcosystem(unresolvedEco, eco)
+		lockfiles = append(append([]string{}, lockfiles...), eco+"-resolved-tree")
+	}
 
 	result := &ScanResult{
 		Target:                   req.Value, // report the original target, not the temp dir
@@ -3658,19 +3823,22 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		LicenseCoverageBreakdown: licenseCoverageBreakdown,
 		Manifest:                 manifest,
 		RiskMatches:              riskMatches,
-		SourceWarnings:           sourceWarnings,
+		SourceWarnings:           append(append([]string(nil), producerWarnings...), sourceWarnings...),
 		Image:                    ws.Image,
 		DebugEvents:              trace.snapshot(),
 		LineCoverage:             opts.LineCoverage,
 		Gate:                     opts.Gate,
 		Comparison:               comparisonFromWorkspace(req, ws),
 	}
-	inventoryAuthoritative := result.Completeness.Confident || (sbomGenErr == nil && len(doc.Components) == 0 && len(unresolvedEco) == 0)
+	osCoverageIncomplete := applyOSCoverageCompleteness(&result.Completeness, osUnsupportedDistro, osDistroUnresolved)
+	inventoryAuthoritative := !osCoverageIncomplete && (result.Completeness.Confident || (sbomGenErr == nil && len(doc.Components) == 0 && len(unresolvedEco) == 0))
 	admission, _ := inventoryAdmissionFrom(ctx)
 	snap.InventoryAdmission = admission
 	snap.InventoryCompleteness = inventoryCompletenessState(inventoryAuthoritative)
 	snap.InventoryAuthoritative = inventoryAuthoritative
-	if inventoryAuthoritative {
+	if osCoverageIncomplete {
+		snap.InventoryAuthorityReason = "os_package_advisory_coverage_incomplete"
+	} else if inventoryAuthoritative {
 		snap.InventoryAuthorityReason = "server_native_inventory_acquisition_complete"
 	} else {
 		snap.InventoryAuthorityReason = "native_inventory_acquisition_incomplete"
@@ -3705,7 +3873,10 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		// the plain form remains the fallback rather than an error.
 		if reporter, ok := s.sastAnalyzer.(ports.SASTSourceReporter); ok {
 			report, rerr := reporter.AnalyzeSourceReport(ctx, ws.Dir)
-			if rerr != nil {
+			switch {
+			case budgetExpired(rerr):
+				result.SourceWarnings = append(result.SourceWarnings, stageBudgetWarning("static analysis"))
+			case rerr != nil:
 				return nil, fmt.Errorf("analyze source (sast): %w", rerr)
 			}
 			sastRaws = report.Findings
@@ -3715,9 +3886,22 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 			if report.SkippedFiles > 0 {
 				result.SourceWarnings = append(result.SourceWarnings, fmt.Sprintf("static analysis skipped %d vendored, minified or generated file(s)", report.SkippedFiles))
 			}
+			// A file the walk reached but could not hold is a different thing from one it deliberately
+			// skipped, and it is the one that makes a clean-looking report wrong: every rule reports nothing
+			// for source that was never retained. On a 2.1 GB monorepo holding 163 MiB of source against the
+			// 64 MiB budget, most of the tree is in this state, so the count and the budget are both named.
+			if report.UnscannedFiles > 0 {
+				result.SourceWarnings = append(result.SourceWarnings, fmt.Sprintf(
+					"static analysis did not scan %d file(s): the retained-source budget of %d MiB was already full, so no rule ran over them. "+
+						"Raise SYNAPSE_SAST_SOURCE_BUDGET_BYTES to cover the tree (it trades memory for coverage)",
+					report.UnscannedFiles, report.SourceBudget>>20))
+			}
 		} else {
 			sastRaws, err = s.sastAnalyzer.AnalyzeSource(ctx, ws.Dir)
-			if err != nil {
+			switch {
+			case budgetExpired(err):
+				result.SourceWarnings = append(result.SourceWarnings, stageBudgetWarning("static analysis"))
+			case err != nil:
 				return nil, fmt.Errorf("analyze source (sast): %w", err)
 			}
 		}
@@ -3730,7 +3914,10 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		// verifying extension. Otherwise the scan stays deterministic and offline. The raw secret is
 		// confined to the scanner; only the verdict rides back on each finding.
 		secretReport, serr := s.scanSecrets(ctx, ws.Dir)
-		if serr != nil {
+		switch {
+		case budgetExpired(serr):
+			result.SourceWarnings = append(result.SourceWarnings, stageBudgetWarning("secret scan"))
+		case serr != nil:
 			return nil, fmt.Errorf("scan secrets: %w", serr)
 		}
 		if secretReport.Truncated {
@@ -3771,8 +3958,35 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		}
 	}
 	if opts.scansVulnerabilities() && s.misconfig != nil {
-		misRaws, merr := s.misconfig.ScanConfigs(ctx, ws.Dir)
-		if merr != nil {
+		// Prefer the reporting form, so a Helm chart the scan could not RENDER reaches the caller. A chart
+		// that refuses to render contributes no findings, and on one live repository 112 of 126 charts refused
+		// (a declared dependency not vendored, a Chart.yaml with no name) while the report said nothing, so
+		// every one of those applications read as clean.
+		var misRaws []ports.MisconfigRawFinding
+		var merr error
+		if reporter, ok := s.misconfig.(ports.MisconfigReporter); ok {
+			var misReport ports.MisconfigScanReport
+			misReport, merr = reporter.ScanConfigsReport(ctx, ws.Dir)
+			misRaws = misReport.Findings
+			if misReport.Truncated {
+				result.SourceWarnings = append(result.SourceWarnings,
+					"infrastructure-as-code scan hit its file cap, so it did not cover the whole tree and its findings are a lower bound")
+			}
+			if misReport.UnrenderedCharts > 0 {
+				warning := fmt.Sprintf("%d Helm chart(s) could not be rendered, so their manifests were NOT evaluated",
+					misReport.UnrenderedCharts)
+				if len(misReport.ChartRenderReasons) > 0 {
+					warning += ": " + strings.Join(misReport.ChartRenderReasons, "; ")
+				}
+				result.SourceWarnings = append(result.SourceWarnings, warning)
+			}
+		} else {
+			misRaws, merr = s.misconfig.ScanConfigs(ctx, ws.Dir)
+		}
+		switch {
+		case budgetExpired(merr):
+			result.SourceWarnings = append(result.SourceWarnings, stageBudgetWarning("infrastructure-as-code scan"))
+		case merr != nil:
 			return nil, fmt.Errorf("scan misconfig: %w", merr)
 		}
 		result.Findings = append(result.Findings, buildMisconfigFindings(engagementID, misRaws, now, s.minSeverity)...)
@@ -3804,7 +4018,10 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		} else {
 			report, qerr = s.codeQuality.BuildReport(ctx, ws.Dir)
 		}
-		if qerr != nil {
+		switch {
+		case budgetExpired(qerr):
+			result.SourceWarnings = append(result.SourceWarnings, stageBudgetWarning("code-quality analysis"))
+		case qerr != nil:
 			return nil, fmt.Errorf("analyze code quality: %w", qerr)
 		}
 		result.CodeQuality = &report
@@ -3846,12 +4063,10 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		}
 	}
 
-	// Go-binary affected-symbol reachability (raise-only, #1038): scan any compiled Go binaries under ws.Dir
-	// and RAISE a finding whose affected symbol appears in a binary's .gopclntab. Runs AFTER the call-graph
-	// pass so a stronger source call-graph judgment is preserved (this only ever adds a reachable/raise, never
-	// a not_reachable). Absence of a matching binary or symbol mints nothing (no coverage). Best-effort.
+	// Scan compiled Go binaries under ws.Dir for version-bound, rooted direct-call proof. Runs after the
+	// source call-graph pass so a stronger judgment is preserved. Unproven paths provide no coverage.
 	if opts.scansVulnerabilities() && s.goBinaryReachability != nil {
-		if subs := reachabilitySubjects(result.Findings, result.Vulnerabilities); len(subs) > 0 {
+		if subs := goBinaryReachabilitySubjects(result.Findings, result.Vulnerabilities, result.SBOM); len(subs) > 0 {
 			_, _ = s.goBinaryReachability.Record(ctx, engagementID, ws.Dir, subs)
 		}
 	}
@@ -4692,7 +4907,15 @@ func computeCompleteness(doc *sbom.SBOM, lockfiles, unresolvedEco []string) port
 			strings.Join(unresolvedEco, ", "), unresolvedRemediation(unresolvedEco))
 	case c.Confident:
 	case total == 0:
-		c.Warning = "No components resolved – the target has no recognized dependency manifests."
+		// Two different situations reach zero components, and the message used to assert only the first.
+		// A repository whose requirements.txt lists bare package names, or whose lockfile holds nothing but
+		// workspace and catalog references, HAS a recognised manifest; nothing in it pins a version, so
+		// nothing can become a component an advisory could match. Telling that reader there is no manifest
+		// sends them looking for a missing file instead of at the versions they never pinned.
+		c.Warning = "No components resolved. Either the target has no recognized dependency manifest, or the " +
+			"manifests it has pin no versions (bare package names in a requirements.txt, or a lockfile holding " +
+			"only workspace/catalog references, resolve to nothing an advisory can match). A low finding count " +
+			"here does NOT mean clean."
 	case appTotal > 0 && appRatio < 0.8 && len(lockfiles) == 0:
 		// Application dependencies are present without a lockfile (whether or not OS packages
 		// are too): their versions are unresolved and under-reported. Reported over the APP
@@ -4760,6 +4983,42 @@ func purlDistroTag(purl string) string {
 }
 
 // removeEcosystem returns unresolvedEco without the named ecosystem (case-insensitive), preserving order.
+// budgetExpired reports whether a stage failed because the SCAN'S OWN TIME BUDGET ran out rather than
+// because the stage is broken. SYNAPSE_SCAN_TIMEOUT wraps the whole scan, so on a very large repository a
+// late stage can hit it after every earlier stage has already produced its findings.
+//
+// Such a failure must NOT discard the scan. It used to: a 1.7 GB repository whose secret scan ran past the
+// ten-minute default returned an error and nothing else, throwing away the SBOM, the vulnerabilities, the
+// SAST findings and the IaC findings that were already computed and sitting in result. Trivy behaves the
+// same way on a throttled dependency request, which is why a single 429 loses an entire Java scan; there is
+// no version of that behaviour worth keeping. The stage's absence is recorded as a source warning instead,
+// so a zero count there reads as a gap in the scan.
+//
+// A caller CANCELLATION still propagates, because nobody is waiting for a partial answer then.
+// sbomHasEcosystemEdges reports whether the SBOM carries a dependency EDGE whose requiring component is in
+// the given ecosystem. An edge is the evidence that a transitive tree was resolved: a manifest parse that
+// only reads declared dependencies produces components with no edges between them.
+func sbomHasEcosystemEdges(doc *sbom.SBOM, purlPrefix string) bool {
+	if doc == nil {
+		return false
+	}
+	for _, edge := range doc.Dependencies {
+		if strings.HasPrefix(edge.Ref, purlPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func budgetExpired(err error) bool {
+	return err != nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)
+}
+
+// stageBudgetWarning is the source warning recorded when a stage is cut short by the scan budget.
+func stageBudgetWarning(stage string) string {
+	return stage + " did not finish within the scan time budget (SYNAPSE_SCAN_TIMEOUT); its findings are ABSENT, so a zero count there is a gap in the scan rather than a clean result"
+}
+
 func removeEcosystem(unresolvedEco []string, name string) []string {
 	out := make([]string, 0, len(unresolvedEco))
 	for _, e := range unresolvedEco {
@@ -5204,7 +5463,7 @@ func explainDrift(a, b ports.ScanManifest) []string {
 		}
 	}
 	cmp("grype-db", a.GrypeDBVersion, b.GrypeDBVersion)
-	cmp("syft", a.ToolVersions["syft"], b.ToolVersions["syft"])
+	cmp("sbom generator", sbomGeneratorVersion(a.ToolVersions), sbomGeneratorVersion(b.ToolVersions))
 	cmp("grype", a.ToolVersions["grype"], b.ToolVersions["grype"])
 	cmp("kev-catalog", a.ToolVersions["kev-catalog"], b.ToolVersions["kev-catalog"])
 	cmp("epss-date", a.ToolVersions["epss-date"], b.ToolVersions["epss-date"])
@@ -5280,7 +5539,7 @@ func buildManifest(toolVersions map[string]string, vulnDBSnapshot, grypeDB strin
 			m.UnpinnedInputs = append(m.UnpinnedInputs, label)
 		}
 	}
-	pin("syft", toolVersions["syft"] != "")
+	pin(sbomGeneratorKey, sbomGeneratorVersion(toolVersions) != "")
 	pin("grype-db", grypeDB != "")
 	pin("kev-catalog", toolVersions["kev-catalog"] != "")
 	pin("epss", toolVersions["epss-date"] != "")

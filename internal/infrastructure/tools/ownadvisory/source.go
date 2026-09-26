@@ -122,7 +122,7 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 	cpeStore, hasCPE := s.store.(ports.CPEAdvisoryStore)
 	var out []vulnerability.RawFinding
 	emitted := map[string]struct{}{}
-	emit := func(a advisory.Advisory, c sbom.Component, fixed string, symbols []string) {
+	emit := func(a advisory.Advisory, c sbom.Component, fixed string, symbols []string, matched *sbom.ComponentIdentity) {
 		key := a.ID + "\x00" + c.PURL // one finding per (advisory, component), so package + CPE hits don't double
 		if _, done := emitted[key]; done {
 			return
@@ -131,7 +131,7 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 		if ov := s.overlaySymbols(a); len(ov) > 0 {
 			symbols = dedupSymbols(append(append([]string(nil), symbols...), ov...))
 		}
-		out = append(out, rawFinding(a, c, fixed, symbols))
+		out = append(out, rawFinding(a, c, fixed, symbols, matched))
 	}
 	for _, c := range doc.Components {
 		// 1) Package-key matching against OSV/distro ecosystems.
@@ -139,7 +139,7 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 		if eco == "" {
 			// OS-package PURL (deb/apk/rpm): derive the release-versioned OSV ecosystem
 			// ("Debian:9", "Alpine:v3.18") from the distro qualifier (Epic B).
-			eco = osDistroEcosystem(c.PURL)
+			eco = sbom.DistroEcosystemForComponent(c)
 		}
 		// For rpm components, fold the PURL "epoch=" qualifier into the version and percent-decode it so it
 		// matches the feed's canonical EVR (the RedHat CSAF feed does the same). Decoding is idempotent for an
@@ -156,9 +156,16 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 			}
 		}
 		if distroPackageMatchable && eco != "" && c.Name != "" && sbom.IsResolvedVersion(c.Version) {
-			// matchName queries the store for (eco, name) and emits any advisory that hits version.
-			matchName := func(name, version string) error {
-				advs, err := s.store.ByPackage(ctx, eco, name)
+			// The component's own architecture, from the PURL "arch=" qualifier. It is decoded for the same
+			// reason the version is, and it gates architecture-scoped affected blocks in MatchDetails. An
+			// absent qualifier stays empty, which cannot satisfy an architecture-scoped block: we would be
+			// unable to prove the installed package is inside the vendor's architecture set, and assuming it
+			// is would reintroduce the cross-architecture over-match. Architecture-blind sources carry no
+			// constraint at all and keep matching exactly as before.
+			componentArch := decodePURLSegment(purlQualifier(c.PURL, "arch"))
+			// matchName queries the store for (ecosystem, name) and emits any advisory that hits version.
+			matchName := func(lookupEco, name, version string) error {
+				advs, err := s.store.ByPackage(ctx, lookupEco, name)
 				if err != nil {
 					return err
 				}
@@ -167,20 +174,31 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 						continue
 					}
 					// MatchDetails (not Match + AffectedSymbolsFor) so the finding carries ONLY the symbols of the
-					// affected blocks that actually match this version. OSV can list the same package in several
-					// blocks with different ranges and different symbols; unioning across all of them would attach
-					// another version's symbol to this finding and seed a false reachable-symbol claim.
-					if affected, fixed, symbols := a.MatchDetails(eco, name, version); affected {
-						emit(a, c, fixed, symbols)
+					// affected blocks that actually match this version.
+					if affected, fixed, symbols := a.MatchDetails(lookupEco, name, version, componentArch); affected {
+						emit(a, c, fixed, symbols, &sbom.ComponentIdentity{Ecosystem: lookupEco, Package: name, Version: version})
 					}
 				}
 				return nil
 			}
-			// Normalize to the ecosystem-canonical key on the lookup side too, so a component name that
-			// isn't already normalized (e.g. a Syft-produced PyPI name) still meets the stored advisory key.
-			name := canonicalName(eco, c.Name)
-			if err := matchName(name, matchVersion); err != nil {
-				return nil, err
+			lookupEcosystems := []string{eco}
+			if exact := redHatMinorEcosystem(c.PURL); exact != "" && exact != eco {
+				// Red Hat VEX relationships can be minor-scoped even though the normal distro ecosystem remains
+				// major-scoped. Query the exact release first, then the major key for compatible bounded data.
+				lookupEcosystems = append([]string{exact}, lookupEcosystems...)
+			}
+			for _, lookupEco := range lookupEcosystems {
+				name := canonicalName(lookupEco, c.Name)
+				if lookupEco == "Maven" {
+					purlIdentity, coherent := coherentPURLIdentity(c)
+					if !coherent || purlIdentity.Ecosystem != "Maven" {
+						continue
+					}
+					name = purlIdentity.Package
+				}
+				if err := matchName(lookupEco, name, matchVersion); err != nil {
+					return nil, err
+				}
 			}
 			// A Debian/Ubuntu security advisory is keyed by the SOURCE package (one openssl advisory covers
 			// the libssl1.1, libcrypto1.1, … binaries built from it), so a binary package never matches it by
@@ -190,9 +208,15 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 			// source stays "<src>", and the advisory ranges are in source-version space, so using the binary
 			// version could cross a nonzero introduced/fixed boundary the source does not (a false result).
 			// Fall back to the binary version only for a name-only upstream (Syft omits the version when they
-			// are equal). The emit map dedups a binary+source double hit. Only deb: an rpm's upstream is a
-			// source-RPM filename needing NEVRA parsing, and the owned RedHat CSAF feed is binary-keyed.
-			if purlType(c.PURL) == "deb" {
+			// are equal). The emit map dedups a binary+source double hit.
+			//
+			// apk is the same shape: Alpine's secdb is keyed by the ORIGIN package (one openssl advisory
+			// covers libcrypto3 and libssl3), the apk DB records it in the "o" field, and the origin carries no
+			// separate version because every subpackage of an origin ships the origin's version. Not rpm: its
+			// upstream is a source-RPM filename needing NEVRA parsing, and the owned RedHat CSAF feed is
+			// binary-keyed.
+			if t := purlType(c.PURL); t == "deb" || t == "apk" {
+				name := canonicalName(eco, c.Name)
 				// Decode the qualifier BEFORE splitting: PURL encodes the name/version "@" separator as %40
 				// (and an epoch ":" as %3A), so "openssl%401.1.1k" decodes to "openssl@1.1.1k" first.
 				upstreamName, upstreamVer, _ := strings.Cut(decodePURLSegment(purlQualifier(c.PURL, "upstream")), "@")
@@ -201,7 +225,7 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 					if v := strings.TrimSpace(upstreamVer); v != "" {
 						srcVersion = v // the source version, in the space the source-keyed advisory ranges use
 					}
-					if err := matchName(src, srcVersion); err != nil {
+					if err := matchName(eco, src, srcVersion); err != nil {
 						return nil, err
 					}
 				}
@@ -247,7 +271,7 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 					}
 				}
 				if vulnerable && !excluded {
-					emit(a, c, fixedHint, nil)
+					emit(a, c, fixedHint, nil, nil)
 				}
 			}
 		}
@@ -256,9 +280,25 @@ func (s *Source) Scan(ctx context.Context, doc *sbom.SBOM) ([]vulnerability.RawF
 }
 
 // rawFinding builds the normalized finding from a matched advisory + component.
-func rawFinding(a advisory.Advisory, c sbom.Component, fixed string, symbols []string) vulnerability.RawFinding {
+func rawFinding(a advisory.Advisory, c sbom.Component, fixed string, symbols []string, matched *sbom.ComponentIdentity) vulnerability.RawFinding {
 	identity := sbom.IdentityFromComponent(c)
-	fixedVersions, rejectedFixedVersions := ownedFixedVersions(a, identity, fixed)
+	purlIdentity, coherentPURL := coherentPURLIdentity(c)
+	remediationIdentity := sbom.ComponentIdentity{}
+	if matched != nil {
+		if coherentPURL {
+			remediationIdentity = *matched
+			if identity.Ecosystem == "" {
+				identity.Ecosystem = matched.Ecosystem
+			}
+		}
+	} else if coherentPURL {
+		remediationIdentity = purlIdentity
+		if identity.Ecosystem == "" {
+			identity.Ecosystem = purlIdentity.Ecosystem
+		}
+	}
+	componentArch := decodePURLSegment(purlQualifier(c.PURL, "arch"))
+	fixedVersions, rejectedFixedVersions := ownedFixedVersions(a, remediationIdentity, componentArch, fixed)
 	rf := vulnerability.RawFinding{
 		Source:                sourceName,
 		AdvisoryID:            preferCVE(a.ID, a.Aliases),
@@ -307,25 +347,93 @@ func rawFinding(a advisory.Advisory, c sbom.Component, fixed string, symbols []s
 	return rf
 }
 
-func ownedFixedVersions(value advisory.Advisory, identity sbom.ComponentIdentity, fallback string) ([]string, []string) {
+func coherentPURLIdentity(c sbom.Component) (sbom.ComponentIdentity, bool) {
+	// Preserve only the scanner-local provenance along with the PURL. The
+	// component's name and version are checked against that PURL below.
+	purlIdentity := sbom.IdentityFromComponent(sbom.WithVerifiedRPMOrigin(
+		sbom.Component{PURL: c.PURL}, sbom.VerifiedRPMOrigin(c)))
+	if purlIdentity.Status != sbom.IdentityResolved {
+		return sbom.ComponentIdentity{}, false
+	}
+	nameMatches := canonicalName(purlIdentity.Ecosystem, c.Name) == canonicalName(purlIdentity.Ecosystem, purlIdentity.Package)
+	if purlIdentity.Ecosystem == "Maven" {
+		// Syft can supply only the artifact name while the PURL carries group:artifact.
+		artifact := purlIdentity.Package[strings.LastIndexByte(purlIdentity.Package, ':')+1:]
+		nameMatches = nameMatches || c.Name == artifact
+	}
+	if !nameMatches {
+		return sbom.ComponentIdentity{}, false
+	}
+	if purlType(c.PURL) == "rpm" {
+		epoch := decodePURLSegment(purlQualifier(c.PURL, "epoch"))
+		componentVersion := rpmCanonicalEVR(decodePURLSegment(c.Version), epoch)
+		if componentVersion != rpmCanonicalEVR(purlIdentity.Version, epoch) {
+			return sbom.ComponentIdentity{}, false
+		}
+		purlIdentity.Version = componentVersion
+		return purlIdentity, true
+	}
+	if strings.TrimSpace(c.Version) != purlIdentity.Version {
+		return sbom.ComponentIdentity{}, false
+	}
+	return purlIdentity, true
+}
+
+const maxRemediationVersionComparisons = 100_000
+
+func ownedFixedVersions(value advisory.Advisory, identity sbom.ComponentIdentity, architecture, fallback string) ([]string, []string) {
 	candidates := []string{fallback}
 	ranges := make([]advisory.Range, 0)
+	versionSets := make([][]string, 0)
+	versionCount := 0
 	for _, affected := range value.Affected {
-		if affected.Ecosystem != identity.Ecosystem || affected.Package != identity.Package {
+		if affected.Ecosystem != identity.Ecosystem || affected.Package != identity.Package ||
+			!advisory.ArchitectureApplies(affected.Architectures, architecture) {
 			continue
 		}
 		candidates = append(candidates, advisory.FixedVersions(affected)...)
 		ranges = append(ranges, affected.Ranges...)
+		if len(affected.Versions) > 0 {
+			versionSets = append(versionSets, affected.Versions)
+			versionCount += len(affected.Versions)
+		}
 	}
 	valid := map[string]bool{}
 	rejected := map[string]bool{}
+	pending := map[string]bool{}
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if pending[candidate] || rejected[candidate] {
+			continue
+		}
 		comparison, comparable := advisory.CompareVersions(identity.Ecosystem, identity.Version, candidate)
-		if candidate == "" || !comparable || comparison >= 0 || advisory.Affected(identity.Ecosystem, candidate, ranges, nil) {
-			if candidate != "" {
-				rejected[candidate] = true
+		if !comparable || comparison >= 0 || advisory.Affected(identity.Ecosystem, candidate, ranges, nil) {
+			rejected[candidate] = true
+			continue
+		}
+		pending[candidate] = true
+	}
+	// Large explicit lists must not multiply work by every remediation candidate. Withhold unverified
+	// suggestions when their validation exceeds this per-finding budget.
+	if len(pending) > 0 && versionCount > maxRemediationVersionComparisons/len(pending) {
+		for candidate := range pending {
+			rejected[candidate] = true
+		}
+		return nil, sortedVersionKeys(rejected)
+	}
+	for candidate := range pending {
+		stillAffected := false
+		for _, versions := range versionSets {
+			if advisory.AffectedVersionList(identity.Ecosystem, candidate, versions) {
+				stillAffected = true
+				break
 			}
+		}
+		if stillAffected {
+			rejected[candidate] = true
 			continue
 		}
 		valid[candidate] = true
@@ -406,9 +514,26 @@ func rpmCanonicalEVR(version, epoch string) string {
 
 // osDistroEcosystem derives the release-versioned ecosystem key for an OS-package PURL from its purl type and
 // "distro" qualifier (Syft emits e.g. distro=debian-9 / ubuntu-22.04 / amzn-2). It delegates to the shared
-// sbom.DistroEcosystem so the scan-side matcher key and the inventory identity key (sbom.IdentityFromComponent)
-// can never drift; TestDistroEcosystemLockstep pins the two. An unmapped/malformed distro yields "" (skip,
-// never a false match).
+// sbom.DistroEcosystem for PURL-only identities. Verified CentOS 7 origin is
+// process-local and the scan uses sbom.DistroEcosystemForComponent instead;
+// TestDistroEcosystemLockstep covers both paths. An unmapped/malformed distro
+// yields "" (skip, never a false match).
+func redHatMinorEcosystem(purl string) string {
+	if purlType(purl) != "rpm" {
+		return ""
+	}
+	distro := strings.ToLower(strings.TrimSpace(purlQualifier(purl, "distro")))
+	id, release, ok := strings.Cut(distro, "-")
+	if !ok || (id != "rhel" && id != "redhat") {
+		return ""
+	}
+	parts := strings.SplitN(release, ".", 3)
+	if len(parts) < 2 || !allASCIIDigits(parts[0]) || !allASCIIDigits(parts[1]) {
+		return ""
+	}
+	return "Red Hat:" + parts[0] + "." + parts[1]
+}
+
 func osDistroEcosystem(purl string) string {
 	return sbom.DistroEcosystem(purlType(purl), purlQualifier(purl, "distro"))
 }

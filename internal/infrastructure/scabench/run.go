@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -22,22 +24,112 @@ import (
 )
 
 const (
-	runResultSchemaVersion            = "synapse-sca-benchmark-run-v1"
-	fixedRepetitions                  = 2
-	fixedMatrixCells                  = 8
-	ownedBenchmarkVersion             = "devel"
-	ownedBenchmarkVersionLinkerSymbol = "github.com/KKloudTarus/synapse-ce/internal/platform/buildinfo.version"
-	maxPublicationFileBytes           = 512 << 20
-	maxPublicationTotalBytes          = 6 * maxPublicationFileBytes
-	maxPublicationFiles               = 11
-	publicationCleanupTimeout         = 2 * time.Minute
-	fixedCapabilitySourceArtifacts    = 2
-	maxRawBundleArtifacts             = 5 + 1 + fixedCapabilitySourceArtifacts
+	runResultSchemaVersion                 = "synapse-sca-benchmark-run-v1"
+	fixedRepetitions                       = 2
+	fixedMatrixCells                       = 12
+	ownedBenchmarkVersion                  = "devel"
+	ownedBenchmarkVersionLinkerSymbol      = "github.com/KKloudTarus/synapse-ce/internal/platform/buildinfo.version"
+	maxPublicationFileBytes                = 512 << 20
+	maxPublicationTotalBytes               = 6 * maxPublicationFileBytes
+	publicationCleanupTimeout              = 2 * time.Minute
+	fixedCapabilitySourceArtifacts         = 2
+	maxRawBundleArtifacts                  = 5 + 1 + fixedCapabilitySourceArtifacts
+	reviewCaptureSchemaVersion             = "review-v1"
+	dispositionCaptureSchemaVersion        = "disposition-v1"
+	maintainerApprovalCaptureSchemaVersion = "github-maintainer-issue-comment-capture-v1"
+	maintainerAuthorizationSchemaVersion   = "maintainer-authorization-v2"
+	maintainerApprovalRepositoryOwner      = "KKloudTarus"
+	maintainerApprovalRepositoryName       = "synapse-ce"
+	maintainerApprovalPullNumber           = "1320"
+	trustedEnvironmentAttestationReference = "environment-attestation:al2023-amd64-trusted-sandbox-v1"
+	trustedEnvironmentAttestationLocator   = "evidence-assets/environment/environment-attestation.json"
 )
 
 var fixedTargetIDs = []string{
 	"debian-12-13-slim-amd64",
 	"sles-15-6-bci-base-45-31-amd64",
+	"rhel-9-8-ubi-amd64",
+}
+
+type trustedCaptureInput struct {
+	engineVersion     string
+	binaryReference   string
+	binaryLocator     string
+	databaseReference string
+	databaseLocator   string
+}
+
+type trustedCapabilitySource struct {
+	locator      string
+	pinReference string
+}
+
+type trustedManifestPaths struct {
+	binary                 string
+	database               string
+	sbom                   string
+	environmentAttestation string
+}
+
+var fixedTrustedSBOMLocators = map[string]string{
+	"debian-12-13-slim-amd64":        "sboms/debian-12-13-slim-amd64.cdx.json",
+	"sles-15-6-bci-base-45-31-amd64": "sboms/sles-15-6-bci-base-45-31-amd64.cdx.json",
+	"rhel-9-8-ubi-amd64":             "sboms/rhel-9-8-ubi-amd64.cdx.json",
+}
+
+var fixedTrustedCompetitorInputs = map[bench.Engine]trustedCaptureInput{
+	bench.EngineGrype: {
+		engineVersion: "0.115.0", binaryReference: "binary:grype:v0.115.0", binaryLocator: "tools/grype",
+		databaseReference: "database:grype:v6.1.9-2026-09-20T00:35:35Z-1789885674", databaseLocator: "databases/grype",
+	},
+	bench.EngineTrivy: {
+		engineVersion: "0.74.0", binaryReference: "binary:trivy:v0.74.0", binaryLocator: "tools/trivy",
+		databaseReference: "database:trivy:v2-2026-09-20T13:18:06.422928923Z", databaseLocator: "databases/trivy",
+	},
+	bench.EngineOSVScanner: {
+		engineVersion: "v2.5.1", binaryReference: "binary:osv-scanner:v2.5.1", binaryLocator: "tools/osv-scanner",
+		databaseReference: "database:osv-scanner:debian-all-2026-09-20", databaseLocator: "databases/osv",
+	},
+}
+
+var fixedTrustedOwnedInputs = map[string]trustedCaptureInput{
+	"debian-12-13-slim-amd64": {
+		engineVersion: ownedBenchmarkVersion, binaryReference: "binary:synapse-sca-bench:reproducible-v1",
+		databaseReference: "database:owned:debian-bookworm-oval-2026-09-20", databaseLocator: "databases/owned-debian",
+	},
+	"sles-15-6-bci-base-45-31-amd64": {
+		engineVersion: ownedBenchmarkVersion, binaryReference: "binary:synapse-sca-bench:reproducible-v1",
+		databaseReference: "database:owned:sles-15-sp6-affected-oval-2026-09-20", databaseLocator: "databases/owned-sles",
+	},
+	"rhel-9-8-ubi-amd64": {
+		engineVersion: ownedBenchmarkVersion, binaryReference: "binary:synapse-sca-bench:reproducible-v1",
+		databaseReference: "database:owned:redhat-rhel9-8-vex-2026-09-21", databaseLocator: "databases/owned-redhat",
+	},
+}
+
+var fixedTrustedCapabilitySources = map[string]trustedCapabilitySource{
+	"https://github.com/google/osv-scanner/blob/c84fa4568f2526d0333e9a914ea8a0a5f74ad68b/internal/utility/purl/purl_to_package.go": {
+		locator: "capability/osv-scanner-v2.5.1/purl_to_package.go", pinReference: "capability-source:osv-scanner:c84fa4568f2526d0333e9a914ea8a0a5f74ad68b",
+	},
+	"https://github.com/google/osv-scalibr/blob/23fa66ca68dd17bfdbe0b8b3536d1887a3a940da/purl/ecosystem/ecosystem.go": {
+		locator: "capability/osv-scanner-v2.5.1/ecosystem.go", pinReference: "capability-source:osv-scalibr:23fa66ca68dd17bfdbe0b8b3536d1887a3a940da",
+	},
+}
+
+var fixedPublicationArtifactPaths = [...]string{
+	"catalog.json",
+	"oracle.json",
+	"ratchet.json",
+	"cycle-policy.json",
+	"run.json",
+	"result.json",
+	"report.md",
+	"reviews/review.json",
+	"reviews/disposition.json",
+}
+
+func expectedPublicationFileCount() int {
+	return len(fixedPublicationArtifactPaths) + len(fixedTargetIDs)
 }
 
 // RunInput is the complete operator contract. All paths must be absolute.
@@ -123,6 +215,7 @@ type captureManifestTemplate struct {
 }
 
 type capabilityTemplate struct {
+	Kind               bench.CapabilityKind       `json:"kind"`
 	StatementReference string                     `json:"statement_reference"`
 	Sources            []capabilitySourceTemplate `json:"sources"`
 }
@@ -155,6 +248,41 @@ type dispositionCapture struct {
 	ReviewedCommit       string `json:"reviewed_commit"`
 	ImplementationCommit string `json:"implementation_commit"`
 	Decision             string `json:"decision"`
+	Body                 string `json:"body"`
+}
+
+// maintainerApprovalCapture is a sanitized GitHub issue-comment capture. Trusted
+// provisioning verifies API provenance before placing it in the protected input root;
+// this runner validates only the captured record and its exact benchmark bindings.
+type maintainerApprovalCapture struct {
+	SchemaVersion        string `json:"schema_version"`
+	ID                   string `json:"id"`
+	URL                  string `json:"url"`
+	HeadURL              string `json:"head_url"`
+	Login                string `json:"login"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
+	Decision             string `json:"decision"`
+	ImplementationCommit string `json:"implementation_commit"`
+	Body                 string `json:"body"`
+}
+
+// maintainerAuthorizationCapture records the maintainer's direct acceptance of a
+// captured GitHub approval. It binds the exact final implementation and every
+// frozen scoring input. TranscribedBy identifies the delegated evidence entry.
+type maintainerAuthorizationCapture struct {
+	SchemaVersion        string `json:"schema_version"`
+	ApprovalID           string `json:"approval_id"`
+	ApprovalDigest       string `json:"approval_digest"`
+	MaintainerLogin      string `json:"maintainer_login"`
+	ImplementationCommit string `json:"implementation_commit"`
+	CatalogDigest        string `json:"catalog_digest"`
+	OracleDigest         string `json:"oracle_digest"`
+	RatchetDigest        string `json:"ratchet_digest"`
+	PolicyDigest         string `json:"policy_digest"`
+	Decision             string `json:"decision"`
+	TranscribedBy        string `json:"transcribed_by"`
+	TranscribedAt        string `json:"transcribed_at"`
 	Body                 string `json:"body"`
 }
 
@@ -213,11 +341,51 @@ func Run(ctx context.Context, input RunInput, runnerFactory RunnerFactory) (resu
 	if err := state.validateRatchetBindings(); err != nil {
 		return RunResult{}, err
 	}
+	if err := state.bindFinalReviewEvidence(); err != nil {
+		return RunResult{}, err
+	}
 	store, err := state.newEvidenceStore()
 	if err != nil {
 		return RunResult{}, err
 	}
 
+	observations, comparisons, rawBundles, err := executeCaptureCycle(ctx, state, runnerFactory, store)
+	if err != nil {
+		return RunResult{}, err
+	}
+
+	finalResult, resultBytes, report, err := reduceRepetitionsContext(ctx, state.catalog, state.oracle, state.ratchet, observations)
+	if err != nil {
+		return RunResult{}, err
+	}
+	result = RunResult{
+		SchemaVersion: runResultSchemaVersion, ImplementationCommit: input.ImplementationCommit, RunKey: input.RunKey,
+		InputDigests: state.inputDigests, Repetitions: fixedRepetitions, Observations: observations,
+		Comparisons: comparisons, RawBundles: rawBundles, Result: finalResult,
+	}
+	if err := state.stagePublication(ctx, publication, &result, resultBytes, report); err != nil {
+		return RunResult{}, err
+	}
+	if err := publication.Commit(ctx); err != nil {
+		publicationOpen = false
+		return RunResult{}, err
+	}
+	publicationOpen = false
+	result.Cleanup = state.cleanup
+	return result, nil
+}
+
+// executeCaptureCycle records the fixed two-pass matrix without imposing trusted-publication semantics.
+func executeCaptureCycle(ctx context.Context, state *runState, runnerFactory RunnerFactory, store *benchcycle.EvidenceStore) ([][]bench.Observation, []SemanticBundleComparison, [][]BundleIdentity, error) {
+	if ctx == nil {
+		return nil, nil, nil, errors.New("capture cycle context is required")
+	}
+	if state == nil {
+		return nil, nil, nil, errors.New("capture cycle state is required")
+	}
+	if store == nil {
+		return nil, nil, nil, errors.New("capture cycle evidence store is required")
+	}
 	cells := state.cyclePlan()
 	comparisons := make([]SemanticBundleComparison, 0, len(cells))
 	pairs, err := benchcycle.ExecuteTwoPass(ctx, benchcycle.TwoPassPlan[cycleCell]{Cells: cells},
@@ -246,7 +414,7 @@ func Run(ctx context.Context, input RunInput, runnerFactory RunnerFactory) (resu
 		},
 	)
 	if err != nil {
-		return RunResult{}, err
+		return nil, nil, nil, err
 	}
 	observations := make([][]bench.Observation, fixedRepetitions)
 	rawBundles := make([][]BundleIdentity, fixedRepetitions)
@@ -259,26 +427,7 @@ func Run(ctx context.Context, input RunInput, runnerFactory RunnerFactory) (resu
 			rawBundles[repetition] = append(rawBundles[repetition], captured.identity)
 		}
 	}
-
-	finalResult, resultBytes, report, err := reduceRepetitionsContext(ctx, state.catalog, state.oracle, state.ratchet, observations)
-	if err != nil {
-		return RunResult{}, err
-	}
-	result = RunResult{
-		SchemaVersion: runResultSchemaVersion, ImplementationCommit: input.ImplementationCommit, RunKey: input.RunKey,
-		InputDigests: state.inputDigests, Repetitions: fixedRepetitions, Observations: observations,
-		Comparisons: comparisons, RawBundles: rawBundles, Result: finalResult,
-	}
-	if err := state.stagePublication(ctx, publication, &result, resultBytes, report); err != nil {
-		return RunResult{}, err
-	}
-	if err := publication.Commit(ctx); err != nil {
-		publicationOpen = false
-		return RunResult{}, err
-	}
-	publicationOpen = false
-	result.Cleanup = state.cleanup
-	return result, nil
+	return observations, comparisons, rawBundles, nil
 }
 
 func (state *runState) cyclePlan() []benchcycle.PlanCell[cycleCell] {
@@ -392,7 +541,13 @@ func (state *runState) loadFrozenInputs() error {
 		return err
 	}
 	state.expectedStates = states
-	review, disposition, err := readReviewEvidence(state.input.TrustedInputRoot, state.input.ImplementationCommit)
+	return nil
+}
+
+// bindFinalReviewEvidence validates authorization only after the owned binary,
+// catalog, and ratchet have reached their final published identities.
+func (state *runState) bindFinalReviewEvidence() error {
+	review, disposition, err := readReviewEvidence(state.input.TrustedInputRoot, state.input.ImplementationCommit, state.inputDigests)
 	if err != nil {
 		return err
 	}
@@ -403,6 +558,9 @@ func (state *runState) loadFrozenInputs() error {
 func ownedBuildArguments(binaryPath string) []string {
 	return []string{
 		"build",
+		"-buildvcs=false",
+		"-trimpath",
+		"-mod=readonly",
 		"-ldflags", "-X " + ownedBenchmarkVersionLinkerSymbol + "=" + ownedBenchmarkVersion,
 		"-o", binaryPath,
 		"./cmd/synapse-sca-bench",
@@ -415,14 +573,27 @@ func (state *runState) buildAndBindOwnedBinary(ctx context.Context) error {
 		return fmt.Errorf("create owned binary directory: %w", err)
 	}
 	command := exec.CommandContext(ctx, "go", ownedBuildArguments(binaryPath)...)
+	command.Env = ownedBuildEnvironment()
 	command.Stdout = nil
 	command.Stderr = nil
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("build owned benchmark binary: %w", err)
 	}
+	_, err := state.bindOwnedBinaryDigest(binaryPath)
+	return err
+}
+
+func ownedBuildEnvironment() []string {
+	return candidateOwnedBuildEnvironment()
+}
+
+func (state *runState) bindOwnedBinaryDigest(binaryPath string) (string, error) {
+	if state == nil {
+		return "", errors.New("owned binary state is required")
+	}
 	digest, err := digestFile(binaryPath)
 	if err != nil {
-		return fmt.Errorf("digest owned benchmark binary: %w", err)
+		return "", fmt.Errorf("digest owned benchmark binary: %w", err)
 	}
 	updated := false
 	for index := range state.catalog.Pins {
@@ -432,14 +603,14 @@ func (state *runState) buildAndBindOwnedBinary(ctx context.Context) error {
 		}
 	}
 	if !updated {
-		return errors.New("catalog does not pin the owned benchmark binary")
+		return "", errors.New("catalog does not pin the owned benchmark binary")
 	}
 	if err := state.catalog.Validate(); err != nil {
-		return fmt.Errorf("validate rebound catalog: %w", err)
+		return "", fmt.Errorf("validate rebound catalog: %w", err)
 	}
 	catalogDigest, err := bench.DigestCatalog(state.catalog)
 	if err != nil {
-		return fmt.Errorf("digest rebound catalog: %w", err)
+		return "", fmt.Errorf("digest rebound catalog: %w", err)
 	}
 	state.ratchet.CatalogDigest = catalogDigest
 	for index := range state.ratchet.Floors {
@@ -447,7 +618,7 @@ func (state *runState) buildAndBindOwnedBinary(ctx context.Context) error {
 			state.ratchet.Floors[index].Expected.EngineBinaryDigest = digest
 		}
 	}
-	return nil
+	return digest, nil
 }
 
 func (state *runState) materializeManifests() error {
@@ -504,26 +675,26 @@ func (state *runState) loadTemplates() (map[string]captureManifestTemplate, erro
 		templates[key] = template
 	}
 	if len(templates) != fixedMatrixCells {
-		return nil, errors.New("capture manifest templates do not cover the fixed eight-cell matrix")
+		return nil, errors.New("capture manifest templates do not cover the fixed twelve-cell matrix")
 	}
 	return templates, nil
 }
 
 func (state *runState) materializeManifest(catalogDigest string, target bench.Target, template captureManifestTemplate) (CaptureManifest, error) {
-	binaryPath := template.Binary.Path
-	if template.Engine == bench.EngineOwned {
-		binaryPath = filepath.Join(state.workRoot, "tools", "synapse-sca-bench")
+	if template.TargetID != target.ID {
+		return CaptureManifest{}, errors.New("capture manifest template target does not match the catalog target")
 	}
-	databasePath := template.Database.Path
-	environmentPath := template.EnvironmentAttestation.Path
+	paths, err := state.resolveTrustedManifestPaths(template)
+	if err != nil {
+		return CaptureManifest{}, err
+	}
 	manifest := CaptureManifest{
 		SchemaVersion: CaptureManifestSchemaVersion, CatalogRevision: state.catalog.Revision, CatalogDigest: catalogDigest,
-		TargetID: target.ID, SBOMPath: filepath.Join(state.input.TrustedInputRoot, "sboms", target.ID+".cdx.json"),
-		Engine: template.Engine, EngineVersion: template.EngineVersion,
-		Binary:                  Artifact{Reference: template.Binary.Reference, Path: binaryPath},
-		Database:                DatabaseArtifact{Reference: template.Database.Reference, Path: databasePath, Build: template.Database.Build, Format: template.Database.Format},
+		TargetID: target.ID, SBOMPath: paths.sbom, Engine: template.Engine, EngineVersion: template.EngineVersion,
+		Binary:                  Artifact{Reference: template.Binary.Reference, Path: paths.binary},
+		Database:                DatabaseArtifact{Reference: template.Database.Reference, Path: paths.database, Build: template.Database.Build, Format: template.Database.Format},
 		Environment:             template.Environment,
-		EnvironmentAttestation:  Artifact{Reference: template.EnvironmentAttestation.Reference, Path: environmentPath},
+		EnvironmentAttestation:  Artifact{Reference: template.EnvironmentAttestation.Reference, Path: paths.environmentAttestation},
 		EnvironmentPinReference: template.EnvironmentPinReference, ProfilePinReference: template.ProfilePinReference, Limits: template.Limits,
 	}
 	if state.expectedStates[runCellKey(target.ID, template.Engine)] == bench.ObservationUnsupported {
@@ -558,21 +729,81 @@ func (state *runState) materializeManifest(catalogDigest string, target bench.Ta
 	return manifest, nil
 }
 
-func canonicalCapabilityComponents(input []bench.Component) ([]bench.Component, error) {
+func (state *runState) resolveTrustedManifestPaths(template captureManifestTemplate) (trustedManifestPaths, error) {
+	root, err := benchcycle.RealDirectory(state.input.TrustedInputRoot)
+	if err != nil {
+		return trustedManifestPaths{}, fmt.Errorf("resolve trusted input root: %w", err)
+	}
+	identity, err := trustedCaptureInputForTemplate(template)
+	if err != nil {
+		return trustedManifestPaths{}, err
+	}
+	sbomPath, err := belowRoot(root, fixedTrustedSBOMLocators[template.TargetID])
+	if err != nil {
+		return trustedManifestPaths{}, fmt.Errorf("resolve trusted SBOM: %w", err)
+	}
+	databasePath, err := belowRootDirectory(root, identity.databaseLocator)
+	if err != nil {
+		return trustedManifestPaths{}, fmt.Errorf("resolve trusted database: %w", err)
+	}
+	environmentPath, err := belowRoot(root, trustedEnvironmentAttestationLocator)
+	if err != nil {
+		return trustedManifestPaths{}, fmt.Errorf("resolve trusted environment attestation: %w", err)
+	}
+	binaryPath := filepath.Join(state.workRoot, "tools", "synapse-sca-bench")
+	if template.Engine != bench.EngineOwned {
+		binaryPath, err = belowRoot(root, identity.binaryLocator)
+		if err != nil {
+			return trustedManifestPaths{}, fmt.Errorf("resolve trusted engine binary: %w", err)
+		}
+	}
+	if !filepath.IsAbs(binaryPath) {
+		return trustedManifestPaths{}, errors.New("materialized engine binary path is not absolute")
+	}
+	return trustedManifestPaths{
+		binary: binaryPath, database: databasePath, sbom: sbomPath, environmentAttestation: environmentPath,
+	}, nil
+}
+
+func trustedCaptureInputForTemplate(template captureManifestTemplate) (trustedCaptureInput, error) {
+	if _, exists := fixedTrustedSBOMLocators[template.TargetID]; !exists {
+		return trustedCaptureInput{}, fmt.Errorf("capture manifest template target %q is not fixed", template.TargetID)
+	}
+	if template.EnvironmentAttestation.Reference != trustedEnvironmentAttestationReference {
+		return trustedCaptureInput{}, errors.New("capture manifest template has an unknown environment attestation")
+	}
+	var identity trustedCaptureInput
+	var exists bool
+	switch template.Engine {
+	case bench.EngineOwned:
+		identity, exists = fixedTrustedOwnedInputs[template.TargetID]
+	default:
+		identity, exists = fixedTrustedCompetitorInputs[template.Engine]
+	}
+	if !exists || template.EngineVersion != identity.engineVersion || template.Binary.Reference != identity.binaryReference || template.Database.Reference != identity.databaseReference {
+		return trustedCaptureInput{}, errors.New("capture manifest template has an unrecognized trusted input identity")
+	}
+	return identity, nil
+}
+
+func canonicalCapabilityComponents(kind bench.CapabilityKind, input []bench.Component) ([]bench.Component, error) {
 	type keyedComponent struct {
 		component bench.Component
 		key       string
 	}
-	keyed := make([]keyedComponent, len(input))
+	keyed := make([]keyedComponent, 0, len(input))
 	for i, component := range input {
-		key, err := capabilityComponentKey(component)
+		if !isCapabilityRPMCandidate(kind, component.PURL) {
+			continue
+		}
+		key, err := capabilityComponentKey(kind, component)
 		if err != nil {
 			return nil, fmt.Errorf("capability component %d: %w", i, err)
 		}
-		keyed[i] = keyedComponent{
+		keyed = append(keyed, keyedComponent{
 			component: component,
 			key:       key.Ecosystem + "\x00" + key.Package + "\x00" + key.Version,
-		}
+		})
 	}
 	sort.Slice(keyed, func(i, j int) bool { return keyed[i].key < keyed[j].key })
 	components := make([]bench.Component, len(keyed))
@@ -585,6 +816,10 @@ func canonicalCapabilityComponents(input []bench.Component) ([]bench.Component, 
 func (state *runState) materializeCapability(catalogDigest string, target bench.Target, template captureManifestTemplate) (CapabilityStatement, string, error) {
 	if template.Capability == nil {
 		return CapabilityStatement{}, "", errors.New("capability template is required")
+	}
+	rule, ok := capabilityRule(template.Capability.Kind)
+	if !ok {
+		return CapabilityStatement{}, "", errors.New("capability template has an unsupported kind")
 	}
 	binaryDigest, err := catalogPin(state.catalog, template.Binary.Reference)
 	if err != nil {
@@ -606,7 +841,7 @@ func (state *runState) materializeCapability(catalogDigest string, target bench.
 	if err != nil {
 		return CapabilityStatement{}, "", err
 	}
-	components, err := canonicalCapabilityComponents(target.Components)
+	components, err := canonicalCapabilityComponents(template.Capability.Kind, target.Components)
 	if err != nil {
 		return CapabilityStatement{}, "", err
 	}
@@ -615,8 +850,8 @@ func (state *runState) materializeCapability(catalogDigest string, target bench.
 		statementSources = append(statementSources, CapabilityStatementSource{Reference: source.Reference, Digest: source.Digest})
 	}
 	statement := CapabilityStatement{
-		SchemaVersion: CapabilityStatementSchemaVersion, Kind: bench.CapabilityKindOSVScannerSUSERPM,
-		DecisionRuleRevision: CapabilityDecisionRuleRevision, Scope: CapabilityScopeSameSBOMOSPackageMatching,
+		SchemaVersion: CapabilityStatementSchemaVersion, Kind: template.Capability.Kind,
+		DecisionRuleRevision: rule.decisionRuleRevision, Scope: CapabilityScopeSameSBOMOSPackageMatching,
 		CatalogRevision: state.catalog.Revision, CatalogDigest: catalogDigest, TargetID: target.ID, TargetDigest: target.Digest,
 		SBOMDigest: target.SBOMDigest, Engine: template.Engine, EngineVersion: template.EngineVersion,
 		EngineBinaryDigest: binaryDigest, DatabaseBuild: template.Database.Build, DatabaseDigest: databaseDigest,
@@ -637,12 +872,17 @@ func (state *runState) capabilitySources(templates []capabilitySourceTemplate) (
 	if len(templates) == 0 {
 		return nil, errors.New("capability source templates are required")
 	}
+	root, err := benchcycle.RealDirectory(state.input.TrustedInputRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve trusted input root: %w", err)
+	}
 	artifacts := make([]CapabilityArtifact, 0, len(templates))
 	for _, template := range templates {
-		if template.Reference == "" || template.Locator == "" || template.Digest == "" {
-			return nil, errors.New("capability source template is incomplete")
+		identity, exists := fixedTrustedCapabilitySources[template.Reference]
+		if !exists || template.Locator != identity.locator || template.Digest == "" {
+			return nil, errors.New("capability source template has an unrecognized trusted input identity")
 		}
-		path, err := belowRoot(filepath.Join(state.input.TrustedInputRoot, "repository"), template.Locator)
+		path, err := belowRoot(root, "repository/"+identity.locator)
 		if err != nil {
 			return nil, err
 		}
@@ -651,10 +891,10 @@ func (state *runState) capabilitySources(templates []capabilitySourceTemplate) (
 			return nil, err
 		}
 		if digest != template.Digest {
-			return nil, fmt.Errorf("capability source %q digest differs from its frozen template", template.Locator)
+			return nil, fmt.Errorf("capability source %q digest differs from its frozen template", identity.locator)
 		}
-		if catalogDigest, exists := catalogPinOptional(state.catalog, capabilityPinReference(template.Locator)); exists && catalogDigest != digest {
-			return nil, fmt.Errorf("capability source %q differs from its catalog pin", template.Locator)
+		if catalogDigest, exists := catalogPinOptional(state.catalog, identity.pinReference); exists && catalogDigest != digest {
+			return nil, fmt.Errorf("capability source %q differs from its catalog pin", identity.locator)
 		}
 		artifacts = append(artifacts, CapabilityArtifact{Reference: template.Reference, Path: path, Digest: digest})
 	}
@@ -701,7 +941,15 @@ func (state *runState) validateRatchetBindings() error {
 			return fmt.Errorf("ratchet floor %s does not bind the materialized capture", key)
 		}
 		if manifest.Capability != nil {
-			expected.CapabilityKind = bench.CapabilityKindOSVScannerSUSERPM
+			body, err := readRegularFile(manifest.Capability.Statement.Path)
+			if err != nil {
+				return fmt.Errorf("read capability statement for %s: %w", key, err)
+			}
+			statement, err := decodeCapabilityStatement(body)
+			if err != nil {
+				return fmt.Errorf("decode capability statement for %s: %w", key, err)
+			}
+			expected.CapabilityKind = statement.Kind
 			expected.CapabilityDigest = manifest.Capability.Statement.Digest
 		} else if expected.CapabilityDigest != "" || expected.CapabilityKind != "" {
 			return fmt.Errorf("ratchet floor %s has unexpected capability identity", key)
@@ -776,14 +1024,14 @@ func (state *runState) captureCell(ctx context.Context, address benchcycle.Attem
 	if err := ctx.Err(); err != nil {
 		return bench.Observation{}, BundleIdentity{}, "", err
 	}
-	identity, err := BundleIdentityFromPathContext(ctx, path)
+	identity, observation, _, err := inspectBundleIdentityContext(ctx, path)
 	if err != nil {
 		return bench.Observation{}, BundleIdentity{}, "", fmt.Errorf("identify written capture bundle: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return bench.Observation{}, BundleIdentity{}, "", err
 	}
-	return captured.Observation(), identity, path, nil
+	return observation, identity, path, nil
 }
 
 func (state *runState) newEvidenceStore() (*benchcycle.EvidenceStore, error) {
@@ -841,6 +1089,19 @@ func reduceRepetitions(catalog bench.Catalog, oracle bench.Oracle, ratchet bench
 	return reduceRepetitionsContext(context.Background(), catalog, oracle, ratchet, observations)
 }
 
+func requireTrustedCycleResult(result bench.Result) error {
+	if result.Gate == nil {
+		return errors.New("absolute ratchet gate is missing")
+	}
+	if !result.Gate.Passed {
+		return errors.New("absolute ratchet gate did not pass")
+	}
+	if err := bench.ValidateMeasuredPerTargetRecallParity(result, fixedTargetIDs); err != nil {
+		return fmt.Errorf("measured per-target recall parity: %w", err)
+	}
+	return nil
+}
+
 func reduceRepetitionsContext(ctx context.Context, catalog bench.Catalog, oracle bench.Oracle, ratchet bench.Ratchet, observations [][]bench.Observation) (bench.Result, []byte, []byte, error) {
 	if ctx == nil {
 		return bench.Result{}, nil, nil, errors.New("reduction context is required")
@@ -858,6 +1119,9 @@ func reduceRepetitionsContext(ctx context.Context, catalog bench.Catalog, oracle
 		result, err = bench.ApplyRatchet(result, ratchet)
 		if err != nil {
 			return bench.Result{}, nil, nil, fmt.Errorf("apply ratchet to repetition %d: %w", index+1, err)
+		}
+		if err := requireTrustedCycleResult(result); err != nil {
+			return bench.Result{}, nil, nil, fmt.Errorf("validate trusted result for repetition %d: %w", index+1, err)
 		}
 		if err := ctx.Err(); err != nil {
 			return bench.Result{}, nil, nil, err
@@ -932,7 +1196,7 @@ func (state *runState) beginPublication() (*benchcycle.Publication, error) {
 	return benchcycle.BeginPublication(state.input.OutputRoot, benchcycle.PublicationLimits{
 		MaxFileBytes:   maxPublicationFileBytes,
 		MaxTotalBytes:  maxPublicationTotalBytes,
-		MaxFiles:       maxPublicationFiles,
+		MaxFiles:       expectedPublicationFileCount(),
 		CleanupTimeout: publicationCleanupTimeout,
 	}, state.clean, verify)
 }
@@ -953,7 +1217,7 @@ func (state *runState) stagePublication(ctx context.Context, publication *benchc
 	if err != nil {
 		return err
 	}
-	if len(artifacts) != maxPublicationFiles {
+	if len(artifacts) != expectedPublicationFileCount() {
 		return errors.New("sanitized publication artifact set is incomplete")
 	}
 	for _, artifact := range artifacts {
@@ -1065,7 +1329,7 @@ func verifyFinalPublication(ctx context.Context, stage string, identities []benc
 }
 
 func publicationStageFiles(ctx context.Context, stage string, identities []benchcycle.FileIdentity) (map[string][]byte, error) {
-	if len(identities) != maxPublicationFiles {
+	if len(identities) != expectedPublicationFileCount() {
 		return nil, errors.New("sanitized publication artifact set is incomplete")
 	}
 	files := make(map[string][]byte, len(identities))
@@ -1119,10 +1383,10 @@ func validateStagedRun(ctx context.Context, run RunResult, catalog bench.Catalog
 		run.InputDigests.Policy != sha256Digest(files["cycle-policy.json"]) || run.InputDigests.Review != sha256Digest(files["reviews/review.json"]) || run.InputDigests.Disposition != sha256Digest(files["reviews/disposition.json"]) {
 		return errors.New("staged run input digests do not bind staged artifacts")
 	}
-	if err := validateReviewEvidence(files["reviews/review.json"], files["reviews/disposition.json"], run.ImplementationCommit); err != nil {
+	if err := validateReviewEvidenceWithBindings(files["reviews/review.json"], files["reviews/disposition.json"], run.ImplementationCommit, InputDigests{Catalog: catalogDigest, Oracle: oracleDigest, Ratchet: ratchetDigest, Policy: sha256Digest(files["cycle-policy.json"])}); err != nil {
 		return fmt.Errorf("validate staged review evidence: %w", err)
 	}
-	if err := validateStagedCycleOrder(run, catalog, oracle); err != nil {
+	if err := ValidateStagedCycleOrder(run, catalog, oracle); err != nil {
 		return err
 	}
 	final, resultBytes, report, err := reduceRepetitionsContext(ctx, catalog, oracle, ratchet, run.Observations)
@@ -1151,9 +1415,9 @@ func validateStagedRun(ctx context.Context, run RunResult, catalog bench.Catalog
 }
 
 func validateStagedArtifactSet(catalog bench.Catalog, files map[string][]byte) error {
-	expected := map[string]struct{}{
-		"catalog.json": {}, "oracle.json": {}, "ratchet.json": {}, "cycle-policy.json": {},
-		"run.json": {}, "result.json": {}, "report.md": {}, "reviews/review.json": {}, "reviews/disposition.json": {},
+	expected := make(map[string]struct{}, expectedPublicationFileCount())
+	for _, path := range fixedPublicationArtifactPaths {
+		expected[path] = struct{}{}
 	}
 	for _, target := range catalog.Targets {
 		path := "sboms/" + target.ID + ".cdx.json"
@@ -1174,7 +1438,12 @@ func validateStagedArtifactSet(catalog bench.Catalog, files map[string][]byte) e
 	return nil
 }
 
-func validateStagedCycleOrder(run RunResult, catalog bench.Catalog, oracle bench.Oracle) error {
+// ValidateStagedCycleOrder checks the fixed cycle's cell order and paired bundle claims.
+// The protected publication verifier uses the same contract as the staging path.
+func ValidateStagedCycleOrder(run RunResult, catalog bench.Catalog, oracle bench.Oracle) error {
+	if err := validateFixedTargetMatrix(catalog); err != nil {
+		return err
+	}
 	if len(run.Observations) != fixedRepetitions || len(run.RawBundles) != fixedRepetitions || len(run.Comparisons) != fixedMatrixCells {
 		return errors.New("staged run has an incomplete fixed cycle")
 	}
@@ -1197,13 +1466,63 @@ func validateStagedCycleOrder(run RunResult, catalog bench.Catalog, oracle bench
 				if observation.TargetID != target.ID || observation.Engine != engine || observation.State != expectedStates[key] || identity.TargetID != target.ID || identity.Engine != engine {
 					return fmt.Errorf("staged run cell %q is out of canonical order", key)
 				}
+				if err := validateBundleReceipt(identity, observation); err != nil {
+					return fmt.Errorf("staged run cell %q has an invalid bundle receipt: %w", key, err)
+				}
 			}
 			comparison := run.Comparisons[index]
-			if comparison.TargetID != target.ID || comparison.Engine != engine || comparison.ExpectedState != expectedStates[key] || !comparison.SemanticEqual || len(comparison.UnclassifiedDifferences) != 0 {
+			if comparison.SchemaVersion != semanticBundleComparisonSchema || comparison.TargetID != target.ID || comparison.Engine != engine || comparison.ExpectedState != expectedStates[key] || !comparison.SemanticEqual || len(comparison.UnclassifiedDifferences) != 0 {
 				return fmt.Errorf("staged comparison for %q is invalid", key)
+			}
+			if !reflect.DeepEqual(comparison.Left, run.RawBundles[0][index]) || !reflect.DeepEqual(comparison.Right, run.RawBundles[1][index]) {
+				return fmt.Errorf("staged comparison for %q differs from bundle receipts", key)
+			}
+			left, right := run.Observations[0][index], run.Observations[1][index]
+			left.RawOutputDigest, right.RawOutputDigest = "", ""
+			if comparison.LeftClaim.ExpectedState != expectedStates[key] || comparison.RightClaim.ExpectedState != expectedStates[key] || !reflect.DeepEqual(comparison.LeftClaim.Observation, left) || !reflect.DeepEqual(comparison.RightClaim.Observation, right) || !reflect.DeepEqual(comparison.LeftClaim, comparison.RightClaim) {
+				return fmt.Errorf("staged comparison for %q differs from observed claims", key)
 			}
 			index++
 		}
+	}
+	return nil
+}
+
+func validateBundleReceipt(identity BundleIdentity, observation bench.Observation) error {
+	if !validDigest(identity.ManifestDigest) || !validDigest(identity.RootDigest) || !validDigest(identity.NormalizedObservationDigest) ||
+		!validDigest(identity.RawOutputDigest) || !validDigest(identity.ProcessEvidenceDigest) || !validDigest(identity.EnvironmentDigest) || !validDigest(identity.SBOMDigest) ||
+		identity.RawOutputDigest != observation.RawOutputDigest || identity.EnvironmentDigest != observation.EnvironmentDigest || identity.SBOMDigest != observation.SBOMDigest {
+		return errors.New("bundle digests are absent or differ from the observation")
+	}
+	if len(identity.Files) == 0 || len(identity.Files) > maxRawBundleArtifacts {
+		return errors.New("bundle file receipt is incomplete")
+	}
+	rootMaterial := make([]byte, 0, len(identity.Files)*80)
+	observationDigest, evidenceDigest := "", ""
+	for index, file := range identity.Files {
+		if file.Name == "" || (index > 0 && identity.Files[index-1].Name >= file.Name) || !validDigest(file.Digest) || file.Size < 0 {
+			return errors.New("bundle file receipt is invalid or unordered")
+		}
+		rootMaterial = append(rootMaterial, file.Name...)
+		rootMaterial = append(rootMaterial, 0)
+		rootMaterial = append(rootMaterial, file.Digest...)
+		rootMaterial = append(rootMaterial, 0)
+		switch file.Name {
+		case "observation.json":
+			observationDigest = file.Digest
+		case "evidence.json":
+			evidenceDigest = file.Digest
+		}
+	}
+	if identity.NormalizedObservationDigest != observationDigest || identity.ProcessEvidenceDigest != evidenceDigest {
+		return errors.New("bundle observation or evidence digest differs from its file receipt")
+	}
+	manifest, err := bench.CanonicalJSON(identity.Files)
+	if err != nil {
+		return err
+	}
+	if identity.ManifestDigest != sha256Digest(manifest) || identity.RootDigest != sha256Digest(rootMaterial) {
+		return errors.New("bundle file receipt digest is invalid")
 	}
 	return nil
 }
@@ -1332,12 +1651,12 @@ func validateFixedTargetMatrix(catalog bench.Catalog) error {
 	return nil
 }
 
-func readReviewEvidence(root, implementationCommit string) ([]byte, []byte, error) {
-	reviewPath, err := singleJSONFile(filepath.Join(root, "repository", "reviews", "github"))
+func readReviewEvidence(root, implementationCommit string, bindings InputDigests) ([]byte, []byte, error) {
+	reviewPath, err := singleJSONFile(root, "repository/reviews/github")
 	if err != nil {
 		return nil, nil, fmt.Errorf("read independent review: %w", err)
 	}
-	dispositionPath, err := singleJSONFile(filepath.Join(root, "repository", "reviews", "dispositions", "github"))
+	dispositionPath, err := singleJSONFile(root, "repository/reviews/dispositions/github")
 	if err != nil {
 		return nil, nil, fmt.Errorf("read maintainer disposition: %w", err)
 	}
@@ -1349,13 +1668,30 @@ func readReviewEvidence(root, implementationCommit string) ([]byte, []byte, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateReviewEvidence(review, disposition, implementationCommit); err != nil {
+	if err := validateReviewEvidenceWithBindings(review, disposition, implementationCommit, bindings); err != nil {
 		return nil, nil, err
 	}
 	return review, disposition, nil
 }
 
 func validateReviewEvidence(review, disposition []byte, implementationCommit string) error {
+	return validateReviewEvidenceWithBindings(review, disposition, implementationCommit, InputDigests{})
+}
+
+func validateReviewEvidenceWithBindings(review, disposition []byte, implementationCommit string, bindings InputDigests) error {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(review, &envelope); err != nil {
+		return err
+	}
+	var schemaVersion string
+	if raw, ok := envelope["schema_version"]; ok {
+		if err := json.Unmarshal(raw, &schemaVersion); err != nil {
+			return err
+		}
+	}
+	if schemaVersion == maintainerApprovalCaptureSchemaVersion {
+		return validateMaintainerAuthorizationEvidence(review, disposition, implementationCommit, bindings)
+	}
 	var reviewRecord reviewCapture
 	var dispositionRecord dispositionCapture
 	if err := strictDecodeBytes(review, &reviewRecord); err != nil {
@@ -1364,22 +1700,158 @@ func validateReviewEvidence(review, disposition []byte, implementationCommit str
 	if err := strictDecodeBytes(disposition, &dispositionRecord); err != nil {
 		return err
 	}
-	if reviewRecord.State != "COMMENTED" || reviewRecord.ID == "" || reviewRecord.Login == "" || reviewRecord.CommitID == "" || reviewRecord.Body == "" {
+	if reviewRecord.SchemaVersion != reviewCaptureSchemaVersion || reviewRecord.State != "COMMENTED" || reviewRecord.ID == "" || reviewRecord.URL == "" || reviewRecord.Login == "" || reviewRecord.CommitID == "" || reviewRecord.Body == "" {
 		return errors.New("independent review must be a complete COMMENTED review")
 	}
 	if _, err := time.Parse(time.RFC3339, reviewRecord.SubmittedAt); err != nil {
 		return errors.New("independent review timestamp is invalid")
 	}
-	if dispositionRecord.Decision != "approved" || dispositionRecord.ID == "" || dispositionRecord.Login == "" || dispositionRecord.Login == reviewRecord.Login || dispositionRecord.ReviewID != reviewRecord.ID || dispositionRecord.ReviewedCommit != reviewRecord.CommitID || dispositionRecord.ImplementationCommit != implementationCommit || dispositionRecord.CreatedAt != dispositionRecord.UpdatedAt || dispositionRecord.Body == "" {
+	if err := validateGitHubPRURL(reviewRecord.URL, reviewRecord.ID, "pullrequestreview-"); err != nil {
+		return fmt.Errorf("independent review URL is invalid: %w", err)
+	}
+	if reviewRecord.CommitID != implementationCommit {
+		return errors.New("independent review does not match the implementation commit")
+	}
+	if dispositionRecord.SchemaVersion != dispositionCaptureSchemaVersion || dispositionRecord.Decision != "approved" || dispositionRecord.ID == "" || dispositionRecord.URL == "" || dispositionRecord.Login == "" || dispositionRecord.Login == reviewRecord.Login || dispositionRecord.ReviewID != reviewRecord.ID || dispositionRecord.ReviewedCommit != reviewRecord.CommitID || dispositionRecord.ImplementationCommit != implementationCommit || dispositionRecord.CreatedAt != dispositionRecord.UpdatedAt || dispositionRecord.Body == "" {
 		return errors.New("maintainer disposition does not separately accept the COMMENTED review")
 	}
 	if _, err := time.Parse(time.RFC3339, dispositionRecord.CreatedAt); err != nil {
-		return errors.New("maintainer disposition timestamp is invalid")
+		return errors.New("maintainer disposition creation timestamp is invalid")
+	}
+	if _, err := time.Parse(time.RFC3339, dispositionRecord.UpdatedAt); err != nil {
+		return errors.New("maintainer disposition update timestamp is invalid")
+	}
+	if err := validateGitHubPRURL(dispositionRecord.URL, dispositionRecord.ID, "issuecomment-"); err != nil {
+		return fmt.Errorf("maintainer disposition URL is invalid: %w", err)
 	}
 	return nil
 }
 
-func singleJSONFile(directory string) (string, error) {
+func validateMaintainerAuthorizationEvidence(approval, authorization []byte, implementationCommit string, bindings InputDigests) error {
+	var approvalRecord maintainerApprovalCapture
+	var authorizationRecord maintainerAuthorizationCapture
+	if err := strictDecodeBytes(approval, &approvalRecord); err != nil {
+		return err
+	}
+	if err := strictDecodeBytes(authorization, &authorizationRecord); err != nil {
+		return err
+	}
+	if approvalRecord.SchemaVersion != maintainerApprovalCaptureSchemaVersion || strings.TrimSpace(approvalRecord.ID) == "" || strings.TrimSpace(approvalRecord.URL) == "" || strings.TrimSpace(approvalRecord.HeadURL) == "" || strings.TrimSpace(approvalRecord.Login) == "" || approvalRecord.Decision != "approved" || approvalRecord.ImplementationCommit != implementationCommit || approvalRecord.CreatedAt != approvalRecord.UpdatedAt || !maintainerCommentBindsApproval(approvalRecord.Body, implementationCommit, bindings) {
+		return errors.New("maintainer approval capture is incomplete, stale, or does not bind the final inputs")
+	}
+	if _, err := time.Parse(time.RFC3339, approvalRecord.CreatedAt); err != nil {
+		return errors.New("maintainer approval capture timestamp is invalid")
+	}
+	if err := validateExpectedGitHubIssueCommentURL(approvalRecord.URL, approvalRecord.ID); err != nil {
+		return fmt.Errorf("maintainer approval capture URL is invalid: %w", err)
+	}
+	if err := validateExpectedGitHubCommitURL(approvalRecord.HeadURL, implementationCommit); err != nil {
+		return fmt.Errorf("maintainer approval capture head URL is invalid: %w", err)
+	}
+	if authorizationRecord.SchemaVersion != maintainerAuthorizationSchemaVersion || authorizationRecord.ApprovalID != approvalRecord.ID || authorizationRecord.ApprovalDigest != sha256Digest(approval) || authorizationRecord.MaintainerLogin != approvalRecord.Login || authorizationRecord.ImplementationCommit != implementationCommit || authorizationRecord.CatalogDigest != bindings.Catalog || authorizationRecord.OracleDigest != bindings.Oracle || authorizationRecord.RatchetDigest != bindings.Ratchet || authorizationRecord.PolicyDigest != bindings.Policy || authorizationRecord.Decision != "approved" || strings.TrimSpace(authorizationRecord.TranscribedBy) == "" || strings.TrimSpace(authorizationRecord.Body) == "" {
+		return errors.New("maintainer authorization does not bind the captured approval and final benchmark inputs")
+	}
+	if _, err := time.Parse(time.RFC3339, authorizationRecord.TranscribedAt); err != nil {
+		return errors.New("maintainer authorization transcription timestamp is invalid")
+	}
+	for _, binding := range []struct {
+		name  string
+		value string
+	}{
+		{"catalog", bindings.Catalog},
+		{"oracle", bindings.Oracle},
+		{"ratchet", bindings.Ratchet},
+		{"policy", bindings.Policy},
+	} {
+		if !validSHA256Digest(binding.value) {
+			return fmt.Errorf("maintainer authorization requires a valid %s digest", binding.name)
+		}
+	}
+	return nil
+}
+
+func maintainerCommentBindsApproval(body, implementationCommit string, bindings InputDigests) bool {
+	expected := canonicalMaintainerApprovalComment(implementationCommit, bindings)
+	windows := strings.ReplaceAll(expected, "\n", "\r\n")
+	return body == expected || body == expected+"\n" || body == windows || body == windows+"\r\n"
+}
+
+func canonicalMaintainerApprovalComment(implementationCommit string, bindings InputDigests) string {
+	return strings.Join([]string{
+		"decision: approved",
+		"implementation_commit: " + implementationCommit,
+		"catalog_digest: " + bindings.Catalog,
+		"oracle_digest: " + bindings.Oracle,
+		"ratchet_digest: " + bindings.Ratchet,
+		"policy_digest: " + bindings.Policy,
+	}, "\n")
+}
+
+func validateExpectedGitHubIssueCommentURL(rawURL, id string) error {
+	if err := validateGitHubPRURL(rawURL, id, "issuecomment-"); err != nil {
+		return err
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	expectedPath := "/" + maintainerApprovalRepositoryOwner + "/" + maintainerApprovalRepositoryName + "/pull/" + maintainerApprovalPullNumber
+	if parsed.Path != expectedPath {
+		return errors.New("URL must identify the expected GitHub pull request")
+	}
+	return nil
+}
+
+func validateExpectedGitHubCommitURL(rawURL, implementationCommit string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.RawPath != "" || parsed.Fragment != "" {
+		return errors.New("head URL must be a credential-free canonical HTTPS github.com URL")
+	}
+	expectedPath := "/" + maintainerApprovalRepositoryOwner + "/" + maintainerApprovalRepositoryName + "/commit/" + implementationCommit
+	if parsed.Path != expectedPath {
+		return errors.New("head URL must identify the exact expected GitHub commit")
+	}
+	return nil
+}
+
+func validateGitHubPRURL(rawURL, id, fragmentPrefix string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.RawPath != "" {
+		return errors.New("URL must be a credential-free canonical HTTPS github.com URL")
+	}
+	segments := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(segments) != 4 || segments[0] == "" || segments[1] == "" || segments[2] != "pull" || !positiveDecimal(segments[3]) {
+		return errors.New("URL must identify a GitHub pull request")
+	}
+	if parsed.Fragment != fragmentPrefix+id {
+		return errors.New("URL fragment does not match the captured ID")
+	}
+	return nil
+}
+
+func positiveDecimal(value string) bool {
+	if value == "" || value == "0" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func singleJSONFile(root, locator string) (string, error) {
+	directory, err := belowRootDirectory(root, locator)
+	if err != nil {
+		return "", err
+	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return "", err
@@ -1392,7 +1864,10 @@ func singleJSONFile(directory string) (string, error) {
 		if path != "" {
 			return "", errors.New("review directory must contain exactly one JSON file")
 		}
-		path = filepath.Join(directory, entry.Name())
+		path, err = belowRoot(root, filepath.ToSlash(filepath.Join(locator, entry.Name())))
+		if err != nil {
+			return "", err
+		}
 	}
 	if path == "" {
 		return "", errors.New("review directory has no JSON file")
@@ -1431,18 +1906,12 @@ func runCellKey(targetID string, engine bench.Engine) string {
 	return "sca-cell-" + hex.EncodeToString(sum[:])
 }
 
-func capabilityPinReference(locator string) string {
-	if strings.Contains(locator, "purl_to_package.go") {
-		return "capability-source:osv-scanner:c84fa4568f2526d0333e9a914ea8a0a5f74ad68b"
-	}
-	if strings.Contains(locator, "ecosystem.go") {
-		return "capability-source:osv-scalibr:23fa66ca68dd17bfdbe0b8b3536d1887a3a940da"
-	}
-	return ""
-}
-
 func belowRoot(root, locator string) (string, error) {
 	return benchcycle.BelowRoot(root, locator)
+}
+
+func belowRootDirectory(root, locator string) (string, error) {
+	return benchcycle.BelowRootDirectory(root, locator)
 }
 
 func readRegularFile(path string) ([]byte, error) {
@@ -1463,4 +1932,13 @@ func digestFile(path string) (string, error) {
 func sha256Digest(body []byte) string {
 	hash := sha256.Sum256(body)
 	return "sha256:" + hex.EncodeToString(hash[:])
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	digest := strings.TrimPrefix(value, "sha256:")
+	decoded, err := hex.DecodeString(digest)
+	return err == nil && hex.EncodeToString(decoded) == digest
 }

@@ -53,6 +53,7 @@ nav:
       - Installation: installation.md
       - Quickstart: quickstart.md
       - Features: features.md
+      - Screen walkthrough: ui-walkthrough.md
   - Assessment workflows:
       - Project code quality: project-code-quality.md
       - Governed assessments: governed-assessment-workflows.md
@@ -77,13 +78,19 @@ nav:
       - Reachability benchmark: reachability-benchmark-runbook.md
       - Reachability soundness: reachability-soundness.md
       - SCA accuracy benchmark: sca-accuracy-benchmark.md
+      - Public SCA diagnostic inputs: sca-public-inputs.md
+      - Trusted benchmark provisioning: trusted-benchmark-provisioning.md
+      - SAST post-triage benchmark: sast-post-triage-benchmark.md
+      - Benchmark acceptance and retirement: benchmark-acceptance.md
       - Code quality benchmark: code-quality-benchmark.md
       - Operations drill evidence: operations-drill-evidence.md
       - Detection RulePack lifecycle: rulepack.md
+      - Troubleshooting: troubleshooting.md
   - Integrate:
       - CLI: cli.md
       - MCP integration: mcp-integration.md
       - CI/CD integrations: integrations.md
+      - Ticketing foundation: ticketing-foundation.md
       - Code quality rule authoring: code-quality-rules.md
   - Architecture and security:
       - Architecture: architecture.md
@@ -91,6 +98,8 @@ nav:
       - Repository decisions and policies:
           - Telemetry store ADR: repository/telemetry-store-adr.md
           - CSPM helper ADR: repository/cspm-helper-adr.md
+          - Interpretive compliance mappings ADR: repository/interpretive-compliance-mappings-adr.md
+          - Red Hat advisory feed breadth ADR: repository/red-hat-advisory-feed-breadth-adr.md
           - Promotion rules: repository/promotion-rules.md
           - Offensive policy: repository/offensive-policy.md
 

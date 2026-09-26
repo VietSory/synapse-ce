@@ -77,6 +77,10 @@ type Config struct {
 	// DBAutoMigrate controls embedded migrations for long-running services. A dedicated
 	// synapse-migrate job may own migrations while services rely on readiness instead.
 	DBAutoMigrate bool
+	// AlpineSecdbURL is the base URL of the apk secdb mirror `sync-advisories --remote-secdb` ingests. It is
+	// configurable so an air-gapped estate can point it at an internal mirror of the same layout.
+	AlpineSecdbURL string
+
 	// SyftBin is the Syft executable used for SBOM generation (shell-out).
 	SyftBin string
 	// SBOMProducer selects the SBOM-generation producer: "ownsbom" (default – the detection-independent
@@ -136,8 +140,9 @@ type Config struct {
 	// --ignore-unfixed. Default false (show everything); they remain in the vuln inventory.
 	IgnoreUnfixed bool
 	// Offline, when true, forbids network egress for a scan. It omits detection sources that require it
-	// (the live OSV.dev source), running only offline sources – Grype's pre-synced DB and the owned
-	// advisory store – AND switches off every registry resolver (npm, composer, poetry, Bundler, Maven,
+	// (the live OSV.dev source), running only offline sources – the owned advisory store, plus Grype's
+	// pre-synced DB when SYNAPSE_DETECTION_SOURCES names it (scacompose.resolveDetectionSourceNames owns
+	// the selection and never adds Grype by default) – AND switches off every registry resolver (npm, composer, poetry, Bundler, Maven,
 	// Gradle), the Maven Central JAR SHA-1 lookup, the KEV/EPSS and online NVD enrichers, the deps.dev
 	// and PyPI license metadata, and AI triage. Trades some recall for an air-gapped scan (no HTTP at
 	// all). Default false.
@@ -158,6 +163,11 @@ type Config struct {
 	ProjectSourceMaxFileBytes     int64
 	ProjectSourceMaxFiles         int
 	ProjectSourceMaxBytes         int64
+	// SASTSourceBudgetBytes is the source the pattern SAST analyzer retains for cross-file context. The
+	// default bounds memory on an untrusted tree and never binds on an ordinary repository; it DOES bind on a
+	// monorepo, where the unretained part of the tree is scanned by no rule at all. 0 keeps the built-in
+	// default.
+	SASTSourceBudgetBytes int64
 	// ProjectGitComparisonDepth bounds history fetched to resolve an immutable
 	// Code comparison base; comparison degrades gracefully when insufficient.
 	ProjectGitComparisonDepth int
@@ -761,13 +771,20 @@ type Config struct {
 	JarHashBaseURL       string
 	JarHashDBPath        string
 	// CrossCheckEnabled turns on cross-check disagreement judgments: post-scan, where the run
-	// detection sources disagree on a vuln, mint an ungated CapCorrelation judgment for human review. Off by
-	// default; opt-in + best-effort. Requires JudgmentsEnabled (it mints judgments).
+	// detection sources disagree on a vuln, mint an ungated CapCorrelation judgment for human review. On by
+	// default (effective-by-default policy, TestAnalysisDefaultsOn); best-effort — it degrades to a no-op when
+	// a second detection source is unavailable — set SYNAPSE_CROSSCHECK_ENABLED=false to opt out. Requires
+	// JudgmentsEnabled (it mints judgments).
 	CrossCheckEnabled bool
 	// SBOMCrossCheckEnabled turns on SBOM-PRODUCER cross-check judgments: a 2nd SBOM producer runs
 	// alongside the primary and components only one producer emits are minted as ungated CapCorrelation
-	// judgments (subject = component) for human review. Off by default; opt-in + best-effort. Requires
-	// JudgmentsEnabled (it mints judgments).
+	// judgments (subject = component) for human review.
+	//
+	// OFF by default, unlike the other best-effort analysis capabilities. The owned parsers are the
+	// primary producer, so the only second producer is Syft, and defaulting this on made a stock
+	// deployment reach for a third-party binary Synapse does not otherwise need. The cross-check keeps
+	// its value as an opt-in independence check; it is not a condition of scanning.
+	// Requires JudgmentsEnabled (it mints judgments) and a Syft binary on PATH.
 	SBOMCrossCheckEnabled bool
 	// WriteupDraftsEnabled turns on the propose_writeup_draft agent tool: the agent can DRAFT a
 	// finding's write-up prose as a proposal; a human edits/signs off out of band. Off by default; opt-in.
@@ -839,6 +856,7 @@ func Load() Config {
 		DBMigrationDSN:                   getenv("SYNAPSE_DB_MIGRATION_DSN", ""),
 		DBHaltWriterDSN:                  getenv("SYNAPSE_DB_HALT_WRITER_DSN", ""),
 		DBAutoMigrate:                    getbool("SYNAPSE_DB_AUTO_MIGRATE", true),
+		AlpineSecdbURL:                   getenv("SYNAPSE_ALPINE_SECDB_URL", ""),
 		SyftBin:                          getenv("SYNAPSE_SYFT_BIN", "syft"),
 		SBOMProducer:                     getenv("SYNAPSE_SBOM_PRODUCER", "ownsbom"),
 		GrypeBin:                         getenv("SYNAPSE_GRYPE_BIN", "grype"),
@@ -871,6 +889,7 @@ func Load() Config {
 		ProjectSourceMaxFileBytes:     getint64("SYNAPSE_PROJECT_SOURCE_MAX_FILE_BYTES", 2<<20),
 		ProjectSourceMaxFiles:         getint("SYNAPSE_PROJECT_SOURCE_MAX_FILES", 10_000),
 		ProjectSourceMaxBytes:         getint64("SYNAPSE_PROJECT_SOURCE_MAX_BYTES", 500<<20),
+		SASTSourceBudgetBytes:         getint64("SYNAPSE_SAST_SOURCE_BUDGET_BYTES", 0),
 		ProjectGitComparisonDepth:     getint("SYNAPSE_PROJECT_GIT_COMPARISON_DEPTH", 256),
 		BlobEndpoint:                  getenv("SYNAPSE_BLOB_ENDPOINT", ""),
 		BlobAccessKey:                 getenv("SYNAPSE_BLOB_ACCESS_KEY", ""),
@@ -966,7 +985,7 @@ func Load() Config {
 		CppReachabilityEnabled:                      getbool("SYNAPSE_REACH_CPP", true),
 		GoBinaryReachabilityEnabled:                 getbool("SYNAPSE_REACH_GOBIN", true),
 		CrossCheckEnabled:                           getbool("SYNAPSE_CROSSCHECK_ENABLED", true),
-		SBOMCrossCheckEnabled:                       getbool("SYNAPSE_SBOM_CROSSCHECK_ENABLED", true),
+		SBOMCrossCheckEnabled:                       getbool("SYNAPSE_SBOM_CROSSCHECK_ENABLED", false),
 		WriteupDraftsEnabled:                        getbool("SYNAPSE_WRITEUP_DRAFTS_ENABLED", false), // needs agent → opt-in
 		FleetAssetsEnabled:                          getbool("SYNAPSE_FLEET_ASSETS_ENABLED", false),
 		CSPMEnabled:                                 getbool("SYNAPSE_CSPM_ENABLED", false),

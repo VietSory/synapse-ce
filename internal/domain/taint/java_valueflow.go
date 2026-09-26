@@ -88,6 +88,13 @@ type JavaCatalog struct {
 	Sources           []JavaSourceModel
 	Sinks             []JavaSinkModel
 	Sanitizers        []JavaSanitizerModel
+	// ReceiverMutators are method names whose contract is to ABSORB an argument into the receiver:
+	// sb.append(part), list.add(element), map.put(key, value). Without them an argument only reaches the
+	// call's result, so a value built up across statements (the normal way Java assembles a query, a command
+	// or a response) leaves the receiver clean and every downstream sink sees an untainted value. Membership
+	// is by method name because the receiver is a runtime value the source-only facts cannot type, the same
+	// floor the receiver-typed sinks use.
+	ReceiverMutators []string
 }
 
 // JavaTypedValueSource is one source slot for one taint class.
@@ -158,7 +165,7 @@ func BuildJavaValueGraph(document javaprogram.Document, catalog JavaCatalog) (Ja
 	b := javaValueBuilder{
 		document: document, catalog: catalog,
 		values: map[string]javaprogram.Value{}, symbols: map[string]javaprogram.Symbol{},
-		parents: map[string]string{}, definitions: map[string]map[string][]javaprogram.Value{},
+		parents: map[string]string{}, definitions: map[string]map[string][]javaprogram.Value{}, strongDefinitions: map[string]bool{},
 		returns: map[string][]string{}, imports: map[string]map[string]javaImportBinding{},
 		methodsByName: map[string][]string{}, declaredCallables: map[string]map[string]bool{},
 		classByFQN: map[string][]string{}, methodsByParent: map[string][]string{},
@@ -180,6 +187,7 @@ type javaValueBuilder struct {
 	symbols           map[string]javaprogram.Symbol
 	parents           map[string]string
 	definitions       map[string]map[string][]javaprogram.Value
+	strongDefinitions map[string]bool
 	returns           map[string][]string
 	imports           map[string]map[string]javaImportBinding // scopeID -> localName -> binding
 	methodsByName     map[string][]string                     // "module\x00name" -> symbol IDs
@@ -264,6 +272,14 @@ func (b *javaValueBuilder) index() {
 			b.returns[item.ScopeID] = append(b.returns[item.ScopeID], item.SlotID)
 		}
 	}
+	for _, item := range b.document.Assignments {
+		if !item.StrongUpdate {
+			continue
+		}
+		for _, targetID := range item.TargetIDs {
+			b.strongDefinitions[targetID] = true
+		}
+	}
 }
 
 // javaImportLocal is the local name a single-import binds. `import java.sql.Statement;` binds "Statement";
@@ -299,6 +315,12 @@ func (b *javaValueBuilder) bindReferences() {
 				}
 			}
 			if len(prior) > 0 {
+				// A simple assignment that certainly executes replaces prior values. Conditional, loop,
+				// compound, and container writes have no marker, so all definitions remain at the join.
+				if latest := prior[len(prior)-1]; b.strongDefinitions[latest.ID] {
+					b.addFlow(latest.ID, value.ID)
+					break
+				}
 				for _, definition := range prior {
 					b.addFlow(definition.ID, value.ID)
 				}
@@ -342,6 +364,12 @@ func (b *javaValueBuilder) modelCalls() {
 				continue // an import-gated floor: the anchoring API is not imported in this file
 			}
 			matchedRole = true
+			// HTML-text proof is emitted only by the Java extractor after it has established the complete local
+			// response-write and helper shape. It clears this writer sink only; it is not a value sanitizer and
+			// cannot affect a later write, another sink class, or an older sidecar whose proof field is empty.
+			if model.Class == TaintXSS && call.OutputProof == javaprogram.OutputProofHTMLText {
+				continue
+			}
 			if len(b.sinks) >= maxJavaTaintSinks {
 				b.truncated = true
 				continue
@@ -479,10 +507,32 @@ func (b *javaValueBuilder) bindCall(call javaprogram.Call, callee javaprogram.Sy
 }
 
 func (b *javaValueBuilder) propagateCallInputs(call javaprogram.Call) {
+	mutatesReceiver := b.isReceiverMutator(call)
 	for _, argument := range call.Arguments {
 		b.addFlow(argument.ValueID, call.ResultID)
+		if mutatesReceiver {
+			// sb.append(tainted) / list.add(tainted) / map.put(k, tainted): the receiver now carries the
+			// argument, so taint must reach it. The result edge above is not enough, because the receiver is
+			// what the next statement reads (sb.toString(), the list handed to ProcessBuilder.command).
+			b.addFlow(argument.ValueID, call.ReceiverValueID)
+		}
 	}
 	b.addFlow(call.ReceiverValueID, call.ResultID)
+}
+
+// isReceiverMutator reports whether the call's method name is one whose contract absorbs an argument into
+// the receiver. Matched on the callee's LAST segment only: the receiver is a runtime value whose type the
+// source-only facts cannot resolve, so this is the same name floor the receiver-typed sinks stand on, and it
+// is deliberately restricted to container and builder mutators whose name carries that contract on its own.
+func (b *javaValueBuilder) isReceiverMutator(call javaprogram.Call) bool {
+	if call.ReceiverValueID == "" || len(b.catalog.ReceiverMutators) == 0 {
+		return false
+	}
+	segments := call.Callee.Segments
+	if len(segments) == 0 {
+		return false
+	}
+	return containsString(b.catalog.ReceiverMutators, segments[len(segments)-1])
 }
 
 // resolveCatalogCallee resolves the callee's base identifier to an import and returns the anchored

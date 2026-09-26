@@ -1,0 +1,113 @@
+name: Owned default readiness
+
+# This gate checks owned-default configuration and committed corpus policy at the
+# exact source revision. Aggregate SCA benchmark status is separately required by
+# branch protection for fresh same-input comparator measurements on that SHA.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owned-default-readiness-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  route:
+    name: Authorize readiness gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          case "$sha" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "source revision is not a full SHA" >&2; exit 1 ;;
+          esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+  readiness:
+    name: Owned default readiness evidence
+    needs: route
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.route.outputs.source_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Assert exact checkout revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ needs.route.outputs.source_sha }}"
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate committed comparator-relative ratchet policy
+        shell: bash
+        run: bash scripts/require-go-tests.sh TestOwnedRecallParityOnCommittedRatchet "$RUNNER_TEMP/readiness-parity.jsonl" pass ./internal/usecase/scabench/...
+      - name: Historical SCA evidence matches the committed corpus
+        shell: bash
+        run: bash scripts/require-go-tests.sh TestCommittedCorpusEvidenceCurrency "$RUNNER_TEMP/readiness-currency.jsonl" pass ./internal/usecase/scabench/ -run '^TestCommittedCorpusEvidenceCurrency$'
+      - name: Owned-only default operates without Syft or Grype
+        shell: bash
+        run: bash scripts/require-go-tests.sh TestOwnedOnlyScanNeedsNoSyftOrGrype "$RUNNER_TEMP/readiness-owned-only.jsonl" pass ./internal/usecase/sca/ -run '^TestOwnedOnlyScanNeedsNoSyftOrGrype$'
+      - name: Unknown and unsupported coverage stays explicit
+        shell: bash
+        run: bash scripts/require-go-tests.sh TestOSDistroCoverageReadiness,TestOSCoverageWarnings "$RUNNER_TEMP/readiness-coverage.jsonl" pass ./internal/usecase/sca/ -run 'Coverage|Distro'
+      - name: Owned dependency-graph and advisory matching evidence
+        shell: bash
+        run: go test -count=1 ./internal/infrastructure/tools/ownsbom/... ./internal/domain/advisory/...
+      - name: Record readiness report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/owned-default-readiness"
+          {
+            echo "revision: ${{ needs.route.outputs.source_sha }}"
+            echo "configuration_current: true"
+            echo "fresh_matrix: required-by-Aggregate-SCA-benchmark-status"
+          } > "$RUNNER_TEMP/owned-default-readiness/readiness.txt"
+      - name: Upload readiness report
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: owned-default-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/owned-default-readiness
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    name: Aggregate readiness status
+    needs: [route, readiness]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - shell: bash
+        env:
+          ROUTE: ${{ needs.route.result }}
+          READINESS: ${{ needs.readiness.result }}
+          ARTIFACT: ${{ needs.readiness.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          test "$ROUTE" = success
+          test "$READINESS" = success
+          test -n "$ARTIFACT"

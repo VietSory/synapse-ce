@@ -117,6 +117,19 @@ type AssetRepository interface {
 
 // BusinessAssetRepository persists the business-level Asset model without changing the existing
 // technical/fleet Asset API. All methods are tenant-scoped and PostgreSQL implementations run
+// BusinessAssetQuery is the filter, ordering and page a business-asset listing asks the store for.
+// Query and Owner are case-insensitive substring matches, Query against "<key> <name>"; the typed
+// fields match exactly, and an empty value means "do not filter on this".
+type BusinessAssetQuery struct {
+	Query       string
+	Type        asset.BusinessAssetType
+	Criticality asset.Criticality
+	Lifecycle   asset.BusinessAssetLifecycle
+	Owner       string
+	Limit       int
+	Offset      int
+}
+
 // through WithTenant so RLS and composite foreign keys remain the final isolation boundary.
 type BusinessAssetRepository interface {
 	CreateBusinessAsset(ctx context.Context, a *asset.BusinessAsset) error
@@ -124,6 +137,17 @@ type BusinessAssetRepository interface {
 	GetBusinessAssetByID(ctx context.Context, tenantID, id shared.ID) (*asset.BusinessAsset, error)
 	GetBusinessAssetByKey(ctx context.Context, tenantID shared.ID, key string) (*asset.BusinessAsset, error)
 	ListBusinessAssets(ctx context.Context, tenantID shared.ID) ([]*asset.BusinessAsset, error)
+	// ListBusinessAssetsPage applies the filter, the ordering, and the page in the store. It exists
+	// because ListBusinessAssets ships every row for the tenant: filtering and paginating above the
+	// repository makes a five-row page cost a full scan and a full row transfer.
+	//
+	// It returns the page and the count of rows matching the filter before the page is applied.
+	ListBusinessAssetsPage(ctx context.Context, tenantID shared.ID, query BusinessAssetQuery) ([]*asset.BusinessAsset, int, error)
+	// CountBusinessAssetsByCriticality returns the tenant's asset count per criticality. It exists
+	// so a dashboard can state an estate-wide figure without listing the estate: ListBusinessAssets
+	// ships every row regardless of the page asked for, so answering a count with it costs a full
+	// scan and a full row transfer per request.
+	CountBusinessAssetsByCriticality(ctx context.Context, tenantID shared.ID) (map[asset.Criticality]int, error)
 	ReplaceBusinessAssetProjects(ctx context.Context, tenantID, assetID shared.ID, links []asset.ComponentMembership) error
 	ListBusinessAssetProjects(ctx context.Context, tenantID, assetID shared.ID) ([]asset.ComponentMembership, error)
 	ReplaceBusinessAssetTechnicalAssets(ctx context.Context, tenantID, assetID shared.ID, links []asset.ComponentMembership) error
@@ -1504,32 +1528,32 @@ type Workspace struct {
 	Cleanup    func() error
 }
 
-// OSPackageResult is the outcome of OS-package cataloging: the components plus whether their distro release
-// resolved to an advisory-matchable ecosystem. DistroResolved is false when the OS DB was read but the release
-// could not be keyed (/etc/os-release absent, garbled, or inconsistent with the DB family) – so the pipeline
-// surfaces a completeness warning instead of the packages silently matching zero OS advisories (a falsely-clean
-// OS posture). DistroResolved is meaningful only when Components is non-empty.
+// OSPackageResult is the outcome of OS-package cataloging. DistroResolved is
+// true only when every component can be keyed to an advisory ecosystem. A
+// missing or unsupported release, or a mixture of verified and unsupported
+// CentOS RPMs, keeps it false so the pipeline never reports a falsely-clean OS
+// posture. DistroResolved is meaningful only when Components is non-empty.
 type OSPackageResult struct {
 	Components     []sbom.Component
 	DistroResolved bool
 	// UnsupportedDistro names a distro the cataloger RECOGNIZED but deliberately does not match advisories for
 	// (empty otherwise). It distinguishes a by-design coverage gap from a parse failure: CentOS Stream and
-	// CentOS >=8 are the case today (Stream runs ahead of RHEL and VERSION_ID=8 is ambiguous, so applying a
-	// RHEL fixed version would be a false match). The packages are still cataloged for inventory; the pipeline
-	// surfaces this as a structured coverage=unsupported warning rather than a generic "release could not be
-	// resolved", and never aliases the packages to RHEL or reads them as clean.
+	// CentOS >=8 and the limited CentOS 7 base allowlist are examples. It may
+	// coexist with ApproximateDistro when a CentOS 7 image has verified base
+	// packages while other package origins remain unsupported. The pipeline surfaces a structured
+	// coverage=unsupported warning and never reads the unsupported scope as clean.
 	UnsupportedDistro string
 	// ApproximateDistro names a distro whose packages the cataloger keyed to ANOTHER distro's advisory
 	// ecosystem as a documented, sound approximation (empty otherwise). CentOS Linux 7 is the case today: it is
-	// a downstream rebuild of RHEL 7 (there was never a CentOS Stream 7, so VERSION_ID=7 is unambiguous), so its
-	// packages are keyed to "Red Hat:7". The pipeline surfaces this as a structured coverage=approximate
-	// provenance warning so a Red Hat finding on a CentOS 7 package is never mistaken for native CentOS-feed
-	// coverage; EPEL/SIG/third-party RPMs, absent from RHEL advisories, produce no finding.
+	// a downstream rebuild of RHEL 7 (there was never a CentOS Stream 7, so VERSION_ID=7 is unambiguous), but
+	// only packages with independently verified base-repository origin are keyed
+	// to "Red Hat:7". The pipeline surfaces coverage=approximate even in a mixed
+	// image, so those findings are never mistaken for native CentOS-feed coverage.
 	ApproximateDistro string
 }
 
 // OSPackageCataloger reads a materialized image root filesystem (Workspace.RootFS) and returns the installed
-// OS packages – Debian/Ubuntu dpkg (/var/lib/dpkg/status) and Alpine apk (/lib/apk/db/installed) – as SBOM
+// OS packages – dpkg, apk, or rpm database entries – as SBOM
 // components, each tagged (when the release resolves) with a Syft-style distro qualifier
 // (distro=debian-12/ubuntu-22.04/alpine-3.18.12, from /etc/os-release) so the existing advisory matcher keys
 // them to the right OS ecosystem. It is the owned (detection-independent) alternative to relying on the
@@ -1599,6 +1623,14 @@ type LanguageDetector interface {
 // internal/domain/sbom). Producer identity + version ride on the returned SBOM (Source, GeneratorVersion).
 type SBOMGenerator interface {
 	Generate(ctx context.Context, targetRef string) (*sbom.SBOM, error)
+}
+
+// SBOMWarningReporter is the optional reporting form of an SBOM producer: it says what the producer could NOT
+// resolve. A dependency tree that a rate limit or a missing repository truncated looks exactly like a small
+// project unless the producer can say so, which is the difference between a clean result and an unknown one.
+type SBOMWarningReporter interface {
+	SBOMGenerator
+	SBOMWarnings() []string
 }
 
 // SBOMCache is an optional content-addressed cache of GENERATED (pre-enrichment) SBOMs. The key is derived
@@ -1804,6 +1836,16 @@ type NPMResolver interface {
 	Resolve(ctx context.Context, dir string) ([]sbom.Component, error)
 }
 
+// NPMGraphResolver is the optional graph-aware capability of an NPMResolver, mirroring
+// GradleGraphResolver: it returns the resolved components AND the dependency EDGES. The pipeline needs
+// the edges to tell a direct dependency from a transitive one, to show the path from the project root to
+// a vulnerable package, and to compute a remediation plan. Without them every CVE in a lockfile-less npm
+// project is reported with no path and no direct/transitive classification. Separate from NPMResolver so
+// a components-only resolver still satisfies the base.
+type NPMGraphResolver interface {
+	ResolveGraph(ctx context.Context, dir string) ([]sbom.Component, []sbom.Dependency, error)
+}
+
 // ManifestResolver resolves a lockfile-less package manifest (composer.json / Gemfile / pyproject.toml,
 // ...) to a pinned component tree by running the ecosystem's own lock tool in a no-scripts, lock-only
 // mode over a throwaway copy. Ecosystem() labels it for tracing. Several may be registered; each is a
@@ -1812,6 +1854,13 @@ type NPMResolver interface {
 type ManifestResolver interface {
 	Ecosystem() string
 	Resolve(ctx context.Context, dir string) ([]sbom.Component, error)
+}
+
+// ManifestGraphResolver is the optional graph-aware capability of a ManifestResolver, mirroring
+// NPMGraphResolver: the generated lockfile carries the dependency edges, so a resolver that parses it
+// can return them and give a transitive CVE its path and its introducing direct dependencies.
+type ManifestGraphResolver interface {
+	ResolveGraph(ctx context.Context, dir string) ([]sbom.Component, []sbom.Dependency, error)
 }
 
 // SBOMEnrichment is what an SBOMEnricher contributed, for honest provenance.
@@ -2008,6 +2057,47 @@ type AdvisoryMaterializer interface {
 	CurrentRevision(ctx context.Context, advisoryID string) (int64, error)
 }
 
+// SourceSnapshotPublication identifies a complete source snapshot and its provider checkpoint.
+// Publishers commit its receipt with the source observations, so a failed post-publication
+// reconciliation can resume without fetching the provider again.
+type SourceSnapshotPublication struct {
+	SyncRunID      shared.ID
+	NextCheckpoint []byte
+}
+
+// PublishedSourceSnapshot is the durable receipt and exact materialization results for a
+// completed source snapshot.
+type PublishedSourceSnapshot struct {
+	SourceID       shared.ID
+	AdapterType    string
+	NextCheckpoint []byte
+	Results        []advisory.MaterializationResult
+}
+
+// SourceSnapshotPublisher atomically persists a complete source snapshot and its durable receipt.
+type SourceSnapshotPublisher interface {
+	PublishSourceSnapshot(ctx context.Context, publication SourceSnapshotPublication, records []advisory.ObservationRecord) ([]advisory.MaterializationResult, error)
+}
+
+// PublishedSourceSnapshotReader loads a completed source snapshot before provider resolution.
+type PublishedSourceSnapshotReader interface {
+	PublishedSourceSnapshot(ctx context.Context, syncRunID shared.ID) (PublishedSourceSnapshot, bool, error)
+}
+
+// BoundedCurrentSourceRecordIDs lists source members while capping memory and work
+// before an authoritative snapshot creates absence replacements.
+type BoundedCurrentSourceRecordIDs interface {
+	CurrentSourceRecordIDsBounded(ctx context.Context, sourceID string, limit int, yield func(string) error) error
+}
+
+// AuthoritativeSourceSnapshotStore provides the complete lifecycle contract required
+// before an OVAL source may enter a full authoritative synchronization.
+type AuthoritativeSourceSnapshotStore interface {
+	SourceSnapshotPublisher
+	PublishedSourceSnapshotReader
+	BoundedCurrentSourceRecordIDs
+}
+
 // SyncRunStart describes one durable provider synchronization request. Runs are
 // global control-plane history; the durable job created with the run is tenant-scoped.
 type SyncRunStart struct {
@@ -2141,6 +2231,12 @@ type SASTSourceReport struct {
 	Findings     []SASTRawFinding
 	Truncated    bool
 	SkippedFiles int
+	// UnscannedFiles counts files the walk reached but could not retain, because the source budget was
+	// already full. A large monorepo can hold several times the budget in source, and every rule reports
+	// nothing for the part that was never held, so the count is what makes "lower bound" actionable.
+	UnscannedFiles int
+	// SourceBudget is the retained-source budget in bytes that UnscannedFiles was measured against.
+	SourceBudget int64
 }
 
 // SASTSourceReporter is the optional completeness capability of a SASTAnalyzer. It exists so the
@@ -2177,6 +2273,10 @@ type SecretRawFinding struct {
 	Commit    string
 	Author    string
 	FirstSeen string
+	// Fingerprint is a stable, non-reversible identity for the matched credential: the hex SHA-256 of the
+	// raw value. It exists so that two sightings of the SAME credential can be recognised as one leak
+	// without the value itself ever leaving the detector. Empty when the detector computed none.
+	Fingerprint string
 }
 
 // SecretScanReport is the bounded output of a deterministic secret scan. Truncated means the scan was incomplete due to a child-file failure or safety cap, so Findings is a lower bound.
@@ -2249,6 +2349,31 @@ type VEXLoader interface {
 type MisconfigScanner interface {
 	Name() string
 	ScanConfigs(ctx context.Context, root string) ([]MisconfigRawFinding, error)
+}
+
+// MisconfigScanReport is the bounded output of an IaC scan. UnrenderedCharts counts the Helm charts whose
+// `helm template` refused to run, which is the difference between "this chart has no misconfiguration" and
+// "this chart was never evaluated". On one live repository 112 of 126 charts refused to render (a dependency
+// declared but not vendored, a Chart.yaml with no name), and the scan said nothing about it, so an operator
+// read an absent finding as a clean chart.
+type MisconfigScanReport struct {
+	Findings         []MisconfigRawFinding
+	UnrenderedCharts int
+	// Truncated reports that the walk stopped before covering the tree, because it reached its file or entry
+	// cap. The findings are then a lower bound, and saying so is the difference between a bounded scan and a
+	// scan that quietly claims to have looked everywhere.
+	Truncated bool
+	// ChartRenderReasons holds up to a few distinct failure reasons, so the warning tells the reader what to
+	// fix (run `helm dependency build`, give the chart a name) rather than only that something failed.
+	ChartRenderReasons []string
+}
+
+// MisconfigReporter is the reporting form of MisconfigScanner: it returns the same findings plus what the
+// scan could NOT evaluate. A scanner that does not implement it is treated as "completeness unknown", which
+// is why ScanConfigs remains the interface the service requires.
+type MisconfigReporter interface {
+	MisconfigScanner
+	ScanConfigsReport(ctx context.Context, root string) (MisconfigScanReport, error)
 }
 
 // RiskResult is the output of risk enrichment: vulns annotated with KEV + EPSS,

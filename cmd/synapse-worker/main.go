@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -24,6 +25,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/cloudposture"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/evidence"
 	integrationdom "github.com/KKloudTarus/synapse-ce/internal/domain/integration"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/vulnerabilityreconcile"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/accuracyprobe"
@@ -45,6 +47,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/timestamp"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/toolrunner"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/enry"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/gobinreach"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/license"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/licensemeta"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/risk"
@@ -83,6 +86,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/orchestrator"
 	ownershipuc "github.com/KKloudTarus/synapse-ce/internal/usecase/ownership"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/reachproof"
 	reconuc "github.com/KKloudTarus/synapse-ce/internal/usecase/recon"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/safety"
 	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
@@ -447,19 +451,19 @@ func main() {
 	scaService.SetUploadedSourceStore(uploadedSources)
 	configureCleanup := scacompose.Configure(scaService, cfg, scaExecution.Sandbox, log)
 	defer configureCleanup()
-	// Source-only judgment-minting scanners in the default scan path (Python value-flow taint today), shared
-	// with synapse-api via scacompose. The worker runs queued SCA scans, so without this a worker-run scan
-	// would be regex-only. Gated on the judgment lifecycle (it mints CapSAST proposals).
-	if (cfg.PythonTaintEnabled || cfg.JsTaintEnabled || cfg.JavaTaintEnabled || cfg.JVMReachabilityEnabled) && cfg.JudgmentsEnabled {
-		scaJudgmentSvc, jerr := analysisuc.NewService(postgres.NewJudgmentRepository(pool), evidenceService, auditLog, clock, ids)
-		if jerr != nil {
-			log.Error("worker SCA judgment service init failed", "err", jerr)
+	// Queued scans need the same judgment-backed analysis as API scans.
+	if cfg.GoBinaryReachabilityEnabled && !cfg.JudgmentsEnabled {
+		if _, explicit := os.LookupEnv("SYNAPSE_REACH_GOBIN"); explicit {
+			log.Error("go-binary reachability requires SYNAPSE_JUDGMENTS_ENABLED; enable judgments or unset SYNAPSE_REACH_GOBIN")
 			os.Exit(1)
 		}
-		if err := scacompose.ConfigureJudgmentScanners(scaService, cfg, scaExecution.Sandbox, scaJudgmentSvc, auditLog, clock, log); err != nil {
-			log.Error("worker python semantic taint init failed", "err", err)
-			os.Exit(1)
-		}
+		log.Warn("go-binary reachability auto-skipped: SYNAPSE_JUDGMENTS_ENABLED is off")
+	}
+	if err := configureWorkerJudgmentScanners(scaService, cfg, scaExecution.Sandbox, func() (*analysisuc.Service, error) {
+		return analysisuc.NewService(postgres.NewJudgmentRepository(pool), evidenceService, auditLog, clock, ids)
+	}, auditLog, clock, log); err != nil {
+		log.Error("worker SCA judgment scanner init failed", "err", err)
+		os.Exit(1)
 	}
 	if cfg.ComplianceEnabled {
 		scaService.SetComplianceEnabled(true) // attach the AppSec-baseline benchmark (per-control PASS/FAIL)
@@ -1131,6 +1135,45 @@ func main() {
 	)
 
 	runWorkerRuntime(ctx, cfg, queue, handlers, maintenanceTasks, leaderStore, auditLog, clock, ids, visibility, log)
+}
+
+// configureWorkerJudgmentScanners is the worker's production configuration gate.
+// The binding benchmark calls this same function with an in-memory judgment store.
+func configureWorkerJudgmentScanners(scaService *scauc.Service, cfg config.Config, sb *sandbox.Runner, newJudgmentService func() (*analysisuc.Service, error), auditLog ports.AuditLogger, clock ports.Clock, log *slog.Logger) error {
+	if !(cfg.PythonTaintEnabled || cfg.JsTaintEnabled || cfg.JavaTaintEnabled || cfg.JVMReachabilityEnabled || cfg.GoBinaryReachabilityEnabled) || !cfg.JudgmentsEnabled {
+		return nil
+	}
+	if newJudgmentService == nil {
+		return fmt.Errorf("%w: worker judgment service factory is required", shared.ErrValidation)
+	}
+	scaJudgmentSvc, err := newJudgmentService()
+	if err != nil {
+		return fmt.Errorf("worker SCA judgment service init: %w", err)
+	}
+	if err := scacompose.ConfigureJudgmentScanners(scaService, cfg, sb, scaJudgmentSvc, auditLog, clock, log); err != nil {
+		return fmt.Errorf("worker SCA judgment scanners: %w", err)
+	}
+	if !cfg.GoBinaryReachabilityEnabled {
+		return nil
+	}
+	if err := installGoBinaryReachability(scaService, scaJudgmentSvc, auditLog, clock); err != nil {
+		return fmt.Errorf("worker go-binary reachability coordinator: %w", err)
+	}
+	log.Info("worker Go-binary affected-symbol reachability ENABLED (raise-only, PCLNTAB calls from main.main)")
+	return nil
+}
+
+// installGoBinaryReachability wires the worker scan pipeline to the raise-only Go-binary proof coordinator.
+func installGoBinaryReachability(scaService *scauc.Service, judgmentSvc *analysisuc.Service, auditLog ports.AuditLogger, clock ports.Clock) error {
+	if scaService == nil {
+		return fmt.Errorf("%w: Go-binary reachability requires an SCA service", shared.ErrValidation)
+	}
+	coord, err := reachproof.NewCoordinatorForLanguage(gobinreach.NewEntryCallAnalyzer(), judgmentSvc, auditLog, clock, judgment.Tier2, reachproof.LanguageGoBinary)
+	if err != nil {
+		return err
+	}
+	scaService.SetGoBinaryReachability(coord.WithRaiseOnly())
+	return nil
 }
 
 func runWorkerRuntime(

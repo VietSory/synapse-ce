@@ -1,9 +1,9 @@
 name: Release
 
 # Cutting a release is a single push of a semver tag:
-#   git tag v0.1.0 && git push origin v0.1.0
-# goreleaser then builds every binary, publishes a GitHub Release with archives + checksums, and pushes
-# a multi-arch synapse-cli image to GHCR.
+#   git tag v0.2.0 && git push origin v0.2.0
+# goreleaser builds every binary and publishes a GitHub Release with archives + checksums; the image job
+# below builds and pushes the multi-arch synapse-cli image to GHCR.
 on:
   push:
     tags:
@@ -33,10 +33,10 @@ jobs:
 
       # QEMU + buildx enable the linux/arm64 image build alongside linux/amd64.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -49,10 +49,74 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: "~> v2"
-          # --skip=docker: the `dockers_v2` multi-platform image build needs a Dockerfile.cli
-          # context fix (the per-platform binary path); tracked separately. Binaries + archives +
-          # the GitHub Release still publish, which is what the `KKloudTarus/synapse-ce` action and
-          # the CI workflows install from. Re-enable the image (drop this skip) once dockers_v2 is fixed.
-          args: release --clean --skip=docker
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  action-major-tag:
+    name: action major tag
+    runs-on: ubuntu-latest
+    # The README, docs/guide/cli.md and the Marketplace listing all tell people to write
+    # `uses: KKloudTarus/synapse-ce@v1`, and that tag never existed, so every copied snippet failed with
+    # "Unable to resolve action". An Action's major tag is its INTERFACE version and is independent of the
+    # product version, which is why it stays v1 while the product is 0.x. It moves here on every release so it
+    # cannot rot again; change ACTION_MAJOR in one place if the action's inputs ever break compatibility.
+    permissions:
+      contents: write
+    env:
+      ACTION_MAJOR: v1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Move the action major tag to this release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$ACTION_MAJOR" "${{ github.sha }}"
+          git push --force origin "refs/tags/$ACTION_MAJOR"
+
+  image:
+    name: synapse-cli image
+    runs-on: ubuntu-latest
+    # Independent of goreleaser: a release whose binaries publish but whose image build fails must be visible
+    # as a failed image job, not hidden behind a skipped step.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Dockerfile.cli cross-compiles with CGO_ENABLED=0 from a native builder, so arm64 needs buildx but no
+      # QEMU: nothing is emulated and the build is as fast as the amd64 one.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.cli
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: |
+            ghcr.io/kkloudtarus/synapse-cli:${{ github.ref_name }}
+            ghcr.io/kkloudtarus/synapse-cli:latest
+          labels: |
+            org.opencontainers.image.title=synapse-cli
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/KKloudTarus/synapse-ce
+            org.opencontainers.image.licenses=Apache-2.0
+          provenance: true
+          sbom: true
