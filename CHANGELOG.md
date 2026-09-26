@@ -7,6 +7,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- Ticketing foundation: tenant-scoped project/engagement mappings, manual finding links, durable idempotent write intents, and a reusable write-intent state machine with explicit uncertain reconciliation (#1423).
+
 ## [0.2.1] - 2026-09-26
 
 ### Fixed
