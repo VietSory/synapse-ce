@@ -152,7 +152,7 @@ synapse-cli scan <path|image-ref> [flags]
 | `--sbom` | Print the generated CycloneDX SBOM to stdout instead of a findings report. |
 | `--server <url> --project <key>` | Record the result on a Synapse server as that project's next analysis. The token comes from `SYNAPSE_API_TOKEN`. `https` is required unless the host is loopback. See [Push results to the console](#push-results-to-the-console). |
 | `--insecure-http` | Accept a plain-`http` `--server` that is not loopback. The API token then travels in the clear; use it only on a network you trust. |
-| `--branch <ref>`, `--run-url <url>`, `--ci-provider <name>` | What the pipeline says about itself, shown on the analysis in the console. On GitHub Actions, GitLab CI and Jenkins these are read from the provider's variables when not given. |
+| `--branch <ref>`, `--run-url <url>`, `--ci-provider <name>` | What the pipeline says about itself, shown on the analysis in the console. On GitHub Actions, GitLab CI, Bitbucket Pipelines, Jenkins and Azure Pipelines these are read from provider variables when not given. |
 
 `--json`, `--sarif`, and `--sbom` each take over stdout completely, so they are mutually exclusive.
 Passing more than one exits `2` rather than silently honoring the last flag.
@@ -237,6 +237,9 @@ When a scan is pushed with `--server`, Synapse also captures provider-neutral pu
 | GitLab CI | `CI_MERGE_REQUEST_IID`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`, `CI_PROJECT_PATH`, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA` (falling back to `CI_COMMIT_SHA`). |
 | Bitbucket Pipelines | `BITBUCKET_PR_ID`, `BITBUCKET_PR_DESTINATION_BRANCH`, `BITBUCKET_REPO_FULL_NAME`, `BITBUCKET_COMMIT`. |
 | Jenkins multibranch | `CHANGE_ID`, `CHANGE_TARGET`, `GIT_COMMIT`; set `SYNAPSE_REPO_SLUG` when Jenkins cannot infer the repository slug. |
+| Azure Pipelines | `TF_BUILD=true`, `BUILD_BUILDID`, `SYSTEM_COLLECTIONURI`, `SYSTEM_TEAMPROJECT`, `BUILD_REPOSITORY_NAME`, `SYSTEM_PULLREQUEST_PULLREQUESTID`, `SYSTEM_PULLREQUEST_TARGETBRANCH`, `SYSTEM_PULLREQUEST_SOURCEBRANCH`, `SYSTEM_PULLREQUEST_SOURCECOMMITID`. The CLI never substitutes a PR's synthetic `BUILD_SOURCEVERSION` merge SHA for the actual PR head. |
+
+Azure Pipelines is detected through `TF_BUILD=true`. A credential-free run URL is constructed only for a valid `https://dev.azure.com/{organization}/` collection URI and numeric build ID. A standalone `synapse-cli` scan requires no Azure API token for auto-detection; the server's separate read-only integration uses a PAT.
 
 Provider-independent overrides are `SYNAPSE_PR_NUMBER`, `SYNAPSE_PR_TARGET_BRANCH`, `SYNAPSE_REPO_SLUG`, and `SYNAPSE_PR_HEAD_SHA`. Decoration is skipped unless all four identity fields are present.
 
