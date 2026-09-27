@@ -125,6 +125,138 @@ jobs:
           print(json.dumps(result, indent=2))
           PY
 
+      - name: Exercise actual Synapse adapter against public Azure Build API
+        shell: bash
+        run: |
+          cat > internal/infrastructure/integration/azurepipelines/live_public_evidence_test.go <<'GO'
+          package azurepipelines
+
+          import (
+              "context"
+              "encoding/json"
+              "fmt"
+              "net/http"
+              "net/url"
+              "os"
+              "strconv"
+              "testing"
+              "time"
+
+              "github.com/KKloudTarus/synapse-ce/internal/domain/integration"
+              "github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+          )
+
+          // Only in this temporary public-resource smoke test: real endpoints,
+          // real adapter and SSRF-safe transport, but deliberately no live PAT.
+          // The production code's Basic PAT handling is covered separately by
+          // its contract tests; this does not claim tenant-authenticated E2E.
+          type liveAnonymousTransport struct{ inner http.RoundTripper }
+          func (a liveAnonymousTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+              copy := r.Clone(r.Context())
+              copy.Header = r.Header.Clone()
+              copy.Header.Del("Authorization")
+              return a.inner.RoundTrip(copy)
+          }
+
+          func TestLivePublicAzureProvider(t *testing.T) {
+              raw, err := os.ReadFile(os.Getenv("AZURE_EVIDENCE_FILE"))
+              if err != nil { t.Fatal(err) }
+              var evidence struct {
+                  Projects []struct {
+                      Organization string `json:"organization"`
+                      Project string `json:"project"`
+                      RecentBuilds []struct {
+                          ID int64 `json:"id"`
+                          DefinitionID int64 `json:"definition_id"`
+                      } `json:"recent_builds"`
+                  } `json:"projects"`
+              }
+              if err := json.Unmarshal(raw, &evidence); err != nil { t.Fatal(err) }
+              var endpoint string
+              var expectedBuildID, expectedDefinitionID int64
+              for _, project := range evidence.Projects {
+                  if len(project.RecentBuilds) > 0 && project.RecentBuilds[0].ID > 0 && project.RecentBuilds[0].DefinitionID > 0 {
+                      endpoint = "https://dev.azure.com/" + project.Organization + "/" + project.Project
+                      expectedBuildID = project.RecentBuilds[0].ID
+                      expectedDefinitionID = project.RecentBuilds[0].DefinitionID
+                      break
+                  }
+              }
+              if endpoint == "" {
+                  t.Skip("public API returned no actual run; cannot claim a live provider result")
+              }
+              item := integration.Integration{
+                  ID: shared.ID("public-probe"), TenantID: shared.ID("public-probe"),
+                  Provider: Provider, Endpoint: endpoint, Name: "public live probe", Version: 1,
+              }
+              instance, err := New(item, integration.CredentialBundle{"pat":"synthetic-public-probe-never-sent"})
+              if err != nil { t.Fatal(err) }
+              adapter := instance.(*Adapter)
+              defer adapter.Close()
+              adapter.client.Transport = liveAnonymousTransport{inner: adapter.client.Transport}
+              ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+              defer cancel()
+              if err := adapter.TestConnection(ctx); err != nil { t.Fatalf("live adapter test-connection: %v",err) }
+              var definitions definitionPage
+              if _, err := adapter.get(ctx, "_apis/build/definitions", url.Values{"$top":{"3"}}, &definitions); err != nil {
+                  t.Fatalf("live adapter definition decode: %v", err)
+              }
+              if len(definitions.Value)==0 || definitions.Value[0].ID<=0 {
+                  t.Fatal("live Azure definitions did not normalize")
+              }
+              var actual build
+              if _, err := adapter.get(ctx, "_apis/build/builds/"+strconv.FormatInt(expectedBuildID,10), nil, &actual); err != nil {
+                  // Some public projects expose list-only build details.
+                  var page buildPage
+                  if _, fallbackErr := adapter.get(ctx,"_apis/build/builds",url.Values{
+                      "buildIds": {strconv.FormatInt(expectedBuildID,10)}, "$top":{"1"},
+                  },&page); fallbackErr != nil || len(page.Value)!=1 {
+                      t.Fatalf("live adapter single-build read failed: %v; list fallback: %v",err,fallbackErr)
+                  }
+                  actual=page.Value[0]
+              }
+              if actual.ID!=expectedBuildID || actual.Definition.ID!=expectedDefinitionID {
+                  t.Fatalf("live build identity mismatch: got id=%d definition=%d, expected id=%d definition=%d",
+                      actual.ID,actual.Definition.ID,expectedBuildID,expectedDefinitionID)
+              }
+              normalized,err:=adapter.normalizeBuild(expectedDefinitionID,actual)
+              if err != nil { t.Fatalf("live normalization failed: %v",err) }
+              if normalized.ProviderKey!=strconv.FormatInt(expectedBuildID,10) ||
+                  normalized.PipelineKey!=definitionExternalKey(expectedDefinitionID) ||
+                  normalized.URL!=fmt.Sprintf("%s/_build/results?buildId=%d",endpoint,expectedBuildID) {
+                  t.Fatalf("live provider run identity/link incorrect: %+v",normalized)
+              }
+              t.Logf("LIVE_PUBLIC_SYNAPSE_ADAPTER_PASS endpoint=%s definition=%d build=%d lifecycle=%s result=%s",
+                  endpoint,expectedDefinitionID,expectedBuildID,normalized.Lifecycle,normalized.Result)
+          }
+          GO
+          AZURE_EVIDENCE_FILE="$PWD/evidence/public-azure-api.json"             go test -count=1 -v -run '^TestLivePublicAzureProvider
+        shell: bash
+        run: |
+          if [ ! -s evidence/live_web_url.txt ]; then
+            echo "No public run URL was verified; no Azure UI screenshot claimed."
+            exit 0
+          fi
+          chrome="$(command -v google-chrome || command -v chromium || true)"
+          if [ -z "$chrome" ]; then
+            echo "Headless browser unavailable; JSON and logs remain the proof."
+            exit 0
+          fi
+          timeout 45s "$chrome" --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --window-size=1440,1000 --virtual-time-budget=12000 \
+            --screenshot="$PWD/evidence/public-azure-ui-unreviewed.png" \
+            "$(head -n 1 evidence/live_web_url.txt)" || true
+          echo "Screenshot captured from a public live page if the file exists; inspect before making any claim."
+
+      - name: Upload self-contained proof for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-1455-public-evidence
+          path: evidence/
+          if-no-files-found: warn
+               ./internal/infrastructure/integration/azurepipelines
+
       - name: Capture real public Azure build page if API returned a build
         shell: bash
         run: |
