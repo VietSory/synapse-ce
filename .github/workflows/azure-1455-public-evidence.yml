@@ -205,7 +205,7 @@ jobs:
                   t.Fatal("live Azure definitions did not normalize")
               }
               var actual build
-              if _, err := adapter.get(ctx, "_apis/build/builds/"+strconv.FormatInt(expectedBuildID,10), nil, &actual); err != nil {
+              if _, err := adapter.get(ctx, "_apis/build/builds/"+strconv.FormatInt(expectedBuildID,10), url.Values{}, &actual); err != nil {
                   // Some public projects expose list-only build details.
                   var page buildPage
                   if _, fallbackErr := adapter.get(ctx,"_apis/build/builds",url.Values{
@@ -231,33 +231,6 @@ jobs:
           }
           GO
           AZURE_EVIDENCE_FILE="$PWD/evidence/public-azure-api.json" go test -count=1 -v -run "^TestLivePublicAzureProvider$" ./internal/infrastructure/integration/azurepipelines
-
-      - name: Capture real public Azure build page if API returned a build
-        shell: bash
-        run: |
-          if [ ! -s evidence/live_web_url.txt ]; then
-            echo "No public run URL was verified; no Azure UI screenshot claimed."
-            exit 0
-          fi
-          chrome="$(command -v google-chrome || command -v chromium || true)"
-          if [ -z "$chrome" ]; then
-            echo "Headless browser unavailable; JSON and logs remain the proof."
-            exit 0
-          fi
-          timeout 45s "$chrome" --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
-            --window-size=1440,1000 --virtual-time-budget=12000 \
-            --screenshot="$PWD/evidence/public-azure-ui-unreviewed.png" \
-            "$(head -n 1 evidence/live_web_url.txt)" || true
-          echo "Screenshot captured from a public live page if the file exists; inspect before making any claim."
-
-      - name: Upload self-contained proof for review
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: azure-1455-public-evidence
-          path: evidence/
-          if-no-files-found: warn
-               ./internal/infrastructure/integration/azurepipelines
 
       - name: Capture real public Azure build page if API returned a build
         shell: bash
