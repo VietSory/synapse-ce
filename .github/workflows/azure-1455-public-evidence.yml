@@ -1,0 +1,132 @@
+name: Azure #1455 public live-API evidence
+
+on:
+  push:
+    branches: [evidence/1455-public-azure-smoke]
+
+permissions:
+  contents: read
+
+jobs:
+  azure-public-evidence:
+    name: Public Azure API and repository contract proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/1455-azure-pipelines-provider
+          persist-credentials: false
+
+      - name: Go provider and CLI contract tests on feature branch
+        run: go test -count=1 -v ./internal/infrastructure/integration/azurepipelines ./cmd/synapse-cli
+
+      - name: Read public Azure DevOps definitions and builds without credentials
+        shell: bash
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import ssl
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          # The probe uses two KNOWN PUBLIC third-party projects, never a
+          # tenant secret. A 200 JSON response is required for live evidence.
+          projects = [("azure-sdk", "public"), ("dnceng", "public")]
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect)
+          rows = []
+          live = None
+          for organization, project in projects:
+              origin = "https://dev.azure.com/" + organization + "/" + project
+              row = {"organization": organization, "project": project}
+              url = origin + "/_apis/build/definitions?" + urllib.parse.urlencode({"api-version":"7.1", "$top":"3"})
+              try:
+                  req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "synapse-issue-1455-public-evidence"})
+                  with opener.open(req, timeout=20) as response:
+                      if response.getcode() != 200:
+                          raise ValueError("definitions not 200")
+                      raw = response.read(262145)
+                      if len(raw)>262144:
+                          raise ValueError("definitions response too large")
+                      payload = json.loads(raw)
+                      if not isinstance(payload,dict) or not isinstance(payload.get("value"),list):
+                          raise ValueError("definitions response is not an API JSON page")
+                      definitions = [{"id":x.get("id"),"name":x.get("name")} for x in payload["value"] if isinstance(x,dict) and isinstance(x.get("id"),int) and x["id"]>0]
+                      row["definitions_http"] = 200
+                      row["definition_count_on_first_page"] = len(definitions)
+                      row["definitions"] = definitions[:3]
+                      if definitions:
+                          identifier = definitions[0]["id"]
+                          builds_url = origin + "/_apis/build/builds?" + urllib.parse.urlencode({"api-version":"7.1", "definitions":str(identifier), "$top":"3", "queryOrder":"queueTimeDescending"})
+                          builds_req = urllib.request.Request(builds_url, headers={"Accept":"application/json"})
+                          with opener.open(builds_req,timeout=20) as builds_response:
+                              data = builds_response.read(262145)
+                              if builds_response.getcode() != 200 or len(data)>262144:
+                                  raise ValueError("builds HTTP not 200 or response too large")
+                              builds = json.loads(data)
+                              if not isinstance(builds,dict) or not isinstance(builds.get("value"),list):
+                                  raise ValueError("builds not an API JSON page")
+                              row["builds_http"] = 200
+                              row["builds"] = [{"id":x.get("id"),"status":x.get("status"),"result":x.get("result"),"definition_id":x.get("definition",{}).get("id")} for x in builds["value"][:3] if isinstance(x,dict)]
+                              if row["builds"]:
+                                  with open("evidence/live_web_url.txt","w") as f:
+                                      f.write(origin+"/_build/results?buildId="+str(row["builds"][0]["id"])+"\n")
+                      if live is None and row.get("builds_http")==200:
+                          live=row
+              except urllib.error.HTTPError as e:
+                  row["status"]="HTTP "+str(e.code)+"; no live claim"
+              except Exception as e:
+                  row["status"]=type(e).__name__+"; no live claim"
+              rows.append(row)
+          result={
+              "source":"uncredentialed public Azure DevOps Build API v7.1",
+              "date_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "feature_commit":os.popen("git rev-parse HEAD").read().strip(),
+              "actual_live_public_read":live is not None,
+              "projects":rows,
+              "limitation":"Anonymous public API exercise does not verify an authenticated PAT or a private tenant integration.",
+          }
+          with open("evidence/public-azure-api.json","w") as f:
+              json.dump(result,f,indent=2,ensure_ascii=False)
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("## #1455 live public Azure API probe\n\n")
+              f.write("Actual public API definitions + build read: **"+("PASS" if live else "NOT VERIFIED")+"**.\n\n")
+              f.write("This is an anonymous real-service probe, not an authenticated PAT or private-tenant E2E test.\n\n")
+              for row in rows:
+                  f.write("- "+row["organization"]+"/"+row["project"]+": definitions "+str(row.get("definitions_http", row.get("status")))+", builds "+str(row.get("builds_http","not tested"))+", first-page definitions "+str(row.get("definition_count_on_first_page",0))+".\n")
+              f.write("\nAll response bodies are bounded and only stable public IDs/statuses are retained in the artifact.\n")
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Capture real public Azure build page if API returned a build
+        shell: bash
+        run: |
+          if [ ! -s evidence/live_web_url.txt ]; then
+            echo "No public run URL was verified; no Azure UI screenshot claimed."
+            exit 0
+          fi
+          chrome="$(command -v google-chrome || command -v chromium || true)"
+          if [ -z "$chrome" ]; then
+            echo "Headless browser unavailable; JSON and logs remain the proof."
+            exit 0
+          fi
+          timeout 45s "$chrome" --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --window-size=1440,1000 --virtual-time-budget=12000 \
+            --screenshot="$PWD/evidence/public-azure-ui-unreviewed.png" \
+            "$(head -n 1 evidence/live_web_url.txt)" || true
+          echo "Screenshot captured from a public live page if the file exists; inspect before making any claim."
+
+      - name: Upload self-contained proof for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-1455-public-evidence
+          path: evidence/
+          if-no-files-found: warn
