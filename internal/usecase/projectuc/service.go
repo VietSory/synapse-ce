@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/platform/redact"
 	hotspotsuc "github.com/KKloudTarus/synapse-ce/internal/usecase/hotspots"
 	issuesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/issues"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -509,18 +511,25 @@ type ImportAnalysisInput struct {
 //
 // The gate is deliberately NOT taken from the payload. The project's managed gate is the server's
 // policy, and a pipeline that could ship its own gate definition could ship a passing one.
-// ciImportInternalError preserves the cause in server logs while marking
-// infrastructure failures as internal-only at the HTTP boundary.
+// ciImportInternalError preserves actionable causes in server logs while
+// hiding credential-bearing URLs and common secret fields. Its HTTP response
+// remains generic because internal-only errors never enter the 4xx mapper.
 type ciImportInternalError struct {
 	message string
 	cause   error
 }
 
+// Diagnostic redaction is defense in depth: errors must also be sanitized at
+// source because an opaque driver error can contain unrecognizable secrets.
+var ciImportSensitiveFieldRE = regexp.MustCompile(`(?i)\b(password|passwd|token|secret|credential|api[_-]?key|authorization)\s*[:=]\s*(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+
 func (e ciImportInternalError) Error() string {
 	if e.cause == nil {
 		return e.message
 	}
-	return e.message + ": " + e.cause.Error()
+	diagnostic := redact.URLCreds(e.cause.Error())
+	diagnostic = ciImportSensitiveFieldRE.ReplaceAllString(diagnostic, "${1}="+redact.Placeholder)
+	return e.message + ": " + diagnostic
 }
 
 func (e ciImportInternalError) Unwrap() error { return e.cause }

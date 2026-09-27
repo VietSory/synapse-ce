@@ -102,6 +102,9 @@ func TestCIImportDoesNotPublishSuccessBeforeAcceptance(t *testing.T) {
 				t.Errorf("unexpected audit rejection: %v", err)
 			}
 			if tc.rejectAudit {
+				if strings.Contains(err.Error(), "never-store-this") {
+					t.Error("internal import diagnostic leaked an audit credential")
+				}
 				if !strings.Contains(err.Error(), "audit chain unavailable") {
 					t.Error("internal import error lost the audit failure cause")
 				}
@@ -121,5 +124,31 @@ func TestCIImportDoesNotPublishSuccessBeforeAcceptance(t *testing.T) {
 				t.Errorf("rejected import captured %d false successes", captured)
 			}
 		})
+	}
+}
+
+func TestCIImportInternalErrorRedactsSensitiveDiagnosticFields(t *testing.T) {
+	cause := errors.New(
+		"dial tcp db:5432: connection refused; postgres://alice:private-password@db:5432; " +
+			"credential=never-store-this; token='token-value'; Authorization: Bearer bearer-secret",
+	)
+	err := ciImportInternalError{message: "audit imported analysis failed", cause: cause}
+	got := err.Error()
+	for _, want := range []string{
+		"audit imported analysis failed", "dial tcp db:5432: connection refused",
+		"postgres://***@db:5432", "credential=[REDACTED]", "token=[REDACTED]",
+		"Authorization=[REDACTED]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("diagnostic lost %q: %s", want, got)
+		}
+	}
+	for _, sensitive := range []string{"private-password", "never-store-this", "token-value", "bearer-secret"} {
+		if strings.Contains(got, sensitive) {
+			t.Errorf("diagnostic disclosed %q", sensitive)
+		}
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("diagnostic formatting broke wrapped-cause inspection")
 	}
 }
