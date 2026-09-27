@@ -78,8 +78,28 @@ jobs:
                               if row["builds"]:
                                   with open("evidence/live_web_url.txt","w") as f:
                                       f.write(origin+"/_build/results?buildId="+str(row["builds"][0]["id"])+"\n")
-                      if live is None and row.get("builds_http")==200:
+                      if live is None and row.get("builds"):
                           live=row
+                      # Probe public recent runs independently: the first discovered
+                      # definition may exist but have no builds.
+                      try:
+                          latest_url = origin + "/_apis/build/builds?" + urllib.parse.urlencode({"api-version":"7.1", "$top":"3", "queryOrder":"queueTimeDescending"})
+                          latest_req = urllib.request.Request(latest_url, headers={"Accept":"application/json"})
+                          with opener.open(latest_req, timeout=20) as latest_response:
+                              latest_raw = latest_response.read(262145)
+                              if latest_response.getcode()!=200 or len(latest_raw)>262144:
+                                  raise ValueError("recent builds response invalid")
+                              latest = json.loads(latest_raw)
+                              if not isinstance(latest,dict) or not isinstance(latest.get("value"),list):
+                                  raise ValueError("recent builds JSON invalid")
+                              row["recent_builds_http"]=200
+                              row["recent_builds"]=[{"id":b["id"],"status":b.get("status"),"result":b.get("result"),"definition_id":b.get("definition",{}).get("id")} for b in latest["value"][:3] if isinstance(b,dict) and isinstance(b.get("id"),int) and b["id"]>0]
+                              if row["recent_builds"] and live is None:
+                                  live=row
+                                  with open("evidence/live_web_url.txt","w") as f:
+                                      f.write(origin+"/_build/results?buildId="+str(row["recent_builds"][0]["id"])+"\n")
+                      except Exception as e:
+                          row["recent_builds_status"]=type(e).__name__+"; no actual run claim"
               except urllib.error.HTTPError as e:
                   row["status"]="HTTP "+str(e.code)+"; no live claim"
               except Exception as e:
@@ -97,10 +117,10 @@ jobs:
               json.dump(result,f,indent=2,ensure_ascii=False)
           with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
               f.write("## #1455 live public Azure API probe\n\n")
-              f.write("Actual public API definitions + build read: **"+("PASS" if live else "NOT VERIFIED")+"**.\n\n")
+              f.write("Actual public API definitions + observed run: **"+("PASS" if live else "NOT VERIFIED")+"**.\n\n")
               f.write("This is an anonymous real-service probe, not an authenticated PAT or private-tenant E2E test.\n\n")
               for row in rows:
-                  f.write("- "+row["organization"]+"/"+row["project"]+": definitions "+str(row.get("definitions_http", row.get("status")))+", builds "+str(row.get("builds_http","not tested"))+", first-page definitions "+str(row.get("definition_count_on_first_page",0))+".\n")
+                  f.write("- "+row["organization"]+"/"+row["project"]+": definitions "+str(row.get("definitions_http", row.get("status")))+", builds "+str(row.get("builds_http","not tested"))+", first-page definitions "+str(row.get("definition_count_on_first_page",0))+", unfiltered actual runs "+str(len(row.get("recent_builds",[])))+".\n")
               f.write("\nAll response bodies are bounded and only stable public IDs/statuses are retained in the artifact.\n")
           print(json.dumps(result, indent=2))
           PY
