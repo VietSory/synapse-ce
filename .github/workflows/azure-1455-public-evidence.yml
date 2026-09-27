@@ -230,7 +230,9 @@ jobs:
                   endpoint,expectedDefinitionID,expectedBuildID,normalized.Lifecycle,normalized.Result)
           }
           GO
-          AZURE_EVIDENCE_FILE="$PWD/evidence/public-azure-api.json"             go test -count=1 -v -run '^TestLivePublicAzureProvider
+          AZURE_EVIDENCE_FILE="$PWD/evidence/public-azure-api.json" go test -count=1 -v -run "^TestLivePublicAzureProvider$" ./internal/infrastructure/integration/azurepipelines
+
+      - name: Capture real public Azure build page if API returned a build
         shell: bash
         run: |
           if [ ! -s evidence/live_web_url.txt ]; then
