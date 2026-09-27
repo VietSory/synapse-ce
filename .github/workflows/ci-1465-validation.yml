@@ -1,0 +1,39 @@
+# Validation-only workflow in VietSory fork. No application code changes.
+# The upstream PR's Go 1.27.0 Windows CI crashed twice in httpapi with
+# golang/go#81238. Verify code under the officially released Go 1.27.1.
+name: "1465 Windows toolchain validation"
+
+on:
+  pull_request:
+    branches: [feat/1465-worker-notification-metrics]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-go1271:
+    name: Windows Go 1.27.1 full suite
+    runs-on: windows-latest
+    timeout-minutes: 70
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Go 1.27.1
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Verify Windows toolchain
+        shell: bash
+        run: |
+          go version
+          test "$(go env GOVERSION)" = "go1.27.1"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Reproduce reported runtime-crash package
+        run: go test -p 1 -count=1 ./internal/adapter/httpapi
+      - name: Run full Windows Go suite
+        run: go test -p 1 -count=1 ./...
