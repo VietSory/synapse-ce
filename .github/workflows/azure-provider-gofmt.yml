@@ -1,0 +1,25 @@
+name: Azure provider gofmt evidence
+on:
+  pull_request:
+    branches: [validation/1455-upstream-main]
+permissions:
+  contents: read
+jobs:
+  format-evidence:
+    name: Generate gofmt evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Format changed Go files
+        shell: bash
+        run: |
+          set -euo pipefail
+          gofmt -w internal/infrastructure/integration/azurepipelines/client.go internal/infrastructure/integration/azurepipelines/client_test.go cmd/synapse-cli/push.go cmd/synapse-cli/pr_identity_test.go cmd/synapse-api/main.go cmd/synapse-worker/main.go
+          for p in internal/infrastructure/integration/azurepipelines/client.go internal/infrastructure/integration/azurepipelines/client_test.go cmd/synapse-cli/push.go cmd/synapse-cli/pr_identity_test.go; do
+            printf '\nAZURE_FMT_BEGIN:%s\n' "$p"
+            base64 -w 76 "$p"
+            printf '\nAZURE_FMT_END:%s\n' "$p"
+          done
+          echo 'API_WORKER_FMT_DIFF_START'
+          git diff -- cmd/synapse-api/main.go cmd/synapse-worker/main.go
+          echo 'API_WORKER_FMT_DIFF_END'
