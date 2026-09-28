@@ -88,3 +88,85 @@ func TestCIContextExplicitPullRequestIdentityWins(t *testing.T) {
 		t.Fatalf("explicit identity overwritten: %+v", got)
 	}
 }
+
+func TestCIContextFromAzurePipelines(t *testing.T) {
+	env := map[string]string{
+		"TF_BUILD": "True", "BUILD_BUILDID": "123",
+		"BUILD_SOURCEBRANCH": "refs/pull/31/merge", "BUILD_SOURCEVERSION": "synthetic-merge",
+		"SYSTEM_PULLREQUEST_PULLREQUESTID":  "31",
+		"SYSTEM_PULLREQUEST_SOURCEBRANCH":   "refs/heads/feature/azure",
+		"SYSTEM_PULLREQUEST_TARGETBRANCH":   "refs/heads/main",
+		"SYSTEM_PULLREQUEST_SOURCECOMMITID": "actual-pr-head",
+		"BUILD_REQUESTEDFOR":                "ci-bot", "SYSTEM_COLLECTIONURI": "https://dev.azure.com/example/",
+		"SYSTEM_TEAMPROJECT": "My Project", "BUILD_REPOSITORY_NAME": "widgets",
+	}
+	get := func(k string) string { return env[k] }
+	got := ciContextFromEnvWithReader(projectanalysis.CIContext{}, get, nil)
+	if got.Provider != "azure-pipelines" || got.Branch != "feature/azure" || got.RunID != "123" ||
+		got.RunURL != "https://dev.azure.com/example/My%20Project/_build/results?buildId=123" ||
+		got.Actor != "ci-bot" || got.PullRequest != "31" || got.TargetBranch != "main" ||
+		got.RepoSlug != "My Project/widgets" || got.HeadSHA != "actual-pr-head" {
+		t.Fatalf("Azure CI context = %+v", got)
+	}
+	if got.HeadSHA == env["BUILD_SOURCEVERSION"] {
+		t.Fatal("Azure PR identity used synthetic merge SHA")
+	}
+	env["SYNAPSE_PR_HEAD_SHA"] = "operator-head"
+	if got := ciContextFromEnvWithReader(projectanalysis.CIContext{}, get, nil); got.HeadSHA != "operator-head" {
+		t.Fatalf("SYNAPSE_PR_HEAD_SHA override ignored: %+v", got)
+	}
+	delete(env, "SYNAPSE_PR_HEAD_SHA")
+	delete(env, "SYSTEM_PULLREQUEST_SOURCECOMMITID")
+	got = ciContextFromEnvWithReader(projectanalysis.CIContext{}, get, nil)
+	if got.HeadSHA != "" {
+		t.Fatalf("missing Azure PR head was silently replaced: %+v", got)
+	}
+	explicit := projectanalysis.CIContext{
+		Provider: "manual", Branch: "refs/heads/release", RunID: "999", RunURL: "https://safe.example/run",
+		PullRequest: "44", TargetBranch: "stable", RepoSlug: "explicit/repo", HeadSHA: "explicit-head",
+	}
+	got = ciContextFromEnvWithReader(explicit, get, nil)
+	explicit.Actor = "ci-bot"
+	if got != explicit {
+		t.Fatalf("explicit Azure fields overwritten: %+v vs %+v", got, explicit)
+	}
+	delete(env, "SYSTEM_PULLREQUEST_PULLREQUESTID")
+	delete(env, "SYSTEM_PULLREQUEST_SOURCEBRANCH")
+	delete(env, "SYSTEM_PULLREQUEST_TARGETBRANCH")
+	env["BUILD_SOURCEBRANCH"] = "refs/heads/main"
+	got = ciContextFromEnvWithReader(projectanalysis.CIContext{}, get, nil)
+	if got.HeadSHA != "synthetic-merge" || got.PullRequest != "" || got.Branch != "main" {
+		t.Fatalf("non-PR Azure build not detected: %+v", got)
+	}
+}
+
+func TestAzurePipelinesRunURLRejectsUntrustedOrigins(t *testing.T) {
+	env := map[string]string{
+		"TF_BUILD": "True", "SYSTEM_COLLECTIONURI": "https://dev.azure.com/organization/",
+		"SYSTEM_TEAMPROJECT": "My Project", "BUILD_BUILDID": "123",
+	}
+	get := func(k string) string { return env[k] }
+	for _, raw := range []string{
+		"http://dev.azure.com/organization/", "https://evil.example/organization/",
+		"https://dev.azure.com/organization/?token=secret",
+		"https://user:password@dev.azure.com/organization/",
+		"https://dev.azure.com/organization/another/",
+	} {
+		env["SYSTEM_COLLECTIONURI"] = raw
+		if got := azurePipelinesRunURL(get); got != "" {
+			t.Errorf("untrusted URL accepted: %q => %q", raw, got)
+		}
+	}
+	env["SYSTEM_COLLECTIONURI"] = "https://dev.azure.com/organization/"
+	for _, id := range []string{"", "1&token=secret", "abc"} {
+		env["BUILD_BUILDID"] = id
+		if got := azurePipelinesRunURL(get); got != "" {
+			t.Errorf("untrusted build ID accepted: %q => %q", id, got)
+		}
+	}
+	env["BUILD_BUILDID"] = "123"
+	env["TF_BUILD"] = ""
+	if got := ciContextFromEnvWithReader(projectanalysis.CIContext{}, get, nil); !got.Empty() {
+		t.Fatalf("Azure variables without TF_BUILD triggered detection: %+v", got)
+	}
+}
