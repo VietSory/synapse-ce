@@ -1,0 +1,21 @@
+name: PR1500 new-issues lint
+on:
+  push:
+    branches: [ci/1500-new-lint]
+permissions:
+  contents: read
+jobs:
+  lint-new:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 3
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          args: --new-from-rev=c0b82f48d8ef09bf24035b5c0d2968a0a1db38d5
