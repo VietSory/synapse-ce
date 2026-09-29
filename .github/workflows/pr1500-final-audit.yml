@@ -1,0 +1,134 @@
+name: PR1500 final read-only audit
+
+on:
+  push:
+    branches: [ci/1500-final-audit]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+
+  backend:
+    name: Backend (Go + PostgreSQL 17)
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${{ github.run_id }}
+      POSTGRES_DB: synapse
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ github.run_id }}
+          POSTGRES_DB: synapse
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d synapse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify formatting and whitespace
+        run: |
+          test -z "$(gofmt -l             cmd/synapse-api/main.go             internal/platform/config/config.go             internal/usecase/capabilities/service.go             internal/usecase/capabilities/service_test.go             internal/usecase/ports/inbound_webhook.go             internal/adapter/httpapi/router.go             internal/adapter/httpapi/auth_paths_test.go             internal/adapter/httpapi/capability_handler_test.go             internal/adapter/httpapi/harness_test.go             internal/adapter/httpapi/inbound_webhook.go             internal/adapter/httpapi/inbound_webhook_test.go             internal/infrastructure/persistence/postgres/db.go             internal/infrastructure/persistence/postgres/inbound_webhook.go             internal/infrastructure/persistence/postgres/migration_0199_test.go)"
+          git diff --check
+          test -z "$(git status --porcelain)"
+      - name: Configure Postgres integration database
+        run: echo "SYNAPSE_TEST_DB_DSN=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable" >> "$GITHUB_ENV"
+      - name: Require Postgres integration database
+        run: |
+          if [ -z "${SYNAPSE_TEST_DB_DSN:-}" ]; then
+            echo "SYNAPSE_TEST_DB_DSN is required"
+            exit 1
+          fi
+      - name: Check AWS staging security and data-governance invariants
+        run: bash deploy/aws/staging/tests/static.sh
+      - name: Test Python gate scripts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Focused webhook and Postgres suites
+        run: go test -p 1 -count=1 ./internal/adapter/httpapi ./internal/infrastructure/persistence/postgres
+      - name: Full test
+        run: go test -p 1 -count=1 ./...
+      - name: Postgres suite again
+        run: go test -count=1 ./internal/infrastructure/persistence/postgres
+      - name: Build CGO disabled
+        run: CGO_ENABLED=0 go build ./cmd/...
+
+  backend-windows:
+    name: Backend (Go, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          first="$RUNNER_TEMP/go-test-1.log"
+          if go test -p 1 -count=1 ./... 2>&1 | tee "$first"; then
+            exit 0
+          fi
+          if ! grep -qE 'fatal error:|Exception 0x[0-9a-f]|unexpected fault address|panic called with nil argument' "$first"; then
+            echo "::error::the Windows suite failed without a runtime crash signature; not retried"
+            exit 1
+          fi
+          echo "::warning::runtime heap corruption (golang/go#81238); measuring the suite again"
+          go test -p 1 -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/go-test-2.log"
+
+  frontend:
+    name: Frontend (web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          version: 9
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm run typecheck
+      - run: pnpm build
+
+  docs:
+    name: MkDocs strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-docs.txt
+      - run: mkdocs build --strict
