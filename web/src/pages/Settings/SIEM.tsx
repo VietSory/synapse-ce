@@ -5,10 +5,47 @@ import type { SIEMAckMode, SIEMProvider, SIEMSink, SIEMStatus } from '../../lib/
 import { Button, Card, EmptyState, ErrorState, Field, Input, Select, Spinner } from '../../components/ui'
 import { useFetch } from '../../hooks'
 
+export const SIEM_PROVIDER_OPTIONS: Array<{ value: SIEMProvider; label: string }> = [
+  { value: 'splunk_hec', label: 'Splunk HEC' },
+  { value: 'elasticsearch', label: 'Elasticsearch' },
+  { value: 'microsoft_sentinel', label: 'Microsoft Sentinel' },
+]
+
+export const SIEM_PROVIDER_FIELDS: Record<SIEMProvider, {
+  originPlaceholder: string
+  targetLabel: string
+  targetPlaceholder: string
+  credentialLabel: string
+  credentialPlaceholder?: string
+  targetHint?: string
+}> = {
+  splunk_hec: {
+    originPlaceholder: 'https://splunk.example:8088',
+    targetLabel: 'Collector path',
+    targetPlaceholder: '/services/collector/event',
+    credentialLabel: 'Credential',
+  },
+  elasticsearch: {
+    originPlaceholder: 'https://elasticsearch.example:9200',
+    targetLabel: 'Index',
+    targetPlaceholder: 'synapse-siem',
+    credentialLabel: 'Credential',
+  },
+  microsoft_sentinel: {
+    originPlaceholder: 'https://<endpoint>.<region>.ingest.monitor.azure.com',
+    targetLabel: 'DCR / stream',
+    targetPlaceholder: 'dcr-0123456789abcdef0123456789abcdef/Custom-SynapseSIEM',
+    credentialLabel: 'Entra client credential JSON',
+    credentialPlaceholder: '{"tenant_id":"...","client_id":"...","client_secret":"..."}',
+    targetHint: 'Use the DCR immutable ID and a Custom- stream declaration.',
+  },
+}
+
 const guarantees: Record<SIEMAckMode, string> = {
   hec_acceptance: 'Splunk accepted the HTTP batch. That is not indexer acknowledgement, and it does not prove the event is searchable.',
   indexer_ack: 'Splunk indexer acknowledgement was requested. A true ack can still be lost, and a later replay can duplicate.',
   bulk_item: 'Elasticsearch item results advance only the contiguous successful prefix. A conflict is not treated as already stored.',
+  ingestion_acceptance: 'Microsoft Sentinel Logs Ingestion API returned 204 for the batch. This confirms API acceptance, not immediate searchability.',
 }
 
 export function SIEM() {
@@ -71,7 +108,7 @@ export function SIEM() {
       <CreateSink onCreated={() => void load()} />
       {error ? <ErrorState message={error} /> : null}
       {sinks.length === 0 ? (
-        <EmptyState icon={Dataflow03} title="No SIEM destinations" hint="Add a Splunk or Elasticsearch sink to start a stream." />
+        <EmptyState icon={Dataflow03} title="No SIEM destinations" hint="Add a Splunk, Elasticsearch, or Microsoft Sentinel sink to start a stream." />
       ) : (
         <ul className="space-y-3">
           {sinks.map((sink) => (
@@ -87,6 +124,7 @@ export function SIEM() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button type="button" onClick={() => void showStatus(sink.id, setStatus, setError)}>Status</Button>
+                    <Button type="button" onClick={() => void run(() => api.testSIEMSink(sink.id), load, setError)}>Test</Button>
                     {sink.paused ? (
                       <Button type="button" onClick={() => void run(() => api.resumeSIEMSink(sink.id, sink.version), load, setError)}>Resume</Button>
                     ) : (
@@ -116,6 +154,7 @@ function CreateSink({ onCreated }: { onCreated: () => void }) {
   const [target, setTarget] = useState('')
   const [secret, setSecret] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const fields = SIEM_PROVIDER_FIELDS[provider]
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError(null)
@@ -142,24 +181,42 @@ function CreateSink({ onCreated }: { onCreated: () => void }) {
             ariaLabel="Provider"
             value={provider}
             onValueChange={(value) => setProvider(value as SIEMProvider)}
-            options={[
-              { value: 'splunk_hec', label: 'Splunk HEC' },
-              { value: 'elasticsearch', label: 'Elasticsearch' },
-            ]}
+            options={SIEM_PROVIDER_OPTIONS}
           />
         </Field>
         <Field label="HTTPS origin" htmlFor="siem-origin">
-          <Input id="siem-origin" value={origin} onChange={(event) => setOrigin(event.target.value)} placeholder="https://splunk.example:8088" required />
+          <Input
+            id="siem-origin"
+            value={origin}
+            onChange={(event) => setOrigin(event.target.value)}
+            placeholder={fields.originPlaceholder}
+            required
+          />
         </Field>
-        <Field label={provider === 'elasticsearch' ? 'Index' : 'Collector path'} htmlFor="siem-target">
-          <Input id="siem-target" value={target} onChange={(event) => setTarget(event.target.value)} placeholder={provider === 'elasticsearch' ? 'synapse-siem' : '/services/collector/event'} />
+        <Field label={fields.targetLabel} htmlFor="siem-target">
+          <Input
+            id="siem-target"
+            value={target}
+            onChange={(event) => setTarget(event.target.value)}
+            placeholder={fields.targetPlaceholder}
+            required={provider !== 'splunk_hec'}
+          />
+          {fields.targetHint ? <p className="mt-1 text-xs text-tertiary">{fields.targetHint}</p> : null}
         </Field>
         <div className="text-sm">
           <p className="font-medium">Data class: Signal</p>
           <p>Summary and Detail require a wired engagement policy and are not currently available.</p>
         </div>
-        <Field label="Credential" htmlFor="siem-secret">
-          <Input id="siem-secret" type="password" value={secret} onChange={(event) => setSecret(event.target.value)} autoComplete="new-password" required />
+        <Field label={fields.credentialLabel} htmlFor="siem-secret">
+          <Input
+            id="siem-secret"
+            type="password"
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
+            placeholder={fields.credentialPlaceholder}
+            autoComplete="new-password"
+            required
+          />
         </Field>
         {error ? <p className="text-sm text-error-primary md:col-span-2">{error}</p> : null}
         <div className="md:col-span-2">
