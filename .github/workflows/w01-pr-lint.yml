@@ -1,0 +1,22 @@
+name: W01 PR-scope lint
+
+on:
+  push:
+    branches: [ci/1434-pr-lint]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          args: ./cmd/synapse-api ./internal/adapter/httpapi ./internal/infrastructure/persistence/postgres ./internal/platform/config ./internal/usecase/capabilities ./internal/usecase/ports
