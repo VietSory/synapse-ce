@@ -93,7 +93,7 @@ jobs:
           BASELINE_SOURCE_SHA="ade97553e730ed475967869cf7bd1a7b1dae7f50"
           test "$(python3 scripts/check_performance_latency.py control-sha --baselines docs/benchmarks)" = "$BASELINE_SOURCE_SHA"
           test "$BASELINE_SOURCE_SHA" != "${{ needs.route.outputs.source_sha }}"
-          git fetch --no-tags --depth=1 origin refs/tags/benchperf-control-v1
+          git fetch --no-tags --depth=1 https://github.com/KKloudTarus/synapse-ce.git refs/tags/benchperf-control-v1
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$BASELINE_SOURCE_SHA"
           control="$RUNNER_TEMP/performance-control"
           git worktree add --detach "$control" "$BASELINE_SOURCE_SHA"
