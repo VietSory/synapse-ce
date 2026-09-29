@@ -1,0 +1,44 @@
+name: PR1500 targeted security
+on:
+  push:
+    branches: [ci/1500-targeted-security]
+permissions:
+  contents: read
+jobs:
+  targeted:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${{ github.run_id }}
+      POSTGRES_DB: synapse
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ github.run_id }}
+          POSTGRES_DB: synapse
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d synapse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Configure Postgres
+        run: echo "SYNAPSE_TEST_DB_DSN=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable" >> "$GITHUB_ENV"
+      - name: HTTP webhook plane
+        run: go test -count=1 ./internal/adapter/httpapi -run 'InboundWebhook|HostileInboundHook'
+      - name: HTTP webhook plane race
+        run: go test -race -count=1 ./internal/adapter/httpapi -run 'InboundWebhook|HostileInboundHook'
+      - name: PostgreSQL webhook migration and hostile tenant tests
+        run: go test -count=1 ./internal/infrastructure/persistence/postgres -run 'Test(Migration0199InboundWebhookPlane|InboundWebhookHostilePostgresRuntimeRole)$'
+      - name: PostgreSQL hostile tenant race
+        run: go test -race -count=1 ./internal/infrastructure/persistence/postgres -run '^TestInboundWebhookHostilePostgresRuntimeRole$'
+      - name: Capability/config affected packages
+        run: go test -count=1 ./internal/usecase/capabilities ./internal/platform/config
