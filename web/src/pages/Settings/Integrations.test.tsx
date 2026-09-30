@@ -152,6 +152,7 @@ describe('Integrations settings', () => {
   it('enables an inbound-only provider without credentials, tests, discovery or polling', async () => {
     vi.mocked(api.listIntegrationProviders).mockResolvedValue([provider, gitlabProvider])
     vi.mocked(api.listIntegrations).mockResolvedValue([gitlabIntegration])
+    vi.mocked(api.listProjects).mockResolvedValue([{ id: 'project-1', name: 'Platform' } as never])
     vi.mocked(api.getIntegration).mockResolvedValue(gitlabIntegration)
     vi.mocked(api.listIntegrationOperations).mockResolvedValue([])
     vi.mocked(api.setIntegrationEnabled).mockResolvedValue({ ...gitlabIntegration, enabled: true, version: 2 })
@@ -163,6 +164,8 @@ describe('Integrations settings', () => {
     expect(screen.queryByRole('button', { name: 'Test connection' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Discover' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Poll now' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Bind Project' })).toBeInTheDocument()
+    expect(screen.queryByText('Run discovery to select a pipeline.')).not.toBeInTheDocument()
 
     const enable = screen.getByRole('button', { name: 'Enable' })
     expect(enable).toBeEnabled()
