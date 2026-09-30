@@ -147,7 +147,7 @@ func (a *Acquirer) Acquire(ctx context.Context, req ports.AcquireRequest) (*port
 	case "", ports.TargetLocal:
 		return acquireLocal(req.Value, a.maxWorkspaceBytes)
 	case ports.TargetGit:
-		return a.acquireGit(ctx, req.Value, req.Ref, req.Commit, req.BaseRef, req.BaseCommit, req.RequireCodeQualityHistory)
+		return a.acquireGit(ctx, req.Value, req.Ref, req.Commit, req.BaseRef, req.BaseCommit, req.RequireCodeQualityHistory, req.DisableGitCredentials)
 	case ports.TargetArchive:
 		return acquireArchive(req.Value, a.maxWorkspaceBytes)
 	case ports.TargetImage:
@@ -419,7 +419,7 @@ func (a *Acquirer) gitAuth(ctx context.Context, rawURL string) (cloneURL string,
 	return u.String(), authEnv, []string{credDir}, cleanup, nil
 }
 
-func (a *Acquirer) acquireGit(ctx context.Context, url, ref, commit, baseRef, baseCommit string, cqHistory bool) (*ports.Workspace, error) {
+func (a *Acquirer) acquireGit(ctx context.Context, url, ref, commit, baseRef, baseCommit string, cqHistory, disableCredentials bool) (*ports.Workspace, error) {
 	if err := validateGitURL(url); err != nil {
 		return nil, err
 	}
@@ -445,11 +445,18 @@ func (a *Acquirer) acquireGit(ctx context.Context, url, ref, commit, baseRef, ba
 	} else if herr := a.rejectInternalHost(host); herr != nil {
 		return nil, herr
 	}
-	// Resolve a private-repo credential for this host (a no-op that returns the original url when
-	// no connector matches). The token is supplied to git via GIT_ASKPASS, never argv or the URL.
-	cloneURL, authEnv, roPaths, authCleanup, err := a.gitAuth(ctx, url)
-	if err != nil {
-		return nil, err
+	// Resolve a private-repo credential for this host unless this is an
+	// untrusted fork webhook. Fork scans must never receive the connector PAT:
+	// they either clone/fetch anonymously from the stored project origin or
+	// fail closed. The payload cannot supply an alternate repository URL.
+	cloneURL := url
+	var authEnv, roPaths []string
+	authCleanup := func() {}
+	if !disableCredentials {
+		cloneURL, authEnv, roPaths, authCleanup, err = a.gitAuth(ctx, url)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer authCleanup()
 
