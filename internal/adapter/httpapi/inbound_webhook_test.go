@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,8 +29,9 @@ const (
 type fakeHookStore struct {
 	mu       sync.Mutex
 	records  map[string]ports.InboundWebhookEndpoint
-	admitted map[string]int
-	fail     bool
+	admitted   map[string]int
+	eventClaims map[string]bool
+	fail       bool
 	decision *int
 }
 
@@ -41,10 +44,23 @@ func (s *fakeHookStore) LookupInboundWebhook(_ context.Context, id string) (port
 	e, ok := s.records[id]
 	return e, ok, nil
 }
-func (s *fakeHookStore) ClaimInboundWebhookEvent(_ context.Context, _ ports.InboundWebhookIdentity, _, _ string, _ time.Time) (bool, error) {
+func (s *fakeHookStore) ClaimInboundWebhookEvent(_ context.Context, id ports.InboundWebhookIdentity, provider, eventID string, _ time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail {
+		return false, errors.New("db unavailable")
+	}
+	key := id.TenantID.String() + ":" + id.PublicID + ":" + provider + ":" + eventID
+	if s.eventClaims[key] {
+		return false, nil
+	}
+	s.eventClaims[key] = true
 	return true, nil
 }
-func (s *fakeHookStore) ReleaseInboundWebhookEvent(_ context.Context, _ ports.InboundWebhookIdentity, _, _ string) error {
+func (s *fakeHookStore) ReleaseInboundWebhookEvent(_ context.Context, id ports.InboundWebhookIdentity, provider, eventID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.eventClaims, id.TenantID.String()+":"+id.PublicID+":"+provider+":"+eventID)
 	return nil
 }
 func (s *fakeHookStore) AdmitInboundWebhook(_ context.Context, id ports.InboundWebhookIdentity, version int, usedPrevious bool) (int, error) {
@@ -127,7 +143,7 @@ func setupHookWithObserver(t *testing.T, observer HTTPObserver) (http.Handler, *
 	store := &fakeHookStore{records: map[string]ports.InboundWebhookEndpoint{
 		hookIDA: mk("tenant-A", hookIDA, "integration-A", hookSecret('a')),
 		hookIDB: mk("tenant-B", hookIDB, "integration-B", hookSecret('b')),
-	}, admitted: map[string]int{}}
+	}, admitted: map[string]int{}, eventClaims: map[string]bool{}}
 	receiver := &captureHookReceiver{}
 	// Route through the real root Handler, not only the isolated hook function.
 	// The human resolver deliberately rejects every bearer credential.
@@ -366,5 +382,108 @@ func TestInboundWebhookEndpointAADIsTenantAndVersionBound(t *testing.T) {
 	}
 	if _, err := cipher.Open(e.CurrentSealed, ports.InboundWebhookAAD(e.TenantID, e.PublicID, e.OwnerKind, e.OwnerID, 2)); err == nil {
 		t.Fatal("previous vault ciphertext was reusable under another version")
+	}
+}
+
+
+func gitLabSigningSecret(fill byte) []byte {
+	raw := bytes.Repeat([]byte{fill}, sha256.Size)
+	return []byte("whsec_" + base64.StdEncoding.EncodeToString(raw))
+}
+
+func gitLabSignedHeaders(secret, body []byte, at time.Time, messageID, eventID string) http.Header {
+	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(string(secret), "whsec_"))
+	timestamp := fmt.Sprintf("%d", at.Unix())
+	mac := hmac.New(sha256.New, raw)
+	_, _ = mac.Write([]byte(messageID + "." + timestamp + "."))
+	_, _ = mac.Write(body)
+	header := make(http.Header)
+	header.Set(gitLabWebhookIDHeader, messageID)
+	header.Set(gitLabTimestampHeader, timestamp)
+	header.Set(gitLabSignatureHeader, "v1,"+base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	header.Set(gitLabEventHeader, "Push Hook")
+	header.Set(gitLabEventUUIDHeader, eventID)
+	return header
+}
+
+func requestHookHeaders(h http.Handler, path string, body []byte, header http.Header) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	for key, values := range header {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestInboundGitLabSigningTokenReplayWindowAndPrecedence(t *testing.T) {
+	h, store, receiver, cipher := setupHook(t)
+	body := []byte(`{"ref":"refs/heads/main","checkout_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+	secret := gitLabSigningSecret('s')
+	store.mu.Lock()
+	e := store.records[hookIDA]
+	e.Provider = "gitlab"
+	sealed, err := cipher.Seal(secret, ports.InboundWebhookAAD(e.TenantID, e.PublicID, e.OwnerKind, e.OwnerID, e.CurrentVersion))
+	if err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	e.CurrentSealed = sealed
+	store.records[hookIDA] = e
+	store.mu.Unlock()
+
+	path := "/api/v1/hooks/" + hookIDA
+	eventID := "13792a34-cac6-4fda-95a8-c58e00a3954e"
+	headers := gitLabSignedHeaders(secret, body, time.Now(), "f5e5f430-f57b-4e6e-9fac-d9128cd7232f", eventID)
+	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
+	// GitLab retries carry the same event UUID. They are acknowledged without
+	// invoking the receiver a second time.
+	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
+	if got := len(receiver.snapshot()); got != 1 {
+		t.Fatalf("receiver calls after replay = %d, want 1", got)
+	}
+
+	stale := gitLabSignedHeaders(secret, body, time.Now().Add(-6*time.Minute), "another-message-id", "23792a34-cac6-4fda-95a8-c58e00a3954e")
+	assertHookCode(t, requestHookHeaders(h, path, body, stale), http.StatusUnauthorized)
+
+	// Presence of a signing header selects signing-token verification. A valid
+	// legacy token cannot downgrade an invalid signature.
+	bad := gitLabSignedHeaders(secret, body, time.Now(), "bad-signature-message", "33792a34-cac6-4fda-95a8-c58e00a3954e")
+	bad.Set(gitLabSignatureHeader, "v1,"+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, sha256.Size)))
+	bad.Set(gitLabSecretTokenHeader, string(secret))
+	assertHookCode(t, requestHookHeaders(h, path, body, bad), http.StatusUnauthorized)
+}
+
+func TestInboundGitLabLegacyTokenAndFailedClaimRelease(t *testing.T) {
+	h, store, receiver, cipher := setupHook(t)
+	body := []byte(`{"ref":"refs/heads/main","checkout_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
+	secret := bytes.Repeat([]byte{'l'}, 32)
+	store.mu.Lock()
+	e := store.records[hookIDA]
+	e.Provider = "gitlab"
+	sealed, err := cipher.Seal(secret, ports.InboundWebhookAAD(e.TenantID, e.PublicID, e.OwnerKind, e.OwnerID, e.CurrentVersion))
+	if err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	e.CurrentSealed = sealed
+	store.records[hookIDA] = e
+	store.mu.Unlock()
+
+	headers := make(http.Header)
+	headers.Set(gitLabSecretTokenHeader, string(secret))
+	headers.Set(gitLabEventHeader, "Push Hook")
+	headers.Set(gitLabEventUUIDHeader, "43792a34-cac6-4fda-95a8-c58e00a3954e")
+	path := "/api/v1/hooks/" + hookIDA
+
+	receiver.err = errors.New("temporary receiver failure")
+	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusServiceUnavailable)
+	receiver.err = nil
+	// The failed attempt released its replay claim, so GitLab's retry executes.
+	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
+	if got := len(receiver.snapshot()); got != 2 {
+		t.Fatalf("receiver calls across failed retry = %d, want 2", got)
 	}
 }
