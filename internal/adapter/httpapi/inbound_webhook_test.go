@@ -437,8 +437,7 @@ func TestInboundGitLabSigningTokenWindowAndPrecedence(t *testing.T) {
 
 	path := "/api/v1/hooks/" + hookIDA
 	eventID := "13792a34-cac6-4fda-95a8-c58e00a3954e"
-	messageID := "f5e5f430-f57b-4e6e-9fac-d9128cd7232f"
-	headers := gitLabSignedHeaders(secret, body, time.Now(), messageID, eventID)
+	headers := gitLabSignedHeaders(secret, body, time.Now(), "f5e5f430-f57b-4e6e-9fac-d9128cd7232f", eventID)
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
 	// Transport authentication deliberately does not own provider replay
 	// semantics. A second authenticated delivery reaches the provider receiver;
@@ -448,8 +447,8 @@ func TestInboundGitLabSigningTokenWindowAndPrecedence(t *testing.T) {
 	if got := len(seen); got != 2 {
 		t.Fatalf("authenticated deliveries reaching receiver = %d, want 2", got)
 	}
-	if seen[0].eventID != messageID {
-		t.Fatalf("signed delivery replay id = %q, want webhook-id %q", seen[0].eventID, messageID)
+	if seen[0].eventID != eventID {
+		t.Fatalf("signed delivery replay id = %q, want event UUID %q", seen[0].eventID, eventID)
 	}
 
 	stale := gitLabSignedHeaders(secret, body, time.Now().Add(-6*time.Minute), "another-message-id", "23792a34-cac6-4fda-95a8-c58e00a3954e")
