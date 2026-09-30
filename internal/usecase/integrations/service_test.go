@@ -142,6 +142,53 @@ func TestPrivateNetworkIntegrationsRequireOperatorApproval(t *testing.T) {
 	}
 }
 
+func TestCredentiallessInboundProviderEnablesWithoutConnectionTest(t *testing.T) {
+	ctx := context.Background()
+	tenantID := shared.ID("tenant-1")
+	clock := &integrationTestClock{now: time.Date(2026, 9, 30, 8, 0, 0, 0, time.UTC)}
+	ids := idgen.RandomID{}
+	queue := memory.NewJobQueue(ids, clock.Now)
+	cipher, err := vault.NewCipher(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.NewIntegrationStore(queue, cipher, clock, &integrationTestAudit{})
+	registry := integration.NewRegistry()
+	descriptor := integration.ProviderDescriptor{
+		Provider: "gitlab", Name: "GitLab",
+		Description: "Inbound-only webhooks.",
+		Capabilities: []integration.Capability{},
+		SecretFields: []integration.FieldDescriptor{},
+	}
+	if err := registry.Register(descriptor, func(integration.Integration, integration.CredentialBundle, selfhosted.Rules) (integration.Adapter, error) {
+		return &integrationTestAdapter{descriptor: descriptor, clock: clock}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, registry, memory.NewProjectRepository(), integrationTestMatcher{}, ids, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Create(ctx, CreateInput{
+		TenantID: tenantID, Provider: "gitlab", Name: "GitLab inbound",
+		Endpoint: "https://gitlab.example.com", Config: map[string]any{},
+		PollInterval: time.Minute, Actor: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := service.SetEnabled(ctx, tenantID, created.ID, true, created.Version, "admin")
+	if err != nil {
+		t.Fatalf("enable credentialless inbound provider: %v", err)
+	}
+	if !enabled.Enabled || enabled.CredentialConfigured {
+		t.Fatalf("enabled inbound integration = %+v, want enabled with no integration credential", enabled)
+	}
+	if _, err := service.StartOperation(ctx, tenantID, created.ID, integration.OperationTest, "admin"); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("inbound-only provider test operation error = %v, want validation", err)
+	}
+}
+
 func TestServiceFullMemoryWorkflowIsIdempotentAndCancellationSafe(t *testing.T) {
 	ctx := context.Background()
 	tenantID := shared.ID("tenant-1")
@@ -494,5 +541,82 @@ func executeNextIntegrationJob(t *testing.T, ctx context.Context, tenantID share
 	}
 	if err := queue.Complete(ctx, job.ID, job.Fence); err != nil {
 		t.Fatalf("complete integration job: %v", err)
+	}
+}
+
+func TestGitHubInboundIntegrationAllowsExactlyOneGitProjectBinding(t *testing.T) {
+	ctx := context.Background()
+	tenantID := shared.ID("tenant-github")
+	clock := &integrationTestClock{now: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)}
+	ids := idgen.RandomID{}
+	queue := memory.NewJobQueue(ids, clock.Now)
+	cipher, err := vault.NewCipher(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.NewIntegrationStore(queue, cipher, clock, &integrationTestAudit{})
+	projects := memory.NewProjectRepository()
+	gitProject, err := project.New("github-project-1", tenantID, "Git", "git", project.SourceBinding{
+		Kind: project.SourceGit, Value: "https://github.com/acme/repo.git", Ref: "main",
+	}, nil, "", clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Create(ctx, gitProject); err != nil {
+		t.Fatal(err)
+	}
+	secondProject, err := project.New("github-project-2", tenantID, "Git 2", "git-2", project.SourceBinding{
+		Kind: project.SourceGit, Value: "https://github.com/acme/repo2.git", Ref: "main",
+	}, nil, "", clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Create(ctx, secondProject); err != nil {
+		t.Fatal(err)
+	}
+	localProject, err := project.New("github-project-local", tenantID, "Local", "local", project.SourceBinding{
+		Kind: project.SourceLocal, Value: "/tmp/repo",
+	}, nil, "", clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Create(ctx, localProject); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := integration.NewRegistry()
+	descriptor := integration.ProviderDescriptor{Provider: "github", Name: "GitHub"}
+	if err := registry.Register(descriptor, func(integration.Integration, integration.CredentialBundle, selfhosted.Rules) (integration.Adapter, error) {
+		return &integrationTestAdapter{descriptor: descriptor, clock: clock}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, registry, projects, integrationTestMatcher{}, ids, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.Create(ctx, CreateInput{
+		TenantID: tenantID, Provider: "github", Name: "GitHub inbound",
+		Endpoint: "https://github.com", Config: map[string]any{}, PollInterval: time.Minute, Actor: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateBinding(ctx, tenantID, item.ID, gitProject.ID, "repo", "repo", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateBinding(ctx, tenantID, item.ID, secondProject.ID, "repo2", "repo2", "admin"); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("second GitHub project binding err=%v, want conflict", err)
+	}
+
+	other, err := service.Create(ctx, CreateInput{
+		TenantID: tenantID, Provider: "github", Name: "GitHub inbound 2",
+		Endpoint: "https://github.example.com", Config: map[string]any{}, PollInterval: time.Minute, Actor: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateBinding(ctx, tenantID, other.ID, localProject.ID, "local", "local", "admin"); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("local GitHub project binding err=%v, want validation", err)
 	}
 }

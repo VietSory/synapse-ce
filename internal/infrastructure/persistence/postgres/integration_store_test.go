@@ -124,6 +124,21 @@ func TestPostgresIntegrationStoreAtomicityRLSCredentialsAndUpsert(t *testing.T) 
 	if err := store.CreateIntegration(actx, item, integrationMutationAudit("integration.created", item.ID, now)); err != nil {
 		t.Fatal(err)
 	}
+	inbound := integration.Integration{
+		ID: shared.ID("integration-gitlab-" + suffix), TenantID: tenantA, Provider: "gitlab",
+		Name: "GitLab inbound", Endpoint: "https://gitlab.example.com", Config: []byte(`{}`),
+		PollInterval: time.Minute, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIntegration(actx, inbound, integrationMutationAudit("integration.created", inbound.ID, now)); err != nil {
+		t.Fatal(err)
+	}
+	inboundEnabled, err := store.SetIntegrationEnabled(
+		actx, inbound.ID, true, inbound.Version, ports.IntegrationEnableRequirements{},
+		integrationMutationAudit("integration.enabled", inbound.ID, now),
+	)
+	if err != nil || !inboundEnabled.Enabled {
+		t.Fatalf("credentialless inbound enable=%+v err=%v", inboundEnabled, err)
+	}
 	secret := []byte(`{"username":"reader","api_token":"secret-token"}`)
 	if err := store.PutIntegrationCredential(actx, item.ID, "default", secret, item.Version, 1, integrationMutationAudit("integration.credential_replaced", item.ID, now)); err != nil {
 		t.Fatal(err)
@@ -269,7 +284,7 @@ func TestPostgresIntegrationStoreAtomicityRLSCredentialsAndUpsert(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err = store.SetIntegrationEnabled(actx, item.ID, true, current.Version, integrationMutationAudit("integration.enabled", item.ID, now))
+	current, err = store.SetIntegrationEnabled(actx, item.ID, true, current.Version, ports.IntegrationEnableRequirements{RequireCredential: true, RequireSuccessfulTest: true}, integrationMutationAudit("integration.enabled", item.ID, now))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,5 +456,60 @@ func TestPostgresIntegrationDueFiltersProvidersBeforeLimit(t *testing.T) {
 				t.Fatalf("due=%+v, want %s", due, tc.want)
 			}
 		})
+	}
+}
+
+func TestPostgresGitHubInboundIntegrationEnablesWithoutPollingCredentialOrTest(t *testing.T) {
+	dsn := os.Getenv("SYNAPSE_TEST_DB_DSN")
+	if dsn == "" {
+		t.Skip("set SYNAPSE_TEST_DB_DSN to run the postgres integration test")
+	}
+	ctx := context.Background()
+	dsn = isolatedIntegrationDatabase(t, ctx, dsn)
+	if err := Migrate(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := randHex(t)
+	tenantID := shared.ID("github-enable-" + suffix)
+	if _, err := pool.Exec(ctx, "INSERT INTO tenants(id,name) VALUES($1,$1)", tenantID.String()); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := vault.NewCipher(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewIntegrationStore(pool, cipher)
+	tenantCtx := shared.WithTenant(ctx, tenantID)
+	now := time.Now().UTC()
+
+	github := integration.Integration{
+		ID: shared.ID("github-" + suffix), TenantID: tenantID, Provider: "github", Name: "GitHub",
+		Endpoint: "https://github.com", Config: []byte(`{}`), PollInterval: time.Minute,
+		Version: 1, ConnectionRevision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIntegration(tenantCtx, github, integrationMutationAudit("integration.created", github.ID, now)); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := store.SetIntegrationEnabled(tenantCtx, github.ID, true, github.Version, ports.IntegrationEnableRequirements{}, integrationMutationAudit("integration.enabled", github.ID, now))
+	if err != nil || !enabled.Enabled {
+		t.Fatalf("credentialless GitHub enable=%+v err=%v", enabled, err)
+	}
+
+	jenkins := integration.Integration{
+		ID: shared.ID("jenkins-no-cred-" + suffix), TenantID: tenantID, Provider: "jenkins", Name: "Jenkins",
+		Endpoint: "https://jenkins.example.com", Config: []byte(`{}`), PollInterval: time.Minute,
+		Version: 1, ConnectionRevision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIntegration(tenantCtx, jenkins, integrationMutationAudit("integration.created", jenkins.ID, now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetIntegrationEnabled(tenantCtx, jenkins.ID, true, jenkins.Version, ports.IntegrationEnableRequirements{RequireCredential: true, RequireSuccessfulTest: true}, integrationMutationAudit("integration.enabled", jenkins.ID, now)); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("credentialless Jenkins enable error=%v, want conflict", err)
 	}
 }

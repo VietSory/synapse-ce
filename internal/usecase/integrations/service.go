@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/integration"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/selfhosted"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -231,13 +232,22 @@ func (service *Service) SetEnabled(ctx context.Context, tenantID, integrationID 
 	if err != nil {
 		return integration.Integration{}, err
 	}
+	requirements := ports.IntegrationEnableRequirements{}
 	if enabled {
-		configured, err := service.store.IntegrationCredentialConfigured(tenantCtx, integrationID, credentialIdentity)
-		if err != nil {
-			return integration.Integration{}, err
+		descriptor, descriptorErr := service.registry.Descriptor(item.Provider)
+		if descriptorErr != nil {
+			return integration.Integration{}, descriptorErr
 		}
-		if !configured {
-			return integration.Integration{}, fmt.Errorf("%w: configure credentials before enabling the integration", shared.ErrConflict)
+		requirements.RequireCredential = len(descriptor.SecretFields) > 0
+		requirements.RequireSuccessfulTest = descriptor.Supports(integration.CapabilityTestConnection)
+		if requirements.RequireCredential {
+			configured, credentialErr := service.store.IntegrationCredentialConfigured(tenantCtx, integrationID, credentialIdentity)
+			if credentialErr != nil {
+				return integration.Integration{}, credentialErr
+			}
+			if !configured {
+				return integration.Integration{}, fmt.Errorf("%w: configure credentials before enabling the integration", shared.ErrConflict)
+			}
 		}
 	}
 	action := "integration.disabled"
@@ -245,9 +255,9 @@ func (service *Service) SetEnabled(ctx context.Context, tenantID, integrationID 
 		action = "integration.enabled"
 	}
 	audit := service.auditEntry(actor, action, integrationID, integrationTargetMetadata(item, nil))
-	updated, err := service.store.SetIntegrationEnabled(tenantCtx, integrationID, enabled, version, audit)
+	updated, err := service.store.SetIntegrationEnabled(tenantCtx, integrationID, enabled, version, requirements, audit)
 	if err != nil {
-		if enabled && errors.Is(err, shared.ErrConflict) {
+		if enabled && requirements.RequireSuccessfulTest && errors.Is(err, shared.ErrConflict) {
 			return integration.Integration{}, fmt.Errorf("%w: test the exact connection and credential revision successfully before enabling the integration", err)
 		}
 		return integration.Integration{}, err
@@ -273,12 +283,19 @@ func (service *Service) CreateBinding(ctx context.Context, tenantID, integration
 	if err != nil {
 		return integration.Binding{}, err
 	}
-	if _, err := service.projects.GetByID(tenantCtx, tenantID, projectID); err != nil {
+	boundProject, err := service.projects.GetByID(tenantCtx, tenantID, projectID)
+	if err != nil {
 		return integration.Binding{}, err
+	}
+	if (item.Provider == "gitlab" || item.Provider == "github") && (boundProject == nil || boundProject.SourceBinding.Kind != project.SourceGit) {
+		return integration.Binding{}, fmt.Errorf("%w: inbound SCM webhook binding requires a git project", shared.ErrValidation)
 	}
 	bindings, err := service.store.ListIntegrationBindings(tenantCtx, integrationID)
 	if err != nil {
 		return integration.Binding{}, err
+	}
+	if (item.Provider == "gitlab" || item.Provider == "github") && len(bindings) > 0 {
+		return integration.Binding{}, fmt.Errorf("%w: inbound SCM integration supports one project binding", shared.ErrConflict)
 	}
 	if len(bindings) >= integration.MaxBindingsPerPoll {
 		return integration.Binding{}, fmt.Errorf("%w: an integration supports at most %d bindings", shared.ErrValidation, integration.MaxBindingsPerPoll)

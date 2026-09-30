@@ -1122,6 +1122,10 @@ func completionTimeout(timeout time.Duration) time.Duration {
 
 // ScanResult is the aggregate output of an SCA scan.
 type ScanResult struct {
+	// Assigned by the durable worker, never decoded from imported results.
+	WebhookContext *projectanalysis.CIContext `json:"-"`
+	// Fork metadata is used for the baseline but cannot trigger forge writes.
+	WebhookFork  bool                     `json:"-"`
 	Target       string                   `json:"target"`
 	SourceRef    string                   `json:"source_ref,omitempty"`
 	SourceCommit string                   `json:"source_commit,omitempty"`
@@ -1403,7 +1407,9 @@ const (
 )
 
 type ScanOptions struct {
-	Mode string `json:"mode"`
+	// Authenticated SCM metadata persisted through the internal queue.
+	WebhookContext *projectanalysis.CIContext `json:"webhook_context,omitempty"`
+	Mode           string                     `json:"mode"`
 	// PolicyDir overrides where the repo-committed accepted-risk policy (.synapseignore / OpenVEX) is read
 	// from. Empty ⇒ the scanned workspace (ws.Dir), correct for a source/repo scan where the policy travels
 	// with the code. For an IMAGE scan the workspace is the materialized image, which does NOT carry the
@@ -1412,7 +1418,10 @@ type ScanOptions struct {
 	// DetectionPriority selects comprehensive (default) or precise; see the Detection* consts.
 	DetectionPriority string `json:"detection_priority,omitempty"`
 	CodeQuality       bool   `json:"code_quality,omitempty"`
-	ProjectAnalysis   bool   `json:"project_analysis,omitempty"`
+	// NoBuildExecution disables package-manager/build-system commands for
+	// untrusted fork pull requests while retaining static source/SBOM analysis.
+	NoBuildExecution bool `json:"no_build_execution,omitempty"`
+	ProjectAnalysis  bool `json:"project_analysis,omitempty"`
 	// ProjectAnalysisID is assigned after the durable job is created. It is not
 	// caller input and binds captured artifacts to the immutable analysis snapshot.
 	ProjectAnalysisID string                  `json:"project_analysis_id,omitempty"`
@@ -2140,6 +2149,15 @@ func (s *Service) StartScan(ctx context.Context, actor string, engagementID shar
 	return s.StartScanWithOptions(ctx, actor, engagementID, req, ScanOptions{})
 }
 
+// StartDurableScanWithOptions refuses inline execution. Webhook dedupe and scan
+// enqueue must commit together before any worker starts acquiring source.
+func (s *Service) StartDurableScanWithOptions(ctx context.Context, actor string, engagementID shared.ID, req ports.AcquireRequest, opts ScanOptions) (ports.ScanJob, error) {
+	if s.jobQueue == nil {
+		return ports.ScanJob{}, fmt.Errorf("%w: webhook scans require a durable queue", shared.ErrValidation)
+	}
+	return s.StartScanWithOptions(ctx, actor, engagementID, req, opts)
+}
+
 func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engagementID shared.ID, req ports.AcquireRequest, opts ScanOptions) (ports.ScanJob, error) {
 	if s.jobs == nil || s.ids == nil {
 		return ports.ScanJob{}, fmt.Errorf("async scan is not configured: %w", shared.ErrValidation)
@@ -2708,6 +2726,10 @@ func (s *Service) runScanJob(ctx context.Context, actor string, engagementID sha
 		// and a bare context.Background() would drop the tenant and fail the whole scan at
 		// the persistence boundary.
 		completionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.projectAnalysisCompletionTimeout)
+		if result != nil {
+			result.WebhookContext = opts.WebhookContext
+			result.WebhookFork = opts.WebhookContext != nil && opts.NoBuildExecution
+		}
 		err = s.projectAnalysisRecorder.RecordProjectAnalysis(completionCtx, engagementID, job.ID, fin, result)
 		cancel()
 	}
@@ -3386,7 +3408,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// detection + licensing run over the real artifacts. A non-Maven target / missing mvn / error is a no-op.
 	mavenResolved := false
 	var mavenResolveErr, gradleResolveErr, npmResolveErr error // surfaced as a SourceWarning so a failed resolve is diagnosable
-	if s.mavenResolver != nil {
+	if !opts.NoBuildExecution && s.mavenResolver != nil {
 		step = trace.start(stageSBOM, "maven-resolve", "maven-resolver", "Resolve Maven dependency tree", map[string]int{"components": countComponents(doc)})
 		// Prefer the graph-aware resolver (`mvn dependency:tree`): it returns the dependency EDGES too, so a
 		// transitive Maven CVE gets a dependency path + its introducing direct deps. A resolver that only
@@ -3421,7 +3443,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// gap as Maven (build.gradle alone gives only direct deps, often versionless, no transitive tree).
 	// Gradle uses Maven coordinates, so the resolved set is also pkg:maven and merges the same way.
 	gradleResolved := false
-	if s.gradleResolver != nil {
+	if !opts.NoBuildExecution && s.gradleResolver != nil {
 		step = trace.start(stageSBOM, "gradle-resolve", "gradle-resolver", "Resolve Gradle dependency tree", map[string]int{"components": countComponents(doc)})
 		// Prefer the graph-aware resolver: it returns the resolution-graph EDGES, so a transitive Gradle CVE
 		// gets a dependency path + its introducing direct deps. A components-only resolver still works.
@@ -3454,7 +3476,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// (and without a committed lockfile) there is no version to advisory-match. npm components merge like
 	// the JVM ones: drop the generator's unversioned placeholders, keep resolved versions.
 	npmResolved := false
-	if s.npmResolver != nil {
+	if !opts.NoBuildExecution && s.npmResolver != nil {
 		step = trace.start(stageSBOM, "npm-resolve", "npm-resolver", "Resolve npm dependency tree", map[string]int{"components": countComponents(doc)})
 		// Prefer the graph-aware resolver, as the Gradle path does: the generated lockfile carries the
 		// edges, and without them every npm CVE here reports no path and no direct/transitive split.
@@ -3488,7 +3510,11 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// ecosystem, keep versioned, dedup.
 	var manifestResolveErrs []string
 	var manifestResolvedEco []string
-	for _, mr := range s.manifestResolvers {
+	manifestResolvers := s.manifestResolvers
+	if opts.NoBuildExecution {
+		manifestResolvers = nil
+	}
+	for _, mr := range manifestResolvers {
 		if ctx.Err() != nil {
 			break
 		}
@@ -3536,7 +3562,7 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	// Resolve transitive Go dependency EDGES via `go mod graph`, best-effort + opt-in: go.mod has no
 	// edge graph, so this adds pkg:golang edges between existing components. A non-Go target / no module
 	// cache / tool error adds nothing and never fails the scan (mirrors the other best-effort tool hooks).
-	if s.graphResolver != nil {
+	if !opts.NoBuildExecution && s.graphResolver != nil {
 		step = trace.start(stageSBOM, "dependency-graph", "graph-resolver", "Resolve dependency graph edges", map[string]int{"components": countComponents(doc)})
 		resolved, rerr := s.graphResolver.ResolveEdges(ctx, ws.Dir, doc)
 		if rerr != nil {
