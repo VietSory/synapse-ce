@@ -176,6 +176,10 @@ func (p *inboundWebhookPlane) handle(w http.ResponseWriter, r *http.Request) {
 		if event.EventID != "" {
 			_ = p.store.ReleaseInboundWebhookEvent(ctx, identity, endpoint.Provider, event.EventID)
 		}
+		if errors.Is(err, shared.ErrValidation) {
+			writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid_webhook_event"})
+			return
+		}
 		writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "webhook_receiver_unavailable"})
 		return
 	}
