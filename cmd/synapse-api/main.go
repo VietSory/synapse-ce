@@ -75,6 +75,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/scmdecoration"
 	elastic "github.com/KKloudTarus/synapse-ce/internal/infrastructure/siem/elastic"
 	siemseal "github.com/KKloudTarus/synapse-ce/internal/infrastructure/siem/seal"
+	sentinel "github.com/KKloudTarus/synapse-ce/internal/infrastructure/siem/sentinel"
 	splunk "github.com/KKloudTarus/synapse-ce/internal/infrastructure/siem/splunk"
 	syslogtls "github.com/KKloudTarus/synapse-ce/internal/infrastructure/siem/syslog"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/signing"
@@ -1463,6 +1464,22 @@ func main() {
 		os.Exit(1)
 	}
 	router := httpapi.NewRouter(log, auth, engService, scaService, aupService, findingsService, exportService, reportService, evidenceService, reconService, logBroker, transferService, auditService, vexService, usersService, credentialsService)
+	if cfg.InboundWebhooksEnabled {
+		if databasePool == nil || cfg.VaultMasterKey == "" {
+			log.Error("inbound webhooks require PostgreSQL and SYNAPSE_VAULT_MASTER_KEY")
+			os.Exit(1)
+		}
+		checkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := postgres.CheckRLSRuntimeRole(checkCtx, databasePool)
+		cancel()
+		if err != nil {
+			log.Error("inbound webhook runtime DB role cannot enforce tenant isolation", "err", err)
+			os.Exit(1)
+		}
+		// A provider-specific receiver is installed by its integration workstream.
+		// Without one, authenticated events fail closed with 503, never a false 202.
+		router.SetInboundWebhookPlane(postgres.NewInboundWebhookRepository(databasePool), vaultCipher, nil)
+	}
 	if cfg.OwnershipMode != "off" && cfg.OwnershipMode != "observe" && cfg.OwnershipMode != "enforce" {
 		log.Error("SYNAPSE_OWNERSHIP_MODE must be off, observe or enforce")
 		os.Exit(1)
@@ -1540,6 +1557,10 @@ func main() {
 		}
 		notificationService.SetTransactionRunner(postgres.NewTenantTransactionRunner(databasePool))
 		notificationService.SetDisabledChannelTypes(disabledNotificationTypes)
+		notificationService.SetTemplateStore(postgres.NewNotificationTemplateStore(databasePool))
+		// Template resolution (#1371) reads the tenant default_locale; the built-in tier stays the
+		// empty catalog until #1366 ships built-in templates.
+		notificationService.SetTenantSettings(tenantSettingsStore)
 		router.SetNotifications(notificationService)
 		// The API still needs SMTP for contact verification and personal inbox mail.
 		userContactService, notificationErr = usercontacts.NewService(postgres.NewUserContactStore(databasePool), userRepo, vaultCipher, notificationSender, ids, clock, usercontacts.DeriveVerifierKey(cfg.VaultMasterKey), cfg.NotificationSMTPHost != "" && cfg.NotificationSMTPFrom != "")
@@ -1562,8 +1583,9 @@ func main() {
 		siemRepository := postgres.NewSIEMRepository(databasePool)
 		var siemErr error
 		siemService, siemErr = siemuc.NewService(siemRepository, siemRepository, siemRepository, siemseal.Vault{Cipher: vaultCipher}, map[siem.Provider]ports.SIEMDriver{
-			siem.ProviderSplunk:        splunk.New(5*time.Second, true),
-			siem.ProviderElasticsearch: elastic.New(5 * time.Second),
+			siem.ProviderSplunk:            splunk.New(5*time.Second, true),
+			siem.ProviderElasticsearch:     elastic.New(5 * time.Second),
+			siem.ProviderMicrosoftSentinel: sentinel.New(5 * time.Second),
 			siem.ProviderSyslogTLS:     syslogtls.New(5 * time.Second),
 		}, auditLog, clock, ids)
 		if siemErr != nil {
@@ -1745,6 +1767,7 @@ func main() {
 		SingleTenant:         cfg.SingleTenant,
 		OIDC:                 cfg.OIDCEnabled,
 		Ownership:            cfg.OwnershipMode != "off" && databasePool != nil,
+		InboundWebhooks:      cfg.InboundWebhooksEnabled,
 		Notifications:        cfg.NotificationEnabled,
 		// Read from the driver registry, so a newly registered driver is advertised without a
 		// catalog edit; the kill switch then removes the types the operator turned off.

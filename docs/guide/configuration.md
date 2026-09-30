@@ -56,7 +56,7 @@ Some entries carry more than a switch:
 | `SYNAPSE_OIDC_FRONTEND_URL` | (none) | Fixed absolute HTTPS dashboard URL for a successful callback redirect. Query strings, fragments, and credentials are rejected; request parameters never control this destination. |
 | `SYNAPSE_PUBLIC_BASE_URL` | `SYNAPSE_OIDC_FRONTEND_URL` if set; otherwise unset | Trusted HTTPS console URL (optionally including the deployment path prefix) for outgoing deep links. Works without OIDC. HTTP, relative URLs, credentials, query strings, fragments, invalid ports, control and Unicode format characters (including percent-encoded characters in hostnames), and double-encoded path segments are rejected at API and worker startup. Never put tokens or secrets in this value. Set explicitly if no OIDC frontend URL exists. |
 | `SYNAPSE_OIDC_TENANT_ID` | (none) | The one fixed Synapse tenant accepted by this BFF instance. |
-| `SYNAPSE_OIDC_GROUP_ROLE_MAPPING` | (none) | Comma-separated exact `provider-group=role` entries. Roles may only be `admin`, `consultant`, `reviewer`, or `readonly`; unmapped, duplicate, and multi-role group claims are rejected. |
+| `SYNAPSE_OIDC_GROUP_ROLE_MAPPING` | (none) | Comma-separated exact `provider-group=role` entries. Roles may only be `admin`, `consultant`, `reviewer`, `readonly`, or `integration_admin`; unmapped, duplicate, and multi-role group claims are rejected. |
 | `SYNAPSE_OIDC_TRANSACTION_TTL`, `SYNAPSE_OIDC_SESSION_TTL` | `10m`, `8h` | Maximum authorization-transaction and opaque browser-session lifetimes. |
 
 The console link builder routes to engagements, incidents, the Findings tab (`#finding-<id>`) and the Scan Runs tab (`#scan-<id>`). The latter opens scan history and preserves the scan ID in its fragment; the current UI does not yet auto-select a scan from that fragment. If neither public URL nor OIDC frontend is configured, link generation is unavailable until an HTTPS base is supplied.
@@ -73,6 +73,16 @@ The console link builder routes to engagements, incidents, the Findings tab (`#f
 | `SYNAPSE_AUP_FILE` | `data/aup-accepted.json` | File-backed path, in-memory mode only. |
 | `SYNAPSE_AUDIT_FILE` | `data/audit.jsonl` | File-backed path, in-memory mode only. |
 | `SYNAPSE_MEASURE_CURSOR_SECRET` | Ephemeral in development; required in production | HMAC key for signing Measures pagination cursors; minimum 32 bytes |
+
+## Inbound provider webhooks (WS10 / #1434)
+
+Set `SYNAPSE_INBOUND_WEBHOOKS_ENABLED=true` to mount the **separate** `POST /api/v1/hooks/{public_id}` authentication plane. It is off by default and requires a PostgreSQL runtime role capable of enforcing RLS and a durable `SYNAPSE_VAULT_MASTER_KEY`. Startup fails rather than silently falling back to the default human tenant. Disable the switch to remove this route; sibling /hooks routes remain on human auth.
+
+Provision each endpoint through a tenant-authorized integration lifecycle after its provider receiver is installed. The global `inbound_webhook_endpoints` routing table uses a 32–64-character cryptographically random base64url public ID, a required nonempty tenant ID, an owner integration ID, and a secret sealed with AES-256-GCM using AAD bound to tenant, public ID, integration and version. The exact-ID SECURITY DEFINER lookup exposes **only a tenant ID**; sealed keys and endpoint status are read separately under that tenant's FORCE-RLS transaction. An unscoped runtime SELECT sees no rows; direct runtime DML is revoked. Row-locked admission rechecks endpoint identity, owner status, version and previous-key expiry. The integration must remain enabled and unarchived. No public management API or automatic endpoint activation is supplied by this transport-plane PR.
+
+Send at most 1 MiB of **raw** bytes; sign those exact bytes using HMAC-SHA256 and supply one `X-Synapse-Hook-Signature: sha256=<64 hex>` header. Never put a token, secret, tenant identifier or signature in the URL or query string. The current secret and the immediately previous version overlap for up to 24 hours; a revoked endpoint is rejected. The limit is 60 authenticated requests/minute by default per endpoint, bounded between 1 and 600, enforced transactionally across API replicas. Unknown endpoint, bad signature, expired/revoked key and disabled integration all return the same generic 401 response. A missing provider receiver returns 503 rather than falsely acknowledging a dropped event.
+
+Ingress does not perform any provider-side action: a future provider adapter receives only the verified tenant/owner context and body. Provider adapters must enforce their own event replay/deduplication and create proposals for later human approval, not directly mutate security state. Request logs and metrics contain no raw path IDs, credentials or tenant IDs.
 
 ## Observability
 
@@ -525,6 +535,16 @@ when they are used only by a CLI, helper, or optional subsystem.
 | --- | --- | --- |
 | `SYNAPSE_SIEM_ENABLED` | `true` | Set `false` on every API and worker replica to stop incident capture and SIEM sends. Pausing one sink does not stop capture. Events written while capture is off are not in the live partition; a historical backfill can still copy identities that were never captured. |
 | `SYNAPSE_SIEM_PUBLIC_BASE_URL` | empty | Optional absolute `https` console origin, with no path, added to exported SIEM records as a deep link. Empty omits links. It does not fall back to `SYNAPSE_PUBLIC_BASE_URL`, because that console builder can include a deployment prefix and uses different routes. |
+
+Microsoft Sentinel credentials are configured per sink, not through a process
+environment variable. Store the Entra client credential as the sink's sealed
+one-line JSON secret with `tenant_id`, `client_id`, and `client_secret`.
+Use an Azure public-cloud Logs Ingestion endpoint under
+`*.ingest.monitor.azure.com` and a target of
+`dcr-<immutable-id>/Custom-<stream>`. The driver uses the public Azure
+Monitor audience and never serializes that credential back through the SIEM
+API. Private Link DCEs are intentionally unsupported because SIEM egress
+rejects private addresses.
 
 ### Database, project storage, and maintenance
 
