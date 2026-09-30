@@ -371,8 +371,9 @@ func (s *Service) StartWebhookAnalysis(ctx context.Context, actor string, tenant
 	request := ports.AcquireRequest{
 		Kind:   project.SourceGit,
 		Value:  p.SourceBinding.Value,
-		Ref:    strings.TrimSpace(ref),
-		Commit: strings.ToLower(strings.TrimSpace(commit)),
+		Ref:                   strings.TrimSpace(ref),
+		Commit:                strings.ToLower(strings.TrimSpace(commit)),
+		DisableGitCredentials: fork,
 	}
 	return s.scanner.StartScanWithOptions(ctx, actor, e.ID, request, scauc.ScanOptions{
 		Mode: scauc.ScanModeFull, CodeQuality: true, ProjectAnalysis: true,
