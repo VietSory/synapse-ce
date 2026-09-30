@@ -216,6 +216,7 @@ import (
 	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
 	scanrunuc "github.com/KKloudTarus/synapse-ce/internal/usecase/scanrun"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/scmconnectoruc"
+	"github.com/KKloudTarus/synapse-ce/internal/usecase/scmwebhook"
 	siemuc "github.com/KKloudTarus/synapse-ce/internal/usecase/siem"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/slauc"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/srcreach"
@@ -1475,9 +1476,12 @@ func main() {
 			log.Error("inbound webhook runtime DB role cannot enforce tenant isolation", "err", err)
 			os.Exit(1)
 		}
-		// A provider-specific receiver is installed by its integration workstream.
-		// Without one, authenticated events fail closed with 503, never a false 202.
-		router.SetInboundWebhookPlane(postgres.NewInboundWebhookRepository(databasePool), vaultCipher, nil)
+		scmReceiver, receiverErr := scmwebhook.NewReceiver(integrationStore, projectService)
+		if receiverErr != nil {
+			log.Error("inbound SCM webhook receiver init failed", "err", receiverErr)
+			os.Exit(1)
+		}
+		router.SetInboundWebhookPlane(postgres.NewInboundWebhookRepository(databasePool), vaultCipher, scmReceiver)
 	}
 	if cfg.OwnershipMode != "off" && cfg.OwnershipMode != "observe" && cfg.OwnershipMode != "enforce" {
 		log.Error("SYNAPSE_OWNERSHIP_MODE must be off, observe or enforce")
