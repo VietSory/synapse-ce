@@ -38,6 +38,9 @@ type InboundWebhookStore interface {
 	// authentication. false,nil is an exact replay that must be acknowledged
 	// without invoking the provider receiver again.
 	ClaimInboundWebhookEvent(context.Context, InboundWebhookIdentity, string, string, time.Time) (bool, error)
+	// ReleaseInboundWebhookEvent removes a claim when provider processing failed
+	// before durable work was accepted, allowing GitLab's retry to run again.
+	ReleaseInboundWebhookEvent(context.Context, InboundWebhookIdentity, string, string) error
 }
 
 type InboundWebhookIdentity struct {
