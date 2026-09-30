@@ -125,8 +125,11 @@ func parseGitLab(eventType string, body []byte) (gitLabTarget, bool, error) {
 		if err := validateTarget(ref, sha); err != nil {
 			return gitLabTarget{}, false, err
 		}
-		fork := payload.ObjectAttributes.SourceProjectID != 0 &&
-			payload.ObjectAttributes.TargetProjectID != 0 &&
+		// Missing project IDs fail safe as fork-like: the only consequence is
+		// disabling build-system execution. We never relax fork policy because
+		// an optional/malformed payload field was absent.
+		fork := payload.ObjectAttributes.SourceProjectID == 0 ||
+			payload.ObjectAttributes.TargetProjectID == 0 ||
 			payload.ObjectAttributes.SourceProjectID != payload.ObjectAttributes.TargetProjectID
 		return gitLabTarget{Ref: ref, SHA: sha, Fork: fork}, true, nil
 	default:
