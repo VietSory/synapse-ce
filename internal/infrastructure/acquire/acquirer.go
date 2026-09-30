@@ -451,6 +451,7 @@ func (a *Acquirer) acquireGit(ctx context.Context, url, ref, commit, baseRef, ba
 	// fail closed. The payload cannot supply an alternate repository URL.
 	cloneURL := url
 	var authEnv, roPaths []string
+	var err error
 	authCleanup := func() {}
 	if !disableCredentials {
 		cloneURL, authEnv, roPaths, authCleanup, err = a.gitAuth(ctx, url)
