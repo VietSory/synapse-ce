@@ -32,27 +32,44 @@ type ProjectScanner interface {
 type Receiver struct {
 	bindings BindingReader
 	projects ProjectScanner
+	deduper  ports.InboundWebhookEventDeduper
+	clock    ports.Clock
 }
 
-func NewReceiver(bindings BindingReader, projects ProjectScanner) (*Receiver, error) {
-	if bindings == nil || projects == nil {
+func NewReceiver(bindings BindingReader, projects ProjectScanner, deduper ports.InboundWebhookEventDeduper, clock ports.Clock) (*Receiver, error) {
+	if bindings == nil || projects == nil || deduper == nil || clock == nil {
 		return nil, fmt.Errorf("%w: scm webhook receiver dependencies are required", shared.ErrValidation)
 	}
-	return &Receiver{bindings: bindings, projects: projects}, nil
+	return &Receiver{bindings: bindings, projects: projects, deduper: deduper, clock: clock}, nil
 }
 
 func (r *Receiver) ReceiveInboundWebhook(ctx context.Context, identity ports.InboundWebhookIdentity, event ports.InboundWebhookEvent) error {
 	if event.Provider != gitLabProvider {
 		return fmt.Errorf("%w: inbound provider is not supported", shared.ErrValidation)
 	}
-	if identity.OwnerKind != "integration" || identity.OwnerID == "" || identity.TenantID.IsZero() {
+	if identity.OwnerKind != "integration" || identity.OwnerID == "" || identity.TenantID.IsZero() || event.EventID == "" {
 		return fmt.Errorf("%w: inbound webhook identity is invalid", shared.ErrValidation)
 	}
+	claimed, err := r.deduper.ClaimInboundWebhookEvent(ctx, identity, gitLabProvider, event.EventID, r.clock.Now())
+	if err != nil {
+		return fmt.Errorf("claim GitLab webhook event: %w", err)
+	}
+	if !claimed {
+		return nil
+	}
+	keepClaim := false
+	defer func() {
+		if !keepClaim {
+			_ = r.deduper.ReleaseInboundWebhookEvent(ctx, identity, gitLabProvider, event.EventID)
+		}
+	}()
+
 	target, scan, err := parseGitLab(event.EventType, event.Body)
 	if err != nil {
 		return err
 	}
 	if !scan {
+		keepClaim = true
 		return nil
 	}
 
@@ -70,6 +87,7 @@ func (r *Receiver) ReceiveInboundWebhook(ctx context.Context, identity ports.Inb
 	); err != nil {
 		return fmt.Errorf("start GitLab webhook analysis: %w", err)
 	}
+	keepClaim = true
 	return nil
 }
 
