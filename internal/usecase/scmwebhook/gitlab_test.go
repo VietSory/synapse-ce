@@ -205,7 +205,7 @@ func TestGitLabReceiverFailsClosedOnAmbiguousBindingOrInvalidSHA(t *testing.T) {
 	receiver := newReceiverForTest(t, multi, scans, nil)
 	body := []byte(`{"ref":"refs/heads/main","checkout_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
-		Provider: "gitlab", EventType: "Push Hook", Body: body,
+		Provider: "gitlab", EventType: "Push Hook", EventID: "33792a34-cac6-4fda-95a8-c58e00a3954e", Body: body,
 	}); !errors.Is(err, shared.ErrConflict) {
 		t.Fatalf("ambiguous binding error = %v, want conflict", err)
 	}
@@ -214,7 +214,7 @@ func TestGitLabReceiverFailsClosedOnAmbiguousBindingOrInvalidSHA(t *testing.T) {
 	receiver = newReceiverForTest(t, single, scans, nil)
 	bad := []byte(`{"ref":"refs/heads/main","checkout_sha":"NOT-A-SHA"}`)
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
-		Provider: "gitlab", EventType: "Push Hook", Body: bad,
+		Provider: "gitlab", EventType: "Push Hook", EventID: "43792a34-cac6-4fda-95a8-c58e00a3954e", Body: bad,
 	}); !errors.Is(err, shared.ErrValidation) {
 		t.Fatalf("invalid sha error = %v, want validation", err)
 	}
@@ -228,12 +228,12 @@ func TestGitLabUnsupportedAndDeleteEventsAreNoOps(t *testing.T) {
 	scans := &fakeProjectScanner{}
 	receiver := newReceiverForTest(t, bindings, scans, nil)
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
-		Provider: "gitlab", EventType: "Pipeline Hook", Body: []byte(`{"url":"https://attacker.example"}`),
+		Provider: "gitlab", EventType: "Pipeline Hook", EventID: "53792a34-cac6-4fda-95a8-c58e00a3954e", Body: []byte(`{"url":"https://attacker.example"}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
-		Provider: "gitlab", EventType: "Push Hook",
+		Provider: "gitlab", EventType: "Push Hook", EventID: "63792a34-cac6-4fda-95a8-c58e00a3954e",
 		Body: []byte(`{"ref":"refs/heads/deleted","checkout_sha":null,"after":"0000000000000000000000000000000000000000"}`),
 	}); err != nil {
 		t.Fatal(err)
