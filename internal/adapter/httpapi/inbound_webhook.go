@@ -22,7 +22,7 @@ const inboundWebhookBodyLimit = 1 << 20 // 1 MiB of raw, signed bytes.
 const inboundWebhookSignature = "X-Synapse-Hook-Signature"
 
 const (
-	gitLabTokenHeader = "X-Gitlab-Token"
+	gitLabLegacyAuthHeader = "X-Gitlab-Token"
 	gitLabEventHeader       = "X-Gitlab-Event"
 	gitLabEventUUIDHeader   = "X-Gitlab-Event-UUID"
 	gitLabWebhookIDHeader   = "webhook-id"
@@ -258,7 +258,7 @@ func (p *inboundWebhookPlane) verifyGitLab(e ports.InboundWebhookEndpoint, publi
 		return p.verifyGitLabSigningToken(e, publicID, body, messageID, timestampRaw, signatures[0], headerOK, now)
 	}
 
-	presented, tokenOK := singleWebhookHeader(header, gitLabTokenHeader)
+	presented, tokenOK := singleWebhookHeader(header, gitLabLegacyAuthHeader)
 	return p.verifyGitLabSecretToken(e, publicID, presented, tokenOK, now)
 }
 
