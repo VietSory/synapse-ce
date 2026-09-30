@@ -133,7 +133,7 @@ func TestGitLabPushRoutesOnlyBoundProjectAndIgnoresPayloadURL(t *testing.T) {
 		"project":{"git_http_url":"https://attacker.example/evil.git"},
 		"repository":{"url":"https://attacker.example/evil.git"}
 	}`)
-	err = receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
+	err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
 		Provider: "gitlab", EventType: "Push Hook", EventID: "event", Body: body,
 	})
 	if err != nil {
