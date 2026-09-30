@@ -95,6 +95,26 @@ func TestGitLabForkMergeRequestDisablesBuildExecutionAtProjectBoundary(t *testin
 	}
 }
 
+func TestGitLabMergeRequestMissingProjectIdentityFailsSafeAsFork(t *testing.T) {
+	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
+	scans := &fakeProjectScanner{}
+	receiver, _ := NewReceiver(bindings, scans)
+	body := []byte(`{
+		"object_attributes":{
+			"source_branch":"feature",
+			"last_commit":{"id":"cccccccccccccccccccccccccccccccccccccccc"}
+		}
+	}`)
+	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
+		Provider: "gitlab", EventType: "Merge Request Hook", EventID: "event", Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(scans.calls) != 1 || !scans.calls[0].fork {
+		t.Fatalf("missing fork identity must tighten policy: %#v", scans.calls)
+	}
+}
+
 func TestGitLabReceiverFailsClosedOnAmbiguousBindingOrInvalidSHA(t *testing.T) {
 	scans := &fakeProjectScanner{}
 	multi := &fakeBindingReader{bindings: []integration.Binding{
