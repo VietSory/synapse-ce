@@ -307,10 +307,15 @@ function IntegrationOverview({ integration, provider, operations, activeOperatio
   onArchive: () => Promise<void>
 }) {
   const latest = operations[0]
+  const supportsTest = provider.capabilities.includes('test_connection')
+  const supportsDiscover = provider.capabilities.includes('discover_pipelines')
+  const supportsPoll = provider.capabilities.includes('read_runs')
+  const requiresCredential = provider.secretFields.length > 0
   const successfulTest = operations.find((operation) => operation.type === 'test' && operation.state === 'succeeded')
   const successfulPoll = operations.find((operation) => operation.type === 'poll' && operation.state === 'succeeded')
   const staleAfter = Math.max(integration.pollIntervalSeconds * 2, 600) * 1000
-  const stale = integration.enabled && (!successfulPoll || Date.now() - Date.parse(successfulPoll.finishedAt ?? successfulPoll.updatedAt) > staleAfter)
+  const stale = supportsPoll && integration.enabled && (!successfulPoll || Date.now() - Date.parse(successfulPoll.finishedAt ?? successfulPoll.updatedAt) > staleAfter)
+  const enableReady = (!requiresCredential || integration.credentialConfigured) && (!supportsTest || !!successfulTest)
   const health = activeOperation ? activeOperation.state : latest?.state === 'failed' ? 'error' : stale ? 'stale' : integration.enabled ? 'healthy' : 'disabled'
 
   return (
@@ -324,20 +329,20 @@ function IntegrationOverview({ integration, provider, operations, activeOperatio
         <div className="space-y-5">
           <dl className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
             <Stat label="Endpoint" value={integration.endpoint} />
-            <Stat label="Credentials" value={integration.credentialConfigured ? 'Configured' : 'Missing'} />
-            <Stat label="Last successful test" value={formatDate(successfulTest?.finishedAt)} />
-            <Stat label="Last successful poll" value={formatDate(successfulPoll?.finishedAt)} />
+            <Stat label="Credentials" value={requiresCredential ? (integration.credentialConfigured ? 'Configured' : 'Missing') : 'Not required'} />
+            <Stat label="Last successful test" value={supportsTest ? formatDate(successfulTest?.finishedAt) : 'Not applicable'} />
+            <Stat label="Last successful poll" value={supportsPoll ? formatDate(successfulPoll?.finishedAt) : 'Not applicable'} />
           </dl>
           {latest?.errors[0] && <ErrorState message={latest.errors[0]} />}
           <div className="flex flex-wrap gap-2">
             {canAdmin && <Button variant="secondary" onClick={onEdit}>Edit configuration</Button>}
-            {canAdmin && <Button variant="secondary" onClick={onCredentialOpen}>{integration.credentialConfigured ? 'Replace credentials' : 'Add credentials'}</Button>}
-            {canAdmin && integration.credentialConfigured && <Button variant="ghost" loading={busy === 'delete-credential'} onClick={onCredentialDelete}>Delete credentials</Button>}
+            {canAdmin && requiresCredential && <Button variant="secondary" onClick={onCredentialOpen}>{integration.credentialConfigured ? 'Replace credentials' : 'Add credentials'}</Button>}
+            {canAdmin && requiresCredential && integration.credentialConfigured && <Button variant="ghost" loading={busy === 'delete-credential'} onClick={onCredentialDelete}>Delete credentials</Button>}
             {canManage && <>
-            <Button variant="secondary" disabled={!!activeOperation || !integration.credentialConfigured} loading={busy === 'operation:test'} onClick={() => onOperation('test')}>Test connection</Button>
-            <Button variant="secondary" disabled={!!activeOperation || !integration.credentialConfigured} loading={busy === 'operation:discover'} onClick={() => onOperation('discover')}>Discover</Button>
-            <Button variant="secondary" disabled={!!activeOperation || !integration.enabled} loading={busy === 'operation:poll'} onClick={() => onOperation('poll')}>Poll now</Button>
-            <Button disabled={!!activeOperation || (!integration.enabled && !successfulTest)} loading={busy === 'toggle'} onClick={onToggle}>{integration.enabled ? 'Disable' : 'Enable'}</Button>
+            {supportsTest && <Button variant="secondary" disabled={!!activeOperation || (requiresCredential && !integration.credentialConfigured)} loading={busy === 'operation:test'} onClick={() => onOperation('test')}>Test connection</Button>}
+            {supportsDiscover && <Button variant="secondary" disabled={!!activeOperation || (requiresCredential && !integration.credentialConfigured)} loading={busy === 'operation:discover'} onClick={() => onOperation('discover')}>Discover</Button>}
+            {supportsPoll && <Button variant="secondary" disabled={!!activeOperation || !integration.enabled} loading={busy === 'operation:poll'} onClick={() => onOperation('poll')}>Poll now</Button>}
+            <Button disabled={!!activeOperation || (!integration.enabled && !enableReady)} loading={busy === 'toggle'} onClick={onToggle}>{integration.enabled ? 'Disable' : 'Enable'}</Button>
             <Button variant="ghost" loading={busy === 'archive'} onClick={onArchive}>Archive</Button>
             </>}
           </div>
