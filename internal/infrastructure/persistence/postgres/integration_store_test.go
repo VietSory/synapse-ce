@@ -269,7 +269,7 @@ func TestPostgresIntegrationStoreAtomicityRLSCredentialsAndUpsert(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err = store.SetIntegrationEnabled(actx, item.ID, true, current.Version, integrationMutationAudit("integration.enabled", item.ID, now))
+	current, err = store.SetIntegrationEnabled(actx, item.ID, true, current.Version, ports.IntegrationEnableRequirements{RequireCredential: true, RequireSuccessfulTest: true}, integrationMutationAudit("integration.enabled", item.ID, now))
 	if err != nil {
 		t.Fatal(err)
 	}
