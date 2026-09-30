@@ -274,7 +274,7 @@ export function Integrations() {
                 onToggle={toggleEnabled}
                 onArchive={archiveSelected}
               />
-              <BindingsCard canManage={canManage} integration={selected} projects={projects} operations={operations} bindings={bindings} busy={busy} operate={operate} onReload={() => loadDetail(selected.id, true)} />
+              <BindingsCard canManage={canManage} integration={selected} provider={provider} projects={projects} operations={operations} bindings={bindings} busy={busy} operate={operate} onReload={() => loadDetail(selected.id, true)} />
               <RunsCard runs={runs} />
               <OperationsCard canManage={canManage} operations={operations} activeOperation={activeOperation} busy={busy} operate={operate} />
             </div>
@@ -447,35 +447,56 @@ function DynamicField({ field, value, onChange }: { field: IntegrationFieldDescr
   return <Field label={field.label} hint={field.description} htmlFor={`integration-field-${field.name}`}><Input id={`integration-field-${field.name}`} type={field.kind === 'password' ? 'password' : 'text'} autoComplete={field.kind === 'password' ? 'new-password' : 'off'} value={typeof value === 'string' ? value : ''} onChange={(event) => onChange(event.target.value)} required={field.required} /></Field>
 }
 
-function BindingsCard({ canManage, integration, projects, operations, bindings, busy, operate, onReload }: { canManage: boolean; integration: Integration; projects: Project[]; operations: IntegrationOperation[]; bindings: IntegrationBinding[]; busy: string; operate: (key: string, action: () => Promise<void>, success: string) => Promise<void>; onReload: () => Promise<void> }) {
+function BindingsCard({ canManage, integration, provider, projects, operations, bindings, busy, operate, onReload }: { canManage: boolean; integration: Integration; provider: IntegrationProviderDescriptor; projects: Project[]; operations: IntegrationOperation[]; bindings: IntegrationBinding[]; busy: string; operate: (key: string, action: () => Promise<void>, success: string) => Promise<void>; onReload: () => Promise<void> }) {
+  const supportsDiscover = provider.capabilities.includes('discover_pipelines')
   const pipelines = useMemo(() => operations.find((operation) => operation.type === 'discover' && operation.pipelines.length > 0)?.pipelines ?? [], [operations])
   const available = pipelines.filter((pipeline) => !bindings.some((binding) => binding.externalKey === pipeline.externalKey))
   const [pipelineKey, setPipelineKey] = useState('')
   const [projectId, setProjectId] = useState('')
   const projectNames = new Map(projects.map((project) => [project.id, project.name]))
   const selectedPipeline = available.find((pipeline) => pipeline.externalKey === pipelineKey)
+  const selectedProject = projects.find((project) => project.id === projectId)
 
   async function bind() {
-    if (!selectedPipeline || !projectId) return
+    if (!projectId) return
+    if (supportsDiscover) {
+      if (!selectedPipeline) return
+      await operate('bind', async () => {
+        await api.createIntegrationBinding(integration.id, projectId, selectedPipeline.externalKey, selectedPipeline.fullName || selectedPipeline.name)
+        setPipelineKey('')
+        setProjectId('')
+        await onReload()
+      }, 'Pipeline bound to Project.')
+      return
+    }
+    if (!selectedProject || bindings.length > 0) return
     await operate('bind', async () => {
-      await api.createIntegrationBinding(integration.id, projectId, selectedPipeline.externalKey, selectedPipeline.fullName || selectedPipeline.name)
-      setPipelineKey('')
+      await api.createIntegrationBinding(integration.id, projectId, `/inbound/${projectId}`, selectedProject.name)
       setProjectId('')
       await onReload()
-    }, 'Pipeline bound to Project.')
+    }, 'Inbound integration bound to Project.')
   }
 
   return (
     <Card title="Project bindings" actions={<Pill>{bindings.length}</Pill>}>
       <div className="space-y-4">
-        {!canManage ? null : pipelines.length === 0 ? <p className="text-sm text-tertiary">Run discovery to select a pipeline.</p> : (
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-            <Select value={pipelineKey} onValueChange={setPipelineKey} ariaLabel="Discovered pipeline" placeholder="Select pipeline" options={available.map((pipeline) => ({ value: pipeline.externalKey, label: `${pipeline.fullName || pipeline.name} (${pipeline.kind})` }))} />
+        {!canManage ? null : supportsDiscover ? (
+          pipelines.length === 0 ? <p className="text-sm text-tertiary">Run discovery to select a pipeline.</p> : (
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+              <Select value={pipelineKey} onValueChange={setPipelineKey} ariaLabel="Discovered pipeline" placeholder="Select pipeline" options={available.map((pipeline) => ({ value: pipeline.externalKey, label: `${pipeline.fullName || pipeline.name} (${pipeline.kind})` }))} />
+              <Select value={projectId} onValueChange={setProjectId} ariaLabel="Synapse Project" placeholder="Select Project" options={projects.map((project) => ({ value: project.id, label: project.name }))} />
+              <Button disabled={!selectedPipeline || !projectId} loading={busy === 'bind'} onClick={bind}>Bind</Button>
+            </div>
+          )
+        ) : bindings.length > 0 ? (
+          <p className="text-sm text-tertiary">This inbound integration is already bound to a Project. Remove the binding before choosing another Project.</p>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
             <Select value={projectId} onValueChange={setProjectId} ariaLabel="Synapse Project" placeholder="Select Project" options={projects.map((project) => ({ value: project.id, label: project.name }))} />
-            <Button disabled={!selectedPipeline || !projectId} loading={busy === 'bind'} onClick={bind}>Bind</Button>
+            <Button disabled={!selectedProject} loading={busy === 'bind'} onClick={bind}>Bind Project</Button>
           </div>
         )}
-        {bindings.length === 0 ? <p className="text-sm text-tertiary">No pipelines are bound yet.</p> : (
+        {bindings.length === 0 ? <p className="text-sm text-tertiary">No Projects are bound yet.</p> : (
           <div className="divide-y divide-secondary rounded-lg border border-secondary">
             {bindings.map((binding) => (
               <div key={binding.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
