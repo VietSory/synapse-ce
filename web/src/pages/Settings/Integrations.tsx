@@ -366,6 +366,7 @@ function IntegrationForm({ providers, integration, loading, onCancel, onSubmit }
 }) {
   const [providerSlug, setProviderSlug] = useState(integration?.provider ?? providers[0]?.provider ?? '')
   const descriptor = providers.find((item) => item.provider === providerSlug) ?? providers[0]
+  const supportsPoll = descriptor?.capabilities.includes('read_runs') ?? false
   const [name, setName] = useState(integration?.name ?? '')
   const [endpoint, setEndpoint] = useState(integration?.endpoint ?? '')
   const [pollInterval, setPollInterval] = useState(String(integration?.pollIntervalSeconds ?? 300))
@@ -385,8 +386,8 @@ function IntegrationForm({ providers, integration, loading, onCancel, onSubmit }
     event.preventDefault()
     setFormError('')
     if (!descriptor || !name.trim() || !endpoint.trim()) return setFormError('Provider, name, and HTTPS endpoint are required.')
-    const seconds = Number(pollInterval)
-    if (!Number.isInteger(seconds) || seconds < 30 || seconds > 86400) return setFormError('Poll interval must be between 30 and 86400 seconds.')
+    const seconds = supportsPoll ? Number(pollInterval) : (integration?.pollIntervalSeconds ?? 300)
+    if (supportsPoll && (!Number.isInteger(seconds) || seconds < 30 || seconds > 86400)) return setFormError('Poll interval must be between 30 and 86400 seconds.')
     const missingSecret = !integration && descriptor.secretFields.some((field) => field.required && !secrets[field.name]?.trim())
     if (missingSecret) return setFormError('Complete all required credential fields.')
     await onSubmit({ provider: descriptor.provider, name: name.trim(), endpoint: endpoint.trim(), config, allowPrivateNetwork: allowPrivate, pollIntervalSeconds: seconds }, secrets)
@@ -403,7 +404,7 @@ function IntegrationForm({ providers, integration, loading, onCancel, onSubmit }
           </Field>
           <Field label="Display name" htmlFor="integration-name"><Input id="integration-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={120} required /></Field>
           <Field label="HTTPS endpoint" hint="Example: https://jenkins.example.com" htmlFor="integration-endpoint"><Input id="integration-endpoint" type="url" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://jenkins.example.com" required /></Field>
-          <Field label="Poll interval (seconds)" htmlFor="integration-poll"><Input id="integration-poll" type="number" min={30} max={86400} value={pollInterval} onChange={(event) => setPollInterval(event.target.value)} required /></Field>
+          {supportsPoll && <Field label="Poll interval (seconds)" htmlFor="integration-poll"><Input id="integration-poll" type="number" min={30} max={86400} value={pollInterval} onChange={(event) => setPollInterval(event.target.value)} required /></Field>}
           {descriptor?.configFields.map((field) => <DynamicField key={field.name} field={field} value={config[field.name]} onChange={(value) => setConfig((current) => ({ ...current, [field.name]: value }))} />)}
         </div>
         <label className="flex items-start gap-3 rounded-lg border border-secondary p-3 text-sm text-secondary">
@@ -496,7 +497,7 @@ function BindingsCard({ canManage, integration, provider, projects, operations, 
             <Button disabled={!selectedProject} loading={busy === 'bind'} onClick={bind}>Bind Project</Button>
           </div>
         )}
-        {bindings.length === 0 ? <p className="text-sm text-tertiary">No Projects are bound yet.</p> : (
+        {bindings.length === 0 ? <p className="text-sm text-tertiary">{supportsDiscover ? 'No pipelines are bound yet.' : 'No Projects are bound yet.'}</p> : (
           <div className="divide-y divide-secondary rounded-lg border border-secondary">
             {bindings.map((binding) => (
               <div key={binding.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
