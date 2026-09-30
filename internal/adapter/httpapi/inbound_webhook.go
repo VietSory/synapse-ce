@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -293,16 +294,20 @@ func endpointWebhookAuthenticated(e ports.InboundWebhookEndpoint, matchCurrent, 
 }
 
 func gitLabSigningKey(secret []byte) ([]byte, bool) {
-	const prefix = "whsec_"
-	text := string(secret)
-	if !strings.HasPrefix(text, prefix) {
+	prefix := []byte("whsec_")
+	if !bytes.HasPrefix(secret, prefix) {
 		return make([]byte, sha256.Size), false
 	}
-	raw, err := base64.StdEncoding.Strict().DecodeString(text[len(prefix):])
-	if err != nil || len(raw) != sha256.Size {
+	encoded := secret[len(prefix):]
+	raw := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+	n, err := base64.StdEncoding.Strict().Decode(raw, encoded)
+	if err != nil || n != sha256.Size {
+		for i := range raw {
+			raw[i] = 0
+		}
 		return make([]byte, sha256.Size), false
 	}
-	return raw, true
+	return raw[:n], true
 }
 
 func gitLabSignatureMatches(key []byte, messageID, timestamp string, body []byte, presented string) bool {
