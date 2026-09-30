@@ -452,7 +452,7 @@ func TestInboundGitLabSigningTokenReplayWindowAndPrecedence(t *testing.T) {
 	// legacy token cannot downgrade an invalid signature.
 	bad := gitLabSignedHeaders(secret, body, time.Now(), "bad-signature-message", "33792a34-cac6-4fda-95a8-c58e00a3954e")
 	bad.Set(gitLabSignatureHeader, "v1,"+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, sha256.Size)))
-	bad.Set(gitLabTokenHeader, string(secret))
+	bad.Set(gitLabLegacyAuthHeader, string(secret))
 	assertHookCode(t, requestHookHeaders(h, path, body, bad), http.StatusUnauthorized)
 }
 
@@ -473,7 +473,7 @@ func TestInboundGitLabLegacyTokenAndFailedClaimRelease(t *testing.T) {
 	store.mu.Unlock()
 
 	headers := make(http.Header)
-	headers.Set(gitLabTokenHeader, string(secret))
+	headers.Set(gitLabLegacyAuthHeader, string(secret))
 	headers.Set(gitLabEventHeader, "Push Hook")
 	headers.Set(gitLabEventUUIDHeader, "43792a34-cac6-4fda-95a8-c58e00a3954e")
 	path := "/api/v1/hooks/" + hookIDA
@@ -506,7 +506,7 @@ func TestInboundGitLabInvalidPayloadIs400AndRetryable(t *testing.T) {
 	store.mu.Unlock()
 
 	headers := make(http.Header)
-	headers.Set(gitLabTokenHeader, string(secret))
+	headers.Set(gitLabLegacyAuthHeader, string(secret))
 	headers.Set(gitLabEventHeader, "Push Hook")
 	headers.Set(gitLabEventUUIDHeader, "53792a34-cac6-4fda-95a8-c58e00a3954e")
 	receiver.err = fmt.Errorf("%w: invalid GitLab webhook sha", shared.ErrValidation)
