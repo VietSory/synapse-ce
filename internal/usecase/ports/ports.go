@@ -1486,6 +1486,7 @@ type AcquireRequest struct {
 	Locator                   string // internal locator for a server-owned uploaded source package
 	Ref                       string // optional git branch/tag metadata (git kind only)
 	Commit                    string // optional immutable git commit to fetch and scan exactly
+	DisableGitCredentials     bool   // never resolve/inject a connector credential (untrusted fork hooks)
 	BaseRef                   string // optional validated Git comparison base ref
 	BaseCommit                string // optional immutable base commit from a previous analysis
 	RequireCodeQualityHistory bool   // optional hint to clone bounded history for code-quality behavioral hotspots
