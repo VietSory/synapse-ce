@@ -154,6 +154,7 @@ func TestGitLabForkMergeRequestDisablesBuildExecutionAtProjectBoundary(t *testin
 	receiver := newReceiverForTest(t, bindings, scans, nil)
 	body := []byte(`{
 		"object_attributes":{
+			"iid":17,
 			"source_branch":"fork/feature",
 			"source_project_id":22,
 			"target_project_id":11,
@@ -170,8 +171,23 @@ func TestGitLabForkMergeRequestDisablesBuildExecutionAtProjectBoundary(t *testin
 	if len(scans.calls) != 1 || !scans.calls[0].fork {
 		t.Fatalf("fork MR scan = %#v", scans.calls)
 	}
-	if scans.calls[0].ref != "fork/feature" || scans.calls[0].sha != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+	if scans.calls[0].ref != "refs/merge-requests/17/head" || scans.calls[0].sha != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("fork target = %#v", scans.calls[0])
+	}
+}
+
+func TestGitLabMergeRequestRequiresIIDForTargetSideRef(t *testing.T) {
+	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
+	scans := &fakeProjectScanner{}
+	receiver := newReceiverForTest(t, bindings, scans, nil)
+	body := []byte(`{"object_attributes":{"source_branch":"feature","source_project_id":11,"target_project_id":11,"last_commit":{"id":"cccccccccccccccccccccccccccccccccccccccc"}}}`)
+	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
+		Provider: "gitlab", EventType: "Merge Request Hook", EventID: "event-no-iid", Body: body,
+	}); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("missing iid error = %v, want validation", err)
+	}
+	if len(scans.calls) != 0 {
+		t.Fatalf("MR without target-side ref started scans: %#v", scans.calls)
 	}
 }
 
@@ -181,6 +197,7 @@ func TestGitLabMergeRequestMissingProjectIdentityFailsSafeAsFork(t *testing.T) {
 	receiver := newReceiverForTest(t, bindings, scans, nil)
 	body := []byte(`{
 		"object_attributes":{
+			"iid":18,
 			"source_branch":"feature",
 			"last_commit":{"id":"cccccccccccccccccccccccccccccccccccccccc"}
 		}

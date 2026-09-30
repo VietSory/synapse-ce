@@ -127,6 +127,7 @@ func parseGitLab(eventType string, body []byte) (gitLabTarget, bool, error) {
 	case "Merge Request Hook":
 		var payload struct {
 			ObjectAttributes struct {
+				IID             int64  `json:"iid"`
 				SourceBranch    string `json:"source_branch"`
 				SourceProjectID int64  `json:"source_project_id"`
 				TargetProjectID int64  `json:"target_project_id"`
@@ -138,11 +139,18 @@ func parseGitLab(eventType string, body []byte) (gitLabTarget, bool, error) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return gitLabTarget{}, false, fmt.Errorf("%w: invalid GitLab merge-request payload", shared.ErrValidation)
 		}
-		ref := strings.TrimSpace(payload.ObjectAttributes.SourceBranch)
+		branch := strings.TrimSpace(payload.ObjectAttributes.SourceBranch)
 		sha := strings.TrimSpace(payload.ObjectAttributes.LastCommit.ID)
-		if err := validateTarget(ref, sha); err != nil {
+		if err := validateTarget(branch, sha); err != nil {
 			return gitLabTarget{}, false, err
 		}
+		if payload.ObjectAttributes.IID <= 0 {
+			return gitLabTarget{}, false, fmt.Errorf("%w: invalid GitLab merge-request iid", shared.ErrValidation)
+		}
+		// GitLab publishes every MR head through the target repository, including
+		// private-fork MRs. Use that server-owned ref so the payload never selects
+		// a repository URL, then pin the checkout to last_commit.id downstream.
+		ref := fmt.Sprintf("refs/merge-requests/%d/head", payload.ObjectAttributes.IID)
 		// Missing project IDs fail safe as fork-like: the only consequence is
 		// disabling build-system execution. We never relax fork policy because
 		// an optional/malformed payload field was absent.
