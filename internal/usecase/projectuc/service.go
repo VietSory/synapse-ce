@@ -369,8 +369,8 @@ func (s *Service) StartWebhookAnalysis(ctx context.Context, actor string, tenant
 		return ports.ScanJob{}, err
 	}
 	request := ports.AcquireRequest{
-		Kind:   project.SourceGit,
-		Value:  p.SourceBinding.Value,
+		Kind:                  project.SourceGit,
+		Value:                 p.SourceBinding.Value,
 		Ref:                   strings.TrimSpace(ref),
 		Commit:                strings.ToLower(strings.TrimSpace(commit)),
 		DisableGitCredentials: fork,

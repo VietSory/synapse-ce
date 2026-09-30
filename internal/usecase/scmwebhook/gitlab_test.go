@@ -84,7 +84,6 @@ func gitLabIdentity() ports.InboundWebhookIdentity {
 	return ports.InboundWebhookIdentity{PublicID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", TenantID: "tenant", OwnerKind: "integration", OwnerID: "gitlab-hook"}
 }
 
-
 func TestGitLabReceiverDedupesReplayAndReleasesFailedAttempt(t *testing.T) {
 	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
 	scans := &fakeProjectScanner{}

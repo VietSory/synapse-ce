@@ -27,12 +27,12 @@ const (
 )
 
 type fakeHookStore struct {
-	mu       sync.Mutex
-	records  map[string]ports.InboundWebhookEndpoint
-	admitted   map[string]int
+	mu          sync.Mutex
+	records     map[string]ports.InboundWebhookEndpoint
+	admitted    map[string]int
 	eventClaims map[string]bool
-	fail       bool
-	decision *int
+	fail        bool
+	decision    *int
 }
 
 func (s *fakeHookStore) LookupInboundWebhook(_ context.Context, id string) (ports.InboundWebhookEndpoint, bool, error) {
@@ -386,7 +386,6 @@ func TestInboundWebhookEndpointAADIsTenantAndVersionBound(t *testing.T) {
 		t.Fatal("previous vault ciphertext was reusable under another version")
 	}
 }
-
 
 func gitLabSigningSecret(fill byte) []byte {
 	raw := bytes.Repeat([]byte{fill}, sha256.Size)
