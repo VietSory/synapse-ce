@@ -81,7 +81,7 @@ paths:
         X-Synapse-Hook-Signature over the raw body. GitLab endpoints prefer Standard
         Webhooks webhook-signature over webhook-id.timestamp.raw-body with a ±5 minute
         timestamp window, and fall back to X-Gitlab-Token only when no signature is
-        present. GitLab event UUIDs are deduplicated durably. No human bearer token is used.
+        present. GitLab uses webhook-id as the durable replay key when present, with X-Gitlab-Event-UUID as the legacy fallback. No human bearer token is used.
       security:
         - inboundWebhookHMAC: []
         - gitlabWebhookSignature: []

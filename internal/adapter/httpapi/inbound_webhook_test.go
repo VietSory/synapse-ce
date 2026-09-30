@@ -88,9 +88,11 @@ func (s *fakeHookStore) AdmitInboundWebhook(_ context.Context, id ports.InboundW
 }
 
 type verifiedHook struct {
-	tenant shared.ID
-	id     string
-	body   string
+	tenant    shared.ID
+	id        string
+	body      string
+	eventType string
+	eventID   string
 }
 type captureHookReceiver struct {
 	mu   sync.Mutex
@@ -105,7 +107,7 @@ func (c *captureHookReceiver) ReceiveInboundWebhook(ctx context.Context, id port
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.seen = append(c.seen, verifiedHook{tenant: tenant, id: id.PublicID, body: string(event.Body)})
+	c.seen = append(c.seen, verifiedHook{tenant: tenant, id: id.PublicID, body: string(event.Body), eventType: event.EventType, eventID: event.EventID})
 	return c.err
 }
 func (c *captureHookReceiver) snapshot() []verifiedHook {
@@ -436,14 +438,19 @@ func TestInboundGitLabSigningTokenWindowAndPrecedence(t *testing.T) {
 
 	path := "/api/v1/hooks/" + hookIDA
 	eventID := "13792a34-cac6-4fda-95a8-c58e00a3954e"
-	headers := gitLabSignedHeaders(secret, body, time.Now(), "f5e5f430-f57b-4e6e-9fac-d9128cd7232f", eventID)
+	messageID := "f5e5f430-f57b-4e6e-9fac-d9128cd7232f"
+	headers := gitLabSignedHeaders(secret, body, time.Now(), messageID, eventID)
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
 	// Transport authentication deliberately does not own provider replay
 	// semantics. A second authenticated delivery reaches the provider receiver;
 	// the GitLab receiver's event deduper is tested in scmwebhook.
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
-	if got := len(receiver.snapshot()); got != 2 {
+	seen := receiver.snapshot()
+	if got := len(seen); got != 2 {
 		t.Fatalf("authenticated deliveries reaching receiver = %d, want 2", got)
+	}
+	if seen[0].eventID != messageID {
+		t.Fatalf("signed delivery replay id = %q, want webhook-id %q", seen[0].eventID, messageID)
 	}
 
 	stale := gitLabSignedHeaders(secret, body, time.Now().Add(-6*time.Minute), "another-message-id", "23792a34-cac6-4fda-95a8-c58e00a3954e")
@@ -476,7 +483,8 @@ func TestInboundGitLabLegacyTokenReceiverRetry(t *testing.T) {
 	headers := make(http.Header)
 	headers.Set(gitLabLegacyAuthHeader, string(secret))
 	headers.Set(gitLabEventHeader, "Push Hook")
-	headers.Set(gitLabEventUUIDHeader, "43792a34-cac6-4fda-95a8-c58e00a3954e")
+	legacyEventID := "43792a34-cac6-4fda-95a8-c58e00a3954e"
+	headers.Set(gitLabEventUUIDHeader, legacyEventID)
 	path := "/api/v1/hooks/" + hookIDA
 
 	receiver.err = errors.New("temporary receiver failure")
@@ -484,8 +492,12 @@ func TestInboundGitLabLegacyTokenReceiverRetry(t *testing.T) {
 	receiver.err = nil
 	// A provider receiver failure is surfaced as 503 so GitLab can retry.
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
-	if got := len(receiver.snapshot()); got != 2 {
+	seen := receiver.snapshot()
+	if got := len(seen); got != 2 {
 		t.Fatalf("receiver calls across failed retry = %d, want 2", got)
+	}
+	if seen[0].eventID != legacyEventID {
+		t.Fatalf("legacy delivery replay id = %q, want event UUID %q", seen[0].eventID, legacyEventID)
 	}
 }
 

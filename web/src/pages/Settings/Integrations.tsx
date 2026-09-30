@@ -409,7 +409,7 @@ function IntegrationForm({ providers, integration, loading, onCancel, onSubmit }
         </div>
         <label className="flex items-start gap-3 rounded-lg border border-secondary p-3 text-sm text-secondary">
           <input type="checkbox" className="mt-0.5 size-4 accent-brand" checked={allowPrivate} onChange={(event) => setAllowPrivate(event.target.checked)} />
-          <span><strong className="block text-primary">Allow private network</strong>Only enable for explicitly approved internal Jenkins endpoints; public-network protections remain enforced per request.</span>
+          <span><strong className="block text-primary">Allow private network</strong>Only enable for explicitly approved self-hosted endpoints; public-network protections remain enforced per request.</span>
         </label>
         {!integration && descriptor?.secretFields.length > 0 && (
           <div className="grid gap-4 border-t border-secondary pt-4 md:grid-cols-2">

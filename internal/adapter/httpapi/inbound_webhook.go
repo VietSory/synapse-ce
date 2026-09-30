@@ -212,10 +212,26 @@ func (p *inboundWebhookPlane) verifyRequest(e ports.InboundWebhookEndpoint, publ
 
 func gitLabEventMetadata(header http.Header) (string, string, bool) {
 	eventType, typeOK := singleWebhookHeader(header, gitLabEventHeader)
-	eventID, idOK := singleWebhookHeader(header, gitLabEventUUIDHeader)
+	eventUUID, uuidOK := singleWebhookHeader(header, gitLabEventUUIDHeader)
 	eventType = strings.TrimSpace(eventType)
-	eventID = strings.TrimSpace(eventID)
-	return eventType, eventID, typeOK && idOK && eventType != "" && len(eventType) <= 64 && validWebhookUUID(eventID)
+	eventUUID = strings.TrimSpace(eventUUID)
+	if !typeOK || !uuidOK || eventType == "" || len(eventType) > 64 || !validWebhookUUID(eventUUID) {
+		return "", "", false
+	}
+
+	// GitLab 19.x webhook-id is the Standard Webhooks message id and is
+	// guaranteed to stay stable across retries. Prefer it as the replay key
+	// when present; older GitLab deliveries fall back to X-Gitlab-Event-UUID.
+	eventID := eventUUID
+	if values := header.Values(gitLabWebhookIDHeader); len(values) > 0 {
+		webhookID, idOK := singleWebhookHeader(header, gitLabWebhookIDHeader)
+		webhookID = strings.TrimSpace(webhookID)
+		if !idOK || webhookID == "" || len(webhookID) > 128 {
+			return "", "", false
+		}
+		eventID = webhookID
+	}
+	return eventType, eventID, true
 }
 
 func singleWebhookHeader(header http.Header, name string) (string, bool) {
