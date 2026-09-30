@@ -231,21 +231,22 @@ func (service *Service) SetEnabled(ctx context.Context, tenantID, integrationID 
 	if err != nil {
 		return integration.Integration{}, err
 	}
-	descriptor, err := service.registry.Descriptor(item.Provider)
-	if err != nil {
-		return integration.Integration{}, err
-	}
-	requirements := ports.IntegrationEnableRequirements{
-		RequireCredential:     len(descriptor.SecretFields) > 0,
-		RequireSuccessfulTest: descriptor.Supports(integration.CapabilityTestConnection),
-	}
-	if enabled && requirements.RequireCredential {
-		configured, err := service.store.IntegrationCredentialConfigured(tenantCtx, integrationID, credentialIdentity)
-		if err != nil {
-			return integration.Integration{}, err
+	requirements := ports.IntegrationEnableRequirements{}
+	if enabled {
+		descriptor, descriptorErr := service.registry.Descriptor(item.Provider)
+		if descriptorErr != nil {
+			return integration.Integration{}, descriptorErr
 		}
-		if !configured {
-			return integration.Integration{}, fmt.Errorf("%w: configure credentials before enabling the integration", shared.ErrConflict)
+		requirements.RequireCredential = len(descriptor.SecretFields) > 0
+		requirements.RequireSuccessfulTest = descriptor.Supports(integration.CapabilityTestConnection)
+		if requirements.RequireCredential {
+			configured, credentialErr := service.store.IntegrationCredentialConfigured(tenantCtx, integrationID, credentialIdentity)
+			if credentialErr != nil {
+				return integration.Integration{}, credentialErr
+			}
+			if !configured {
+				return integration.Integration{}, fmt.Errorf("%w: configure credentials before enabling the integration", shared.ErrConflict)
+			}
 		}
 	}
 	action := "integration.disabled"
