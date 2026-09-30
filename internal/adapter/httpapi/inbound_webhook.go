@@ -160,7 +160,21 @@ func (p *inboundWebhookPlane) handle(w http.ResponseWriter, r *http.Request) {
 
 	// Bind ONLY the authenticated record's tenant; do not use TenantOrDefault.
 	ctx := shared.WithTenant(r.Context(), endpoint.TenantID)
+	if event.EventID != "" {
+		claimed, claimErr := p.store.ClaimInboundWebhookEvent(ctx, identity, endpoint.Provider, event.EventID, time.Now())
+		if claimErr != nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "webhook_unavailable"})
+			return
+		}
+		if !claimed {
+			writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+			return
+		}
+	}
 	if err := p.receiver.ReceiveInboundWebhook(ctx, identity, event); err != nil {
+		if event.EventID != "" {
+			_ = p.store.ReleaseInboundWebhookEvent(ctx, identity, endpoint.Provider, event.EventID)
+		}
 		writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "webhook_receiver_unavailable"})
 		return
 	}
