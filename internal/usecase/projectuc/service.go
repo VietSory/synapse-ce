@@ -345,8 +345,9 @@ func (s *Service) SetPullRequestDecoration(ctx context.Context, actor string, te
 
 // StartWebhookAnalysis starts a server-owned project scan from authenticated SCM
 // metadata. The repository URL always comes from the persisted project binding;
-// callers may supply only a branch/ref label and an immutable commit SHA.
-func (s *Service) StartWebhookAnalysis(ctx context.Context, actor string, tenantID, projectID shared.ID, ref, commit string, fork bool) (ports.ScanJob, error) {
+// callers may supply only a source-ref label, an optional server-owned fetch ref,
+// and an immutable commit SHA.
+func (s *Service) StartWebhookAnalysis(ctx context.Context, actor string, tenantID, projectID shared.ID, ref, fetchRef, commit string, fork bool) (ports.ScanJob, error) {
 	if err := requireActor(actor); err != nil {
 		return ports.ScanJob{}, err
 	}
@@ -372,6 +373,7 @@ func (s *Service) StartWebhookAnalysis(ctx context.Context, actor string, tenant
 		Kind:                  project.SourceGit,
 		Value:                 p.SourceBinding.Value,
 		Ref:                   strings.TrimSpace(ref),
+		FetchRef:              strings.TrimSpace(fetchRef),
 		Commit:                strings.ToLower(strings.TrimSpace(commit)),
 		DisableGitCredentials: fork,
 	}

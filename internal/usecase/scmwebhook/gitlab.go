@@ -24,7 +24,7 @@ type BindingReader interface {
 }
 
 type ProjectScanner interface {
-	StartWebhookAnalysis(context.Context, string, shared.ID, shared.ID, string, string, bool) (ports.ScanJob, error)
+	StartWebhookAnalysis(context.Context, string, shared.ID, shared.ID, string, string, string, bool) (ports.ScanJob, error)
 }
 
 // Receiver dispatches authenticated SCM webhook events without accepting a
@@ -83,7 +83,7 @@ func (r *Receiver) ReceiveInboundWebhook(ctx context.Context, identity ports.Inb
 	}
 	if _, err := r.projects.StartWebhookAnalysis(
 		ctx, "gitlab-webhook", identity.TenantID, projectID,
-		target.Ref, target.SHA, target.Fork,
+		target.Ref, target.FetchRef, target.SHA, target.Fork,
 	); err != nil {
 		return fmt.Errorf("start GitLab webhook analysis: %w", err)
 	}
@@ -92,9 +92,10 @@ func (r *Receiver) ReceiveInboundWebhook(ctx context.Context, identity ports.Inb
 }
 
 type gitLabTarget struct {
-	Ref  string
-	SHA  string
-	Fork bool
+	Ref      string
+	FetchRef string
+	SHA      string
+	Fork     bool
 }
 
 func parseGitLab(eventType string, body []byte) (gitLabTarget, bool, error) {
@@ -148,16 +149,16 @@ func parseGitLab(eventType string, body []byte) (gitLabTarget, bool, error) {
 			return gitLabTarget{}, false, fmt.Errorf("%w: invalid GitLab merge-request iid", shared.ErrValidation)
 		}
 		// GitLab publishes every MR head through the target repository, including
-		// private-fork MRs. Use that server-owned ref so the payload never selects
-		// a repository URL, then pin the checkout to last_commit.id downstream.
-		ref := fmt.Sprintf("refs/merge-requests/%d/head", payload.ObjectAttributes.IID)
+		// private-fork MRs. Keep the human source branch as Ref for Project history,
+		// and carry the target-side server-owned ref only as the acquisition FetchRef.
+		fetchRef := fmt.Sprintf("refs/merge-requests/%d/head", payload.ObjectAttributes.IID)
 		// Missing project IDs fail safe as fork-like: the only consequence is
 		// disabling build-system execution. We never relax fork policy because
 		// an optional/malformed payload field was absent.
 		fork := payload.ObjectAttributes.SourceProjectID == 0 ||
 			payload.ObjectAttributes.TargetProjectID == 0 ||
 			payload.ObjectAttributes.SourceProjectID != payload.ObjectAttributes.TargetProjectID
-		return gitLabTarget{Ref: ref, SHA: sha, Fork: fork}, true, nil
+		return gitLabTarget{Ref: branch, FetchRef: fetchRef, SHA: sha, Fork: fork}, true, nil
 	default:
 		// The endpoint may receive other GitLab hook types during configuration
 		// tests. Authenticated unsupported events are acknowledged but never scan.

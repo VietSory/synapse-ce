@@ -1484,7 +1484,8 @@ type AcquireRequest struct {
 	Kind                      string // local | git | archive | upload | image (default: local)
 	Value                     string // path, git URL, archive path, or image ref
 	Locator                   string // internal locator for a server-owned uploaded source package
-	Ref                       string // optional git branch/tag metadata (git kind only)
+	Ref                       string // optional git branch/tag metadata recorded with the scan
+	FetchRef                  string // optional server-owned git ref used only to fetch a pinned Commit
 	Commit                    string // optional immutable git commit to fetch and scan exactly
 	DisableGitCredentials     bool   // never resolve/inject a connector credential (untrusted fork hooks)
 	BaseRef                   string // optional validated Git comparison base ref

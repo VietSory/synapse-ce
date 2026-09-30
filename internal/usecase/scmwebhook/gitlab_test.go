@@ -65,9 +65,9 @@ func (f *fakeBindingReader) ListIntegrationBindings(context.Context, shared.ID) 
 }
 
 type webhookScanCall struct {
-	actor, ref, sha string
-	tenant, project shared.ID
-	fork            bool
+	actor, ref, fetchRef, sha string
+	tenant, project           shared.ID
+	fork                      bool
 }
 
 type fakeProjectScanner struct {
@@ -75,8 +75,8 @@ type fakeProjectScanner struct {
 	err   error
 }
 
-func (f *fakeProjectScanner) StartWebhookAnalysis(_ context.Context, actor string, tenant, project shared.ID, ref, sha string, fork bool) (ports.ScanJob, error) {
-	f.calls = append(f.calls, webhookScanCall{actor: actor, tenant: tenant, project: project, ref: ref, sha: sha, fork: fork})
+func (f *fakeProjectScanner) StartWebhookAnalysis(_ context.Context, actor string, tenant, project shared.ID, ref, fetchRef, sha string, fork bool) (ports.ScanJob, error) {
+	f.calls = append(f.calls, webhookScanCall{actor: actor, tenant: tenant, project: project, ref: ref, fetchRef: fetchRef, sha: sha, fork: fork})
 	return ports.ScanJob{}, f.err
 }
 
@@ -171,7 +171,9 @@ func TestGitLabForkMergeRequestDisablesBuildExecutionAtProjectBoundary(t *testin
 	if len(scans.calls) != 1 || !scans.calls[0].fork {
 		t.Fatalf("fork MR scan = %#v", scans.calls)
 	}
-	if scans.calls[0].ref != "refs/merge-requests/17/head" || scans.calls[0].sha != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+	if scans.calls[0].ref != "fork/feature" ||
+		scans.calls[0].fetchRef != "refs/merge-requests/17/head" ||
+		scans.calls[0].sha != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("fork target = %#v", scans.calls[0])
 	}
 }

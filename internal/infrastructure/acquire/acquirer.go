@@ -147,7 +147,7 @@ func (a *Acquirer) Acquire(ctx context.Context, req ports.AcquireRequest) (*port
 	case "", ports.TargetLocal:
 		return acquireLocal(req.Value, a.maxWorkspaceBytes)
 	case ports.TargetGit:
-		return a.acquireGit(ctx, req.Value, req.Ref, req.Commit, req.BaseRef, req.BaseCommit, req.RequireCodeQualityHistory, req.DisableGitCredentials)
+		return a.acquireGit(ctx, req.Value, req.Ref, req.FetchRef, req.Commit, req.BaseRef, req.BaseCommit, req.RequireCodeQualityHistory, req.DisableGitCredentials)
 	case ports.TargetArchive:
 		return acquireArchive(req.Value, a.maxWorkspaceBytes)
 	case ports.TargetImage:
@@ -419,11 +419,11 @@ func (a *Acquirer) gitAuth(ctx context.Context, rawURL string) (cloneURL string,
 	return u.String(), authEnv, []string{credDir}, cleanup, nil
 }
 
-func (a *Acquirer) acquireGit(ctx context.Context, url, ref, commit, baseRef, baseCommit string, cqHistory, disableCredentials bool) (*ports.Workspace, error) {
+func (a *Acquirer) acquireGit(ctx context.Context, url, ref, fetchRef, commit, baseRef, baseCommit string, cqHistory, disableCredentials bool) (*ports.Workspace, error) {
 	if err := validateGitURL(url); err != nil {
 		return nil, err
 	}
-	for _, candidate := range []string{ref, baseRef} {
+	for _, candidate := range []string{ref, fetchRef, baseRef} {
 		if err := validateGitRef(candidate); err != nil {
 			return nil, err
 		}
@@ -548,15 +548,14 @@ func (a *Acquirer) acquireGit(ctx context.Context, url, ref, commit, baseRef, ba
 
 	if commit != "" {
 		// Webhook scans are pinned to the authenticated payload SHA, while the
-		// repository URL remains the stored project source. GitLab merge requests
-		// publish refs/merge-requests/:iid/head in the TARGET repository, including
-		// private-fork MRs; prefer that ref when supplied, then verify it resolves
-		// to the signed payload SHA. Push hooks retain the direct-SHA path.
-		fetchRef := commit
-		if gitLabMergeRequestRef.MatchString(ref) {
-			fetchRef = ref
+		// repository URL remains the stored project source. FetchRef is an optional
+		// server-owned ref used only to make an otherwise-hidden commit reachable;
+		// Ref remains user-facing source metadata. Always verify HEAD == Commit.
+		fetchTarget := commit
+		if fetchRef != "" {
+			fetchTarget = fetchRef
 		}
-		if !a.gitFetch(ctx, dir, url, gitEnv, roPaths, fetchRef, "refs/synapse-webhook/head") {
+		if !a.gitFetch(ctx, dir, url, gitEnv, roPaths, fetchTarget, "refs/synapse-webhook/head") {
 			_ = cleanup()
 			return nil, fmt.Errorf("git fetch pinned commit failed")
 		}
@@ -678,10 +677,7 @@ func (a *Acquirer) gitRead(ctx context.Context, dir, url string, gitEnv []string
 	return out, err == nil
 }
 
-var (
-	gitCommitRE           = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
-	gitLabMergeRequestRef = regexp.MustCompile(`^refs/merge-requests/[1-9][0-9]*/head$`)
-)
+var gitCommitRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
 
 func (a *Acquirer) gitCommit(ctx context.Context, dir, url string, gitEnv []string) (string, error) {
 	var out []byte

@@ -104,7 +104,8 @@ func TestAcquireGitPinnedMergeRequestRef(t *testing.T) {
 	a.allowInternalHosts = true
 	ws, err := a.Acquire(context.Background(), ports.AcquireRequest{
 		Kind: ports.TargetGit, Value: srv.URL + "/repo.git",
-		Ref: "refs/merge-requests/7/head", Commit: sha, DisableGitCredentials: true,
+		Ref: "fork-feature", FetchRef: "refs/merge-requests/7/head",
+		Commit: sha, DisableGitCredentials: true,
 	})
 	if err != nil {
 		t.Fatalf("acquire target-side MR ref: %v", err)
