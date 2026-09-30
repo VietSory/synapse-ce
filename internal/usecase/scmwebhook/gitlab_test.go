@@ -4,11 +4,56 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/integration"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
+
+type fakeWebhookDeduper struct {
+	claimed  map[string]bool
+	releases int
+	err      error
+}
+
+func newFakeWebhookDeduper() *fakeWebhookDeduper {
+	return &fakeWebhookDeduper{claimed: map[string]bool{}}
+}
+
+func (f *fakeWebhookDeduper) ClaimInboundWebhookEvent(_ context.Context, id ports.InboundWebhookIdentity, provider, eventID string, _ time.Time) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	key := id.TenantID.String() + ":" + id.PublicID + ":" + provider + ":" + eventID
+	if f.claimed[key] {
+		return false, nil
+	}
+	f.claimed[key] = true
+	return true, nil
+}
+
+func (f *fakeWebhookDeduper) ReleaseInboundWebhookEvent(_ context.Context, id ports.InboundWebhookIdentity, provider, eventID string) error {
+	delete(f.claimed, id.TenantID.String()+":"+id.PublicID+":"+provider+":"+eventID)
+	f.releases++
+	return nil
+}
+
+type webhookClock struct{ at time.Time }
+
+func (c webhookClock) Now() time.Time { return c.at }
+
+func newReceiverForTest(t *testing.T, bindings BindingReader, scans ProjectScanner, deduper *fakeWebhookDeduper) *Receiver {
+	t.Helper()
+	if deduper == nil {
+		deduper = newFakeWebhookDeduper()
+	}
+	receiver, err := NewReceiver(bindings, scans, deduper, webhookClock{at: time.Unix(100, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receiver
+}
 
 type fakeBindingReader struct {
 	bindings []integration.Binding
@@ -39,13 +84,49 @@ func gitLabIdentity() ports.InboundWebhookIdentity {
 	return ports.InboundWebhookIdentity{PublicID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", TenantID: "tenant", OwnerKind: "integration", OwnerID: "gitlab-hook"}
 }
 
+
+func TestGitLabReceiverDedupesReplayAndReleasesFailedAttempt(t *testing.T) {
+	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
+	scans := &fakeProjectScanner{}
+	deduper := newFakeWebhookDeduper()
+	receiver := newReceiverForTest(t, bindings, scans, deduper)
+	event := ports.InboundWebhookEvent{
+		Provider: "gitlab", EventType: "Push Hook", EventID: "13792a34-cac6-4fda-95a8-c58e00a3954e",
+		Body: []byte(`{"ref":"refs/heads/main","checkout_sha":"dddddddddddddddddddddddddddddddddddddddd"}`),
+	}
+	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), event); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), event); err != nil {
+		t.Fatal(err)
+	}
+	if len(scans.calls) != 1 {
+		t.Fatalf("replayed event started %d scans, want 1", len(scans.calls))
+	}
+
+	failingScans := &fakeProjectScanner{err: errors.New("queue unavailable")}
+	deduper2 := newFakeWebhookDeduper()
+	receiver = newReceiverForTest(t, bindings, failingScans, deduper2)
+	event.EventID = "23792a34-cac6-4fda-95a8-c58e00a3954e"
+	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), event); err == nil {
+		t.Fatal("failed scan start unexpectedly succeeded")
+	}
+	if deduper2.releases != 1 {
+		t.Fatalf("failed processing released %d claims, want 1", deduper2.releases)
+	}
+	failingScans.err = nil
+	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), event); err != nil {
+		t.Fatal(err)
+	}
+	if len(failingScans.calls) != 2 {
+		t.Fatalf("retry calls = %d, want 2 attempts", len(failingScans.calls))
+	}
+}
+
 func TestGitLabPushRoutesOnlyBoundProjectAndIgnoresPayloadURL(t *testing.T) {
 	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
 	scans := &fakeProjectScanner{}
-	receiver, err := NewReceiver(bindings, scans)
-	if err != nil {
-		t.Fatal(err)
-	}
+	receiver := newReceiverForTest(t, bindings, scans, nil)
 	body := []byte(`{
 		"ref":"refs/heads/main",
 		"checkout_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -71,7 +152,7 @@ func TestGitLabPushRoutesOnlyBoundProjectAndIgnoresPayloadURL(t *testing.T) {
 func TestGitLabForkMergeRequestDisablesBuildExecutionAtProjectBoundary(t *testing.T) {
 	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
 	scans := &fakeProjectScanner{}
-	receiver, _ := NewReceiver(bindings, scans)
+	receiver := newReceiverForTest(t, bindings, scans, nil)
 	body := []byte(`{
 		"object_attributes":{
 			"source_branch":"fork/feature",
@@ -98,7 +179,7 @@ func TestGitLabForkMergeRequestDisablesBuildExecutionAtProjectBoundary(t *testin
 func TestGitLabMergeRequestMissingProjectIdentityFailsSafeAsFork(t *testing.T) {
 	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
 	scans := &fakeProjectScanner{}
-	receiver, _ := NewReceiver(bindings, scans)
+	receiver := newReceiverForTest(t, bindings, scans, nil)
 	body := []byte(`{
 		"object_attributes":{
 			"source_branch":"feature",
@@ -121,7 +202,7 @@ func TestGitLabReceiverFailsClosedOnAmbiguousBindingOrInvalidSHA(t *testing.T) {
 		{IntegrationID: "gitlab-hook", ProjectID: "project-1"},
 		{IntegrationID: "gitlab-hook", ProjectID: "project-2"},
 	}}
-	receiver, _ := NewReceiver(multi, scans)
+	receiver := newReceiverForTest(t, multi, scans, nil)
 	body := []byte(`{"ref":"refs/heads/main","checkout_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
 		Provider: "gitlab", EventType: "Push Hook", Body: body,
@@ -130,7 +211,7 @@ func TestGitLabReceiverFailsClosedOnAmbiguousBindingOrInvalidSHA(t *testing.T) {
 	}
 
 	single := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
-	receiver, _ = NewReceiver(single, scans)
+	receiver = newReceiverForTest(t, single, scans, nil)
 	bad := []byte(`{"ref":"refs/heads/main","checkout_sha":"NOT-A-SHA"}`)
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
 		Provider: "gitlab", EventType: "Push Hook", Body: bad,
@@ -145,7 +226,7 @@ func TestGitLabReceiverFailsClosedOnAmbiguousBindingOrInvalidSHA(t *testing.T) {
 func TestGitLabUnsupportedAndDeleteEventsAreNoOps(t *testing.T) {
 	bindings := &fakeBindingReader{bindings: []integration.Binding{{IntegrationID: "gitlab-hook", ProjectID: "project-1"}}}
 	scans := &fakeProjectScanner{}
-	receiver, _ := NewReceiver(bindings, scans)
+	receiver := newReceiverForTest(t, bindings, scans, nil)
 	if err := receiver.ReceiveInboundWebhook(context.Background(), gitLabIdentity(), ports.InboundWebhookEvent{
 		Provider: "gitlab", EventType: "Pipeline Hook", Body: []byte(`{"url":"https://attacker.example"}`),
 	}); err != nil {
