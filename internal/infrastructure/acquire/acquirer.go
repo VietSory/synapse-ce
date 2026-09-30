@@ -623,7 +623,7 @@ func (a *Acquirer) gitFetch(ctx context.Context, dir, url string, gitEnv, roPath
 }
 
 func (a *Acquirer) gitCheckoutDetached(ctx context.Context, dir, url string, gitEnv []string, ref string) bool {
-	_, ok := a.gitRead(ctx, dir, url, gitEnv, "checkout", "--detach", "--", ref)
+	_, ok := a.gitRead(ctx, dir, url, gitEnv, "checkout", "--detach", ref)
 	return ok
 }
 
