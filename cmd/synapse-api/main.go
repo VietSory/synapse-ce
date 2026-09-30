@@ -55,6 +55,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/egressbroker"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/fleetca"
 	azurepipelinesintegration "github.com/KKloudTarus/synapse-ce/internal/infrastructure/integration/azurepipelines"
+	gitlabintegration "github.com/KKloudTarus/synapse-ce/internal/infrastructure/integration/gitlab"
 	jenkinsintegration "github.com/KKloudTarus/synapse-ce/internal/infrastructure/integration/jenkins"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/llm/openai"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/logstream"
@@ -964,6 +965,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := azurepipelinesintegration.Register(integrationRegistry); err != nil {
+		log.Error("integration provider registry init failed", "err", err)
+		os.Exit(1)
+	}
+	if err := gitlabintegration.Register(integrationRegistry); err != nil {
 		log.Error("integration provider registry init failed", "err", err)
 		os.Exit(1)
 	}
