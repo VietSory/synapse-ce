@@ -41,6 +41,12 @@ func (s *fakeHookStore) LookupInboundWebhook(_ context.Context, id string) (port
 	e, ok := s.records[id]
 	return e, ok, nil
 }
+func (s *fakeHookStore) ClaimInboundWebhookEvent(_ context.Context, _ ports.InboundWebhookIdentity, _, _ string, _ time.Time) (bool, error) {
+	return true, nil
+}
+func (s *fakeHookStore) ReleaseInboundWebhookEvent(_ context.Context, _ ports.InboundWebhookIdentity, _, _ string) error {
+	return nil
+}
 func (s *fakeHookStore) AdmitInboundWebhook(_ context.Context, id ports.InboundWebhookIdentity, version int, usedPrevious bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,14 +82,14 @@ type captureHookReceiver struct {
 	err  error
 }
 
-func (c *captureHookReceiver) ReceiveInboundWebhook(ctx context.Context, id ports.InboundWebhookIdentity, body []byte) error {
+func (c *captureHookReceiver) ReceiveInboundWebhook(ctx context.Context, id ports.InboundWebhookIdentity, event ports.InboundWebhookEvent) error {
 	tenant, ok := shared.TenantFrom(ctx)
 	if !ok || tenant.IsZero() || tenant != id.TenantID {
 		return errors.New("receiver missing or mismatched authenticated tenant")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.seen = append(c.seen, verifiedHook{tenant: tenant, id: id.PublicID, body: string(body)})
+	c.seen = append(c.seen, verifiedHook{tenant: tenant, id: id.PublicID, body: string(event.Body)})
 	return c.err
 }
 func (c *captureHookReceiver) snapshot() []verifiedHook {
