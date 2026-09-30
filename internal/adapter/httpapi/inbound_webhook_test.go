@@ -418,7 +418,7 @@ func requestHookHeaders(h http.Handler, path string, body []byte, header http.He
 	return rec
 }
 
-func TestInboundGitLabSigningTokenReplayWindowAndPrecedence(t *testing.T) {
+func TestInboundGitLabSigningTokenWindowAndPrecedence(t *testing.T) {
 	h, store, receiver, cipher := setupHook(t)
 	body := []byte(`{"ref":"refs/heads/main","checkout_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 	secret := gitLabSigningSecret('s')
@@ -438,11 +438,12 @@ func TestInboundGitLabSigningTokenReplayWindowAndPrecedence(t *testing.T) {
 	eventID := "13792a34-cac6-4fda-95a8-c58e00a3954e"
 	headers := gitLabSignedHeaders(secret, body, time.Now(), "f5e5f430-f57b-4e6e-9fac-d9128cd7232f", eventID)
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
-	// GitLab retries carry the same event UUID. They are acknowledged without
-	// invoking the receiver a second time.
+	// Transport authentication deliberately does not own provider replay
+	// semantics. A second authenticated delivery reaches the provider receiver;
+	// the GitLab receiver's event deduper is tested in scmwebhook.
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
-	if got := len(receiver.snapshot()); got != 1 {
-		t.Fatalf("receiver calls after replay = %d, want 1", got)
+	if got := len(receiver.snapshot()); got != 2 {
+		t.Fatalf("authenticated deliveries reaching receiver = %d, want 2", got)
 	}
 
 	stale := gitLabSignedHeaders(secret, body, time.Now().Add(-6*time.Minute), "another-message-id", "23792a34-cac6-4fda-95a8-c58e00a3954e")
@@ -456,7 +457,7 @@ func TestInboundGitLabSigningTokenReplayWindowAndPrecedence(t *testing.T) {
 	assertHookCode(t, requestHookHeaders(h, path, body, bad), http.StatusUnauthorized)
 }
 
-func TestInboundGitLabLegacyTokenAndFailedClaimRelease(t *testing.T) {
+func TestInboundGitLabLegacyTokenReceiverRetry(t *testing.T) {
 	h, store, receiver, cipher := setupHook(t)
 	body := []byte(`{"ref":"refs/heads/main","checkout_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
 	secret := bytes.Repeat([]byte{'l'}, 32)
@@ -481,7 +482,7 @@ func TestInboundGitLabLegacyTokenAndFailedClaimRelease(t *testing.T) {
 	receiver.err = errors.New("temporary receiver failure")
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusServiceUnavailable)
 	receiver.err = nil
-	// The failed attempt released its replay claim, so GitLab's retry executes.
+	// A provider receiver failure is surfaced as 503 so GitLab can retry.
 	assertHookCode(t, requestHookHeaders(h, path, body, headers), http.StatusAccepted)
 	if got := len(receiver.snapshot()); got != 2 {
 		t.Fatalf("receiver calls across failed retry = %d, want 2", got)
