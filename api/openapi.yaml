@@ -94,6 +94,8 @@ paths:
       requestBody:
         required: true
         content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
           application/octet-stream:
             schema: {type: string, format: binary, maxLength: 1048576}
       responses:
