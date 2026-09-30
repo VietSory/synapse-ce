@@ -27,6 +27,18 @@ const provider: IntegrationProviderDescriptor = {
   ],
 }
 
+const gitlabProvider: IntegrationProviderDescriptor = {
+  provider: 'gitlab', name: 'GitLab', description: 'Inbound GitLab webhooks',
+  capabilities: [], configFields: [], secretFields: [],
+}
+
+const gitlabIntegration: Integration = {
+  id: 'integration-gitlab', provider: 'gitlab', name: 'GitLab inbound', endpoint: 'https://gitlab.example.com',
+  config: {}, allowPrivateNetwork: false, pollIntervalSeconds: 300, enabled: false, archived: false,
+  version: 1, connectionRevision: 1, credentialRevision: 0, credentialConfigured: false,
+  createdAt: '2026-09-30T10:00:00Z', updatedAt: '2026-09-30T10:00:00Z',
+}
+
 const integration: Integration = {
   id: 'integration-1', provider: 'jenkins', name: 'Production Jenkins', endpoint: 'https://jenkins.example.com',
   config: {}, allowPrivateNetwork: false, pollIntervalSeconds: 300, enabled: false, archived: false,
@@ -135,6 +147,27 @@ describe('Integrations settings', () => {
     render(<MemoryRouter><Integrations /></MemoryRouter>)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Provider catalog unavailable')
+  })
+
+  it('enables an inbound-only provider without credentials, tests, discovery or polling', async () => {
+    vi.mocked(api.listIntegrationProviders).mockResolvedValue([provider, gitlabProvider])
+    vi.mocked(api.listIntegrations).mockResolvedValue([gitlabIntegration])
+    vi.mocked(api.getIntegration).mockResolvedValue(gitlabIntegration)
+    vi.mocked(api.listIntegrationOperations).mockResolvedValue([])
+    vi.mocked(api.setIntegrationEnabled).mockResolvedValue({ ...gitlabIntegration, enabled: true, version: 2 })
+
+    render(<MemoryRouter><Integrations /></MemoryRouter>)
+
+    expect(await screen.findByText('Not required')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Test connection' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Discover' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Poll now' })).not.toBeInTheDocument()
+
+    const enable = screen.getByRole('button', { name: 'Enable' })
+    expect(enable).toBeEnabled()
+    fireEvent.click(enable)
+    await waitFor(() => expect(api.setIntegrationEnabled).toHaveBeenCalledWith(gitlabIntegration, true))
   })
 
   it('requires a successful test before enabling and never renders stored plaintext', async () => {
