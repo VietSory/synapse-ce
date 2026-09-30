@@ -1476,12 +1476,13 @@ func main() {
 			log.Error("inbound webhook runtime DB role cannot enforce tenant isolation", "err", err)
 			os.Exit(1)
 		}
-		scmReceiver, receiverErr := scmwebhook.NewReceiver(integrationStore, projectService)
+		inboundWebhookStore := postgres.NewInboundWebhookRepository(databasePool)
+		scmReceiver, receiverErr := scmwebhook.NewReceiver(integrationStore, projectService, inboundWebhookStore, clock)
 		if receiverErr != nil {
 			log.Error("inbound SCM webhook receiver init failed", "err", receiverErr)
 			os.Exit(1)
 		}
-		router.SetInboundWebhookPlane(postgres.NewInboundWebhookRepository(databasePool), vaultCipher, scmReceiver)
+		router.SetInboundWebhookPlane(inboundWebhookStore, vaultCipher, scmReceiver)
 	}
 	if cfg.OwnershipMode != "off" && cfg.OwnershipMode != "observe" && cfg.OwnershipMode != "enforce" {
 		log.Error("SYNAPSE_OWNERSHIP_MODE must be off, observe or enforce")
